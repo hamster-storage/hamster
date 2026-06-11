@@ -16,16 +16,9 @@ type nodeClock struct {
 
 func (c *nodeClock) Now() time.Time { return c.s.now }
 
-// AfterFunc schedules fn as an event in the global queue. The callback
-// captures the node's epoch at scheduling time: if the node crashes before
-// the timer fires, the epoch moves on and the callback is dropped, because a
-// process's timers die with the process.
+// AfterFunc schedules fn as an event in the global queue. The callback is
+// epoch-fenced: if the node crashes before the timer fires, it is dropped,
+// because a process's timers die with the process.
 func (c *nodeClock) AfterFunc(d time.Duration, fn func()) seam.Timer {
-	epoch := c.slot.epoch
-	return c.s.schedule(d, func() {
-		if c.slot.epoch != epoch || c.slot.node == nil {
-			return
-		}
-		fn()
-	})
+	return c.s.schedule(d, c.slot.fence(fn))
 }

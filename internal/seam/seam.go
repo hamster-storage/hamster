@@ -1,5 +1,5 @@
 // Package seam defines the interfaces between Hamster's core logic and the
-// outside world: time, the network, and the disk.
+// outside world: the event loop, time, the network, and the disk.
 //
 // Core code never touches the OS directly; it receives these interfaces.
 // Each one has two implementations: a deterministic, fault-injectable one
@@ -17,6 +17,22 @@ import "time"
 
 // NodeID identifies a node in the cluster.
 type NodeID string
+
+// Loop is a node's event loop: the single logical thread that owns all of
+// the node's core state (docs/SIMULATION.md — "core state is owned by its
+// event loop, full stop").
+//
+// Post delivers fn to the loop. Functions run one at a time, each to
+// completion, and posts from a single caller run in post order. Post never
+// blocks and is safe to call from any goroutine: it is how the data plane
+// and the adapters hand results back to the core ("shard 3 durable"), and
+// how core code defers work to itself.
+//
+// Posted work dies with the process, like timers: a function posted before
+// a crash (simulation) or stop (production) may never run.
+type Loop interface {
+	Post(fn func())
+}
 
 // Clock provides the current time and timer scheduling.
 //
@@ -36,8 +52,8 @@ type Clock interface {
 
 // Timer is a handle to a pending AfterFunc callback.
 type Timer interface {
-	// Stop cancels the timer. It reports false if the callback already ran
-	// or was already stopped.
+	// Stop cancels the timer. It reports false if the timer already fired
+	// (its callback ran, or is committed to run) or was already stopped.
 	Stop() bool
 }
 

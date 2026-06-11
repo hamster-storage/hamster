@@ -42,6 +42,7 @@ type BootFunc func(w *World) Node
 // simulated side of the seam (see internal/seam).
 type World struct {
 	ID        seam.NodeID
+	Loop      seam.Loop
 	Clock     seam.Clock
 	Transport seam.Transport
 	Disk      seam.Disk
@@ -104,6 +105,7 @@ func (s *Sim) AddNode(id seam.NodeID, boot BootFunc) {
 	sl := &slot{id: id, boot: boot, disk: newDisk()}
 	sl.world = &World{
 		ID:        id,
+		Loop:      &nodeLoop{s: s, slot: sl},
 		Clock:     &nodeClock{s: s, slot: sl},
 		Transport: &nodeTransport{s: s, from: id},
 		Disk:      sl.disk,
@@ -190,6 +192,19 @@ func (s *Sim) deliver(from, to seam.NodeID, msg []byte) {
 		return
 	}
 	sl.node.HandleMessage(from, msg)
+}
+
+// fence wraps fn so it runs only if the node has not crashed since the
+// wrap: timers and posted work die with the process. The check also covers
+// the crashed-but-not-restarted window, when the node is nil.
+func (sl *slot) fence(fn func()) func() {
+	epoch := sl.epoch
+	return func() {
+		if sl.epoch != epoch || sl.node == nil {
+			return
+		}
+		fn()
+	}
 }
 
 func (s *Sim) mustSlot(id seam.NodeID) *slot {
