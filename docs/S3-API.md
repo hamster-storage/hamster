@@ -29,6 +29,7 @@ API groups land with the release that builds their machinery, matching the [road
 |---|---|
 | v0.5 | Versioning: `PutBucketVersioning`, `GetBucketVersioning`, `ListObjectVersions`, `GetObject`/`HeadObject`/`DeleteObject` with `versionId`. The metadata already models version lists from v0.1; this release exposes them. |
 | v0.6 | Object lock: `PutObjectLockConfiguration`, `GetObjectLockConfiguration`, `PutObjectRetention`, `GetObjectRetention`, `PutObjectLegalHold`, `GetObjectLegalHold`, plus the `x-amz-object-lock-*` headers on PUT. |
+| v0.7 | Encryption at rest ([ADR-0021](adr/0021-envelope-encryption-at-rest.md)): `x-amz-server-side-encryption: AES256` reported on PUT/HEAD/GET when the cluster encrypts (SSE-S3 semantics; the key is cluster-managed, not per-request). SSE-KMS and SSE-C deferred. |
 | v0.x later | Tagging (`Put/Get/DeleteObjectTagging`), `x-amz-checksum-*` additional checksums, `UploadPartCopy`, lifecycle expiration (a deliberately small subset). |
 
 ## Authentication
