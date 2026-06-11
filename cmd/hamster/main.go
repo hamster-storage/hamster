@@ -1,0 +1,106 @@
+// Command hamster is the Hamster server binary.
+//
+// The only command so far is serve: a single-node S3 endpoint over the v0.1
+// gateway. It is a development preview with a sharp edge, stated up front:
+// object data is durable on disk, but metadata lives in memory until the
+// BadgerDB layer lands — restarting the process forgets every bucket and
+// key. Useful for exercising the S3 surface with real tools; not useful for
+// keeping anything.
+package main
+
+import (
+	"crypto/rand"
+	"encoding/binary"
+	"flag"
+	"fmt"
+	"log"
+	mathrand "math/rand/v2"
+	"net/http"
+	"os"
+	"os/signal"
+
+	"github.com/hamster-storage/hamster/internal/blob"
+	"github.com/hamster-storage/hamster/internal/gateway"
+	"github.com/hamster-storage/hamster/internal/meta"
+	"github.com/hamster-storage/hamster/internal/sys"
+)
+
+func main() {
+	log.SetFlags(0)
+	if len(os.Args) < 2 || os.Args[1] != "serve" {
+		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags]")
+		os.Exit(2)
+	}
+	if err := serve(os.Args[2:]); err != nil {
+		log.Fatalf("hamster: %v", err)
+	}
+}
+
+func serve(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	listen := fs.String("listen", "127.0.0.1:9000", "address to serve the S3 API on")
+	dataDir := fs.String("data-dir", "", "directory for object data (required)")
+	region := fs.String("region", "us-east-1", "SigV4 region string")
+	fs.Parse(args)
+
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
+	}
+	accessKey := os.Getenv("HAMSTER_ACCESS_KEY_ID")
+	secretKey := os.Getenv("HAMSTER_SECRET_ACCESS_KEY")
+	if accessKey == "" || secretKey == "" {
+		return fmt.Errorf("set HAMSTER_ACCESS_KEY_ID and HAMSTER_SECRET_ACCESS_KEY")
+	}
+
+	disk, err := sys.NewDisk(*dataDir)
+	if err != nil {
+		return err
+	}
+	loop := sys.NewLoop()
+
+	// The composition root is where ambient entropy is allowed: it seeds
+	// the PRNG explicitly and hands it in, so everything below stays
+	// deterministic under the simulator.
+	var seed [16]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return err
+	}
+	rng := mathrand.New(mathrand.NewPCG(
+		binary.LittleEndian.Uint64(seed[0:8]), binary.LittleEndian.Uint64(seed[8:16])))
+
+	g := gateway.New(gateway.Config{
+		Region: *region,
+		Lookup: func(akid string) (string, bool) {
+			if akid == accessKey {
+				return secretKey, true
+			}
+			return "", false
+		},
+		Store: meta.NewStore(),
+		Loop:  loop,
+		Clock: sys.Clock{},
+		Rand:  rng,
+		Blobs: blob.NewStore(disk),
+	})
+
+	srv := &http.Server{Addr: *listen, Handler: g}
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt)
+	done := make(chan error, 1)
+	go func() { done <- srv.ListenAndServe() }()
+
+	log.Printf("hamster serve: S3 API on http://%s (region %s)", *listen, *region)
+	log.Printf("hamster serve: DEV PREVIEW — metadata is in-memory; a restart forgets all buckets and keys")
+
+	select {
+	case err := <-done:
+		return err
+	case <-stop:
+	}
+	// Shutdown order per the gateway contract: HTTP first, loop second.
+	if err := srv.Close(); err != nil {
+		return err
+	}
+	loop.Stop()
+	return nil
+}
