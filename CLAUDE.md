@@ -45,7 +45,7 @@ All four must pass before any commit.
 
 ## Code layout
 
-- [`internal/seam`](internal/seam/) — the interfaces between core logic and the world: `Loop`, `Clock`, `Transport`, `Disk`. Core code receives these; it never touches the OS directly. Randomness is a seeded `*math/rand/v2.Rand`, no interface needed.
+- [`internal/seam`](internal/seam/) — the interfaces between core logic and the world: `Loop`, `Clock`, `Transport`, `MessageHandler`, `Disk`. Core code receives these; it never touches the OS directly. Randomness is a seeded `*math/rand/v2.Rand`, no interface needed.
 - [`internal/sim`](internal/sim/) — the deterministic simulation harness ([ADR-0009](docs/adr/0009-deterministic-simulation-testing.md)): global event queue, virtual time, seeded PRNG, faulty network, crash-faithful disk. New core logic gets built and tested under this from day one.
 - [`internal/meta`](internal/meta/) — the metadata model ([METADATA.md](docs/METADATA.md), [ADR-0014](docs/adr/0014-metadata-keyspace-design.md)): the version-list keyspace, deterministic apply, version IDs. Pure stdlib, no seam imports — proposals carry every input apply needs. Tested against an independent reference model with seeded randomized workloads.
 - [`internal/sigv4`](internal/sigv4/) — AWS Signature Version 4 verification ([ADR-0018](docs/adr/0018-sigv4-auth.md)): Authorization-header, presigned-query, unsigned-payload, and aws-chunked streaming modes. Pure stdlib; time is a parameter (`Verify(r, now)`), never an ambient clock read. Conformance-tested against AWS's published example signatures.

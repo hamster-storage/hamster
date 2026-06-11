@@ -44,7 +44,7 @@ func pingTrace(seed uint64) []string {
 	ids := []seam.NodeID{"n1", "n2", "n3"}
 	var trace []string
 	for _, id := range ids {
-		s.AddNode(id, func(w *World) Node {
+		s.AddNode(id, func(w *World) seam.MessageHandler {
 			var peers []seam.NodeID
 			for _, p := range ids {
 				if p != w.ID {
@@ -84,7 +84,7 @@ func TestSeedDeterminism(t *testing.T) {
 func crashWorld(seed uint64) (*Sim, **World) {
 	s := New(seed, NetConfig{})
 	w := new(*World)
-	s.AddNode("n1", func(world *World) Node {
+	s.AddNode("n1", func(world *World) seam.MessageHandler {
 		*w = world
 		return inertNode{}
 	})
@@ -186,7 +186,7 @@ func TestPartitionBlocksDelivery(t *testing.T) {
 	var got []string
 	worlds := map[seam.NodeID]**World{"a": new(*World), "b": new(*World)}
 	for id, w := range worlds {
-		s.AddNode(id, func(world *World) Node {
+		s.AddNode(id, func(world *World) seam.MessageHandler {
 			*w = world
 			return recorderNode{world.ID, &got}
 		})

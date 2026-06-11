@@ -71,6 +71,19 @@ type Transport interface {
 	Send(to NodeID, msg []byte)
 }
 
+// MessageHandler is the receiving half of the network contract — Transport
+// sends, a node's core logic receives. Core logic implements it; the drivers
+// on the other side of the seam consume it: the simulator calls HandleMessage
+// when it delivers a simulated message, and the production listener calls it
+// when bytes arrive on a real socket.
+//
+// Messages arrive one at a time on the node's event loop, never on a
+// separate thread, so implementations need no locking.
+type MessageHandler interface {
+	// HandleMessage delivers one message from the network.
+	HandleMessage(from NodeID, msg []byte)
+}
+
 // Disk is a node's durable storage: a namespace of whole files addressed by
 // slash-separated relative paths (names must satisfy io/fs.ValidPath).
 //

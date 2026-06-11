@@ -74,6 +74,13 @@ type Transport interface {
     // Delivery happens via the node's event loop, not a callback thread.
 }
 
+type MessageHandler interface {
+    HandleMessage(from NodeID, msg []byte)
+    // The receiving half of the network contract: core logic implements
+    // it, the drivers consume it — the simulator and the production
+    // listener call the same method, one message at a time, on the loop.
+}
+
 type Disk interface {
     // Whole files, because objects are immutable blobs. Writes are staged:
     // durable only after Sync, lost-or-torn at crash otherwise.
