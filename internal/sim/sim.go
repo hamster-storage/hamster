@@ -22,21 +22,12 @@ import (
 	"github.com/hamster-storage/hamster/internal/seam"
 )
 
-// Node is a node's core logic under simulation. Implementations are driven
-// entirely by events: messages delivered here and timer callbacks scheduled
-// through the node's Clock. Both arrive one at a time, so a Node needs no
-// locking.
-type Node interface {
-	// HandleMessage delivers one message from the simulated network.
-	HandleMessage(from seam.NodeID, msg []byte)
-}
-
 // BootFunc constructs a node's logic. It is called once when the node is
 // added and again after every Restart, modeling process start: boot is the
 // place to read the disk and schedule initial timers. The same World is
 // passed every time — the Disk persists across restarts, and the Rand stream
 // continues.
-type BootFunc func(w *World) Node
+type BootFunc func(w *World) seam.MessageHandler
 
 // World is everything a node may touch, handed to its BootFunc. It is the
 // simulated side of the seam (see internal/seam).
@@ -74,7 +65,7 @@ type link struct {
 type slot struct {
 	id    seam.NodeID
 	boot  BootFunc
-	node  Node // nil while crashed
+	node  seam.MessageHandler // nil while crashed
 	epoch uint64
 	disk  *disk
 	world *World
