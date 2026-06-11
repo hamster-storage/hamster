@@ -19,7 +19,10 @@
 package gateway
 
 import (
+	"bytes"
+	"crypto/md5"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -113,7 +116,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case bucket == "":
 		g.serveService(w, r)
 	case key == "":
-		g.serveBucket(w, r, bucket)
+		g.serveBucket(w, r, id, bucket)
 	default:
 		g.serveObject(w, r, id, bucket, key)
 	}
@@ -127,7 +130,7 @@ func (g *Gateway) serveService(w http.ResponseWriter, r *http.Request) {
 	g.listBuckets(w, r)
 }
 
-func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, bucket string) {
+func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket string) {
 	q := r.URL.Query()
 	switch r.Method {
 	case http.MethodPut:
@@ -158,7 +161,10 @@ func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, bucket str
 			g.listObjectsV1(w, r, bucket)
 		}
 	case http.MethodPost:
-		// POST ?delete (DeleteObjects) arrives in its own pass.
+		if q.Has("delete") {
+			g.deleteObjects(w, r, id, bucket)
+			return
+		}
 		writeError(w, r, errNotImplemented)
 	default:
 		writeError(w, r, errMethodNotAllowed)
@@ -260,24 +266,44 @@ func checkObjectKey(key string) error {
 // identity: chunked streams are unwrapped and their per-chunk signatures
 // verified (a tampered chunk surfaces as the reader's error); signed
 // single-shot payloads are checked against the declared SHA-256; unsigned
-// payloads are accepted as sent. It returns the payload and its SHA-256,
-// which PutObject records as the object checksum.
+// payloads are accepted as sent. A Content-MD5 header, when supplied, is
+// verified against the decoded payload (enforced, not advisory — it is
+// free integrity; it is not *required*, because checksum-era SDKs send
+// x-amz-checksum-* instead). Returns the payload and its SHA-256, which
+// PutObject records as the object checksum.
 func readBody(r *http.Request, id *sigv4.Identity) ([]byte, []byte, error) {
+	var body []byte
+	var err error
 	if id.Streaming {
-		body, err := io.ReadAll(id.ChunkedBody(r.Body))
-		if err != nil {
-			return nil, nil, err
-		}
-		sum := sha256.Sum256(body)
-		return body, sum[:], nil
+		body, err = io.ReadAll(id.ChunkedBody(r.Body))
+	} else {
+		body, err = io.ReadAll(r.Body)
 	}
-	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return nil, nil, err
 	}
 	sum := sha256.Sum256(body)
-	if id.PayloadHash != sigv4.UnsignedPayload && id.PayloadHash != hex.EncodeToString(sum[:]) {
+	if !id.Streaming && id.PayloadHash != sigv4.UnsignedPayload && id.PayloadHash != hex.EncodeToString(sum[:]) {
 		return nil, nil, errContentSHA256Mismatch
 	}
+	if err := checkContentMD5(r.Header.Get("Content-MD5"), body); err != nil {
+		return nil, nil, err
+	}
 	return body, sum[:], nil
+}
+
+// checkContentMD5 verifies a supplied Content-MD5 header (base64 of the
+// raw 16-byte digest) against the payload.
+func checkContentMD5(header string, body []byte) error {
+	if header == "" {
+		return nil
+	}
+	want, err := base64.StdEncoding.DecodeString(header)
+	if err != nil || len(want) != md5.Size {
+		return errInvalidDigest
+	}
+	if sum := md5.Sum(body); !bytes.Equal(sum[:], want) {
+		return errBadDigest
+	}
+	return nil
 }

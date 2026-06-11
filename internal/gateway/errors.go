@@ -41,6 +41,10 @@ var (
 		"The XML you provided was not well-formed or did not validate against the schema."}
 	errInvalidRequest = &s3Error{"InvalidRequest", http.StatusBadRequest,
 		"Copying an object to itself requires the REPLACE metadata directive."}
+	errInvalidDigest = &s3Error{"InvalidDigest", http.StatusBadRequest,
+		"The Content-MD5 you specified is not a valid base64 MD5 digest."}
+	errBadDigest = &s3Error{"BadDigest", http.StatusBadRequest,
+		"The Content-MD5 you specified did not match what we received."}
 )
 
 // mapError translates a metadata-layer error into its S3 wire form.
