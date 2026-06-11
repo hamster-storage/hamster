@@ -60,6 +60,7 @@ All four must pass before any commit.
 - [`docs/SIMULATION.md`](docs/SIMULATION.md) — the testing strategy design: the deterministic simulation harness, the interface seam, fault model, invariants, and the end to end upgrade suite.
 - [`docs/METADATA.md`](docs/METADATA.md) — the metadata schema design: protobuf records, the BadgerDB keyspace, and how S3 operations map to transactions.
 - [`docs/ERASURE-CODING.md`](docs/ERASURE-CODING.md) — storage profiles: the k+m set, profile changes, small objects, the write-ack rule, and the single-node-to-cluster growth story.
+- [`docs/DATA-STREAM.md`](docs/DATA-STREAM.md) — the framed object stream between the gateway and erasure coding: chunking, optional compression and encryption as per-chunk transforms, and why the order is chunk → compress → encrypt → frame → EC.
 - [`docs/S3-API.md`](docs/S3-API.md) — the S3 compatibility surface: operations by release, SigV4 authentication, ETag semantics, limits, and non-goals.
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records. One decision per file, with the reasoning and the rejected alternatives. Start at the [index](docs/adr/README.md).
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — the v0.x and v1.0 milestones.

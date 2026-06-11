@@ -29,7 +29,7 @@ flowchart LR
 ### PUT
 
 1. The client sends an S3 PUT to any node. The object lands in the write buffer — which we nickname the pouch, the way a hamster fills its cheeks before stashing food away.
-2. The node erasure codes the object into `k` data shards plus `m` parity shards (Reed Solomon).
+2. The node builds the framed object stream — chunked, optionally compressed, optionally encrypted ([DATA-STREAM.md](DATA-STREAM.md)) — and erasure codes it into `k` data shards plus `m` parity shards (Reed Solomon). Shards are ciphertext when encryption is on, so every later process (repair, rebalance, scrub) works without keys.
 3. The placement function maps the object's partition to a set of nodes — a pure local computation: `hash(key)` picks the partition, and the cluster layout (replicated metadata, already in every node's local store) names the nodes. No lookup, no round trip. The shards are written **directly** to those nodes' data directories — never through Raft.
 4. Once a quorum of shards is durable on disk, the node atomically commits one small metadata record through Raft: key, version ID, size, checksums, and shard locations.
 5. The PUT is acknowledged. If the metadata commit never happens, the shards are orphaned garbage to be collected, not a visible object — the metadata commit is the linearization point.
@@ -83,6 +83,8 @@ Three kinds of traffic flow in a cluster, all point-to-point — there is no mes
 1. **Client traffic**: the S3 API, HTTP against any node.
 2. **Control plane**: Raft messages and small intra-cluster RPCs, on a dedicated intra-cluster port.
 3. **Data plane**: bulk shard streams — writes, reads, repair, and rebalance transfer between specific node pairs.
+
+Control plane and data plane both run over mutual TLS, always — a cluster CA is minted at `cluster init`, nodes get certificates at join, and there is no plaintext cluster mode ([ADR-0022](adr/0022-cluster-mtls.md)). The TLS layer lives in the transport adapter, below the simulator seam.
 
 **Any node is a gateway — clients never track the leader.** S3 clients are deliberately dumb (an endpoint and credentials), so whichever node a client contacts coordinates that request; spreading clients across nodes is an operator choice (DNS round-robin, a load balancer, or one node — all fine). The Raft leader is involved only where consensus is: the gateway erasure codes and writes shards directly itself, leaderlessly, and just the small metadata proposal is forwarded internally to the leader for commit — a few hundred bytes of a gigabyte upload. Strongly consistent reads work from any node, voters and learners alike, via Raft's read-index (the leader quorum-confirms the commit index; the gateway serves from local state once caught up). Leader failover is an internal, sub-second event that clients experience as a retried request, not a reconnection.
 
