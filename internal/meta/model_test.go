@@ -23,6 +23,7 @@ type modelBucket struct {
 
 type modelVersion struct {
 	id       VersionID
+	dataID   VersionID // the proposal's minted ID; zero for markers
 	kind     Kind
 	size     int64
 	etag     []byte
@@ -166,7 +167,7 @@ func (m *model) put(t *testing.T, p PutObject, res PutResult, got error) {
 		}
 	}
 	b.objects[p.Key] = append(b.objects[p.Key], modelVersion{
-		id: res.VersionID, kind: KindObject,
+		id: res.VersionID, dataID: p.VersionID, kind: KindObject,
 		size: p.Size, etag: slices.Clone(p.ETag), created: p.ProposedAtUnixMS, null: null,
 		retMode: p.RetentionMode, retUntil: p.RetainUntilUnixMS, hold: p.LegalHold,
 	})
@@ -341,7 +342,7 @@ func (m *model) check(t *testing.T, s *Store) {
 			}
 			for j, sv := range svs {
 				mv := mvs[len(mvs)-1-j] // store is newest-first, model oldest-first
-				if sv.VersionID != mv.id || sv.Kind != mv.kind || sv.Size != mv.size ||
+				if sv.VersionID != mv.id || sv.DataID != mv.dataID || sv.Kind != mv.kind || sv.Size != mv.size ||
 					!bytes.Equal(sv.ETag, mv.etag) || sv.CreatedUnixMS != mv.created ||
 					sv.NullVersion != mv.null || sv.RetentionMode != mv.retMode ||
 					sv.RetainUntilUnixMS != mv.retUntil || sv.LegalHold != mv.hold {

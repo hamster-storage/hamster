@@ -40,11 +40,15 @@ type PutObject struct {
 	ProposedAtUnixMS int64
 	Bucket           string
 	Key              string
-	VersionID        VersionID // minted by the gateway; apply may bump it
-	Size             int64
-	ETag             []byte
-	ContentType      string
-	UserMetadata     map[string]string
+
+	// VersionID is minted by the gateway and names the already-durable
+	// data (it becomes the entry's DataID verbatim). Apply may bump the
+	// committed VersionID for ordering; the data address never moves.
+	VersionID    VersionID
+	Size         int64
+	ETag         []byte
+	ContentType  string
+	UserMetadata map[string]string
 
 	Partition      uint64
 	ECDataShards   uint32

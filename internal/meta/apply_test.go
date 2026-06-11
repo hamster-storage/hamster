@@ -161,7 +161,8 @@ func TestClockSkewBump(t *testing.T) {
 	}
 	// Second write commits later but carries an earlier clock.
 	slow := e.now
-	second, err := e.s.ApplyPutObject(PutObject{ProposedAtUnixMS: slow, Bucket: "docs", Key: "k", VersionID: mintAt(slow, e.rng)})
+	minted := mintAt(slow, e.rng)
+	second, err := e.s.ApplyPutObject(PutObject{ProposedAtUnixMS: slow, Bucket: "docs", Key: "k", VersionID: minted})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +172,12 @@ func TestClockSkewBump(t *testing.T) {
 	cur, _ := e.s.Current("docs", "k")
 	if cur.VersionID != second.VersionID {
 		t.Fatal("commit order did not beat clock order: current is not the last write")
+	}
+	// The bump moves the version identity, never the data address: the
+	// data was durably written under the minted ID before the commit.
+	entry, ok := e.s.GetVersion("docs", "k", second.VersionID)
+	if !ok || entry.DataID != minted {
+		t.Fatalf("DataID %v, want the minted ID %v", entry.DataID, minted)
 	}
 }
 

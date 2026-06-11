@@ -49,6 +49,15 @@ const (
 type VersionEntry struct {
 	FormatVersion uint32
 	VersionID     VersionID
+
+	// DataID names this version's data on the data plane: shards (and the
+	// single-node blob) are written under the gateway-minted ID *before*
+	// the metadata commit, so if apply bumps VersionID for ordering, the
+	// data keeps the name it was durably written under. DataID is that
+	// minted ID — an address, not an ordering identity; it is never
+	// bumped. Zero for delete markers, which carry no data.
+	DataID VersionID
+
 	Kind          Kind
 	Size          int64
 	CreatedUnixMS int64

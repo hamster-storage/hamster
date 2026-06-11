@@ -81,6 +81,13 @@ message VersionEntry {
 
   // S3 "null version" marker for suspended-versioning writes (see below)
   bool null_version = 17;
+
+  // The data address: shards are written under the gateway-minted ID
+  // *before* the metadata commit, so when apply bumps version_id for
+  // ordering (see "commit order beats clock order"), the data keeps the
+  // name it was durably written under. An address, never an identity;
+  // zero for delete markers. Usually equal to version_id.
+  bytes data_id = 18;   // 16 bytes
 }
 
 // One row under c/ — derived listing row for the current version.
@@ -178,7 +185,7 @@ Two properties worth making explicit:
 
 - **Lock enforcement lives inside apply.** The check runs in the deterministic, single-threaded apply path on every replica, against replicated state, with no time-of-check gap. "COMPLIANCE has no override path" is structural here: there is simply no `Proposal` whose apply deletes a COMPLIANCE-locked version, so nothing an administrator can send — through any API — expresses the operation. The simulation harness actively tries anyway ([SIMULATION.md](SIMULATION.md), invariant 4).
 - **Time is a proposal field, not a clock read.** Nodes read their wall clocks normally at the API layer — to stamp `Last-Modified`, mint UUIDv7s, fill `proposed_at_unix_ms`. What never reads a clock is *apply*: it must produce bit-identical state on every replica and every crash replay, so time reaches it only as proposal data. Retention comparisons use `proposed_at_unix_ms`, which means a skewed clock (an un-NTPed VPS, say) fuzzes a lock boundary by the skew — seconds of slop against retention measured in days and years, and the strengthen-only rule means skew can never shorten a lock already set.
-- **Commit order beats clock order.** Version IDs embed the proposing node's clock, so under skew a write that commits *second* could carry a UUIDv7 that sorts *first* — and "current version" would quietly stop meaning "last write." Apply closes this deterministically: if a proposal's version ID does not sort after the key's newest existing version, apply bumps it just past it (incremented as a 128-bit value, preserving sortability per [ADR-0007](adr/0007-uuidv7-version-ids.md)). Legal because apply is a pure function of proposal plus replicated state — every replica computes the identical bump. Version lists are therefore always append-ordered by Raft commit regardless of any node's clock; skew can cost cosmetic timestamps, never ordering. More broadly, Hamster has no leases or TTL-based ownership anywhere — clock skew degrades labels, not invariants — and the simulator's fault model includes per-node skew to keep that claim tested.
+- **Commit order beats clock order.** Version IDs embed the proposing node's clock, so under skew a write that commits *second* could carry a UUIDv7 that sorts *first* — and "current version" would quietly stop meaning "last write." Apply closes this deterministically: if a proposal's version ID does not sort after the key's newest existing version, apply bumps it just past it (incremented as a 128-bit value, preserving sortability per [ADR-0007](adr/0007-uuidv7-version-ids.md)). Legal because apply is a pure function of proposal plus replicated state — every replica computes the identical bump. Version lists are therefore always append-ordered by Raft commit regardless of any node's clock; skew can cost cosmetic timestamps, never ordering. More broadly, Hamster has no leases or TTL-based ownership anywhere — clock skew degrades labels, not invariants — and the simulator's fault model includes per-node skew to keep that claim tested. The bump moves the version *identity* only: the object's data was durably written under the minted ID before the proposal was made, so the entry records that minted ID as `data_id` — its permanent data address — and reads resolve data through it. Identity sorts; the address never moves.
 
 ## Listings
 
