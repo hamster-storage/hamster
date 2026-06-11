@@ -2,6 +2,8 @@
 
 Hamster is a self hosted, S3 compatible object store in a single Go binary, built around erasure coded durability and first class versioning and object lock.
 
+**Positioning:** the target user runs real workloads with compliance-shaped needs — retention, object lock, audits (HIPAA, SEC 17a-4 territory) — without a platform team. Design and performance work should serve that user: use the hardware well and be plenty fast, but never trade durability, compliance correctness, or operational simplicity for benchmark wins. Small-file microbenchmark supremacy is explicitly not a goal. In public-facing docs, name MinIO's community-edition archive as the factual origin story, but do not name or disparage other open source stores — generalize.
+
 > **Status: early development (v0). Not production ready.** Nothing described in the docs is a guarantee yet; it is the design being built. Keep all documentation honest about this — features are goals until they ship and survive the simulation harness.
 
 ## Critical invariants — never violate these
