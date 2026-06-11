@@ -36,23 +36,14 @@ Hamster aims for the missing middle:
 - Partitioned placement with online rebalancing
 - A clean, friendly web console
 
-## The Hamster dialect
-
-The metaphor is load bearing, not just decoration:
-
-- **Warren** — a cluster. A connected system of burrows.
-- **Burrow** — a single node.
-- **Pouch** — the write buffer. Writes land in the pouch first, then get flushed and erasure coded into the burrow, the way a hamster fills its cheeks before stashing food away.
-- **Hoard** — the set of objects you have stored.
-
 ## Quick start
 
 Not available yet. The first v0 release will ship a single binary. The intended experience looks roughly like:
 
 ```sh
 # illustrative, not yet working
-hamster burrow init --data ./nest      # start a node
-hamster warren join <addr>             # join it into a cluster
+hamster node init --data ./data        # start a node
+hamster cluster join <addr>            # join it into a cluster
 ```
 
 Hamster will expose a standard S3 endpoint, so any S3 client can point at it.
