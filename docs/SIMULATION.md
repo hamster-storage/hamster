@@ -53,13 +53,13 @@ The honest residue: data-plane and adapter code can have concurrency bugs of its
 
 ### The interface seam
 
-Production code never touches time, randomness, the network, or the filesystem directly (already a CLAUDE.md convention). It receives interfaces — illustrative shapes, to be settled with the first code:
+Production code never touches time, randomness, the network, or the filesystem directly (already a CLAUDE.md convention). It receives interfaces, which live in [`internal/seam`](../internal/seam/):
 
 ```go
-// Illustrative, not final.
 type Clock interface {
     Now() time.Time
-    After(d time.Duration) <-chan time.Time
+    AfterFunc(d time.Duration, fn func()) Timer
+    // Callbacks are delivered on the node's event loop, never a thread.
 }
 
 type Transport interface {
@@ -68,13 +68,17 @@ type Transport interface {
 }
 
 type Disk interface {
-    WriteAt(p []byte, off int64) error
-    ReadAt(p []byte, off int64) (int, error)
-    Sync() error
+    // Whole files, because objects are immutable blobs. Writes are staged:
+    // durable only after Sync, lost-or-torn at crash otherwise.
+    WriteFile(name string, data []byte) error
+    Sync(name string) error
+    ReadFile(name string) ([]byte, error)
+    Remove(name string) error
+    List() ([]string, error)
 }
 ```
 
-Each has two implementations: the simulated one (deterministic, fault-injectable) and the production one (thin, boring, no decisions). The same compiled core runs under both — what the simulator proves is what ships.
+Randomness needs no interface: core code receives a `*math/rand/v2.Rand`, deterministic by construction once the simulator picks the seed. Each interface has two implementations: the simulated one in [`internal/sim`](../internal/sim/) (deterministic, fault-injectable) and the production one in [`internal/sys`](../internal/sys/) (thin, boring, no decisions). The same compiled core runs under both — what the simulator proves is what ships. The shapes will grow with the code (the write buffer will want appending forms on `Disk`), always settled in `internal/seam` first.
 
 ### Driving Raft
 
@@ -150,6 +154,6 @@ Stated plainly so nobody over-trusts it:
 
 ## Open questions
 
-- Exact interface shapes — settled with the first v0.1 code, not in this doc.
+- ~~Exact interface shapes — settled with the first v0.1 code, not in this doc.~~ Settled: first cut lives in `internal/seam`, shown above.
 - `testing/synctest` for adapter-level concurrency tests (production write-buffer timers, HTTP timeouts) where fake time helps but seed-replay is not needed: likely yes, as a third, minor layer.
 - Whether the workload generator and model checker live in-repo from v0.1 (likely) or start as a hardcoded scenario list and grow.
