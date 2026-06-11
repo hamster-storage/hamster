@@ -148,6 +148,8 @@ func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, bucket str
 		switch {
 		case q.Has("location"):
 			g.getBucketLocation(w, r, bucket)
+		case q.Has("uploads"):
+			g.listMultipartUploads(w, r, bucket)
 		case q.Get("list-type") == "2":
 			g.listObjectsV2(w, r, bucket)
 		case hasSubresource(q):
@@ -168,7 +170,41 @@ func (g *Gateway) serveObject(w http.ResponseWriter, r *http.Request, id *sigv4.
 		writeError(w, r, err)
 		return
 	}
-	if hasSubresource(r.URL.Query()) {
+	q := r.URL.Query()
+	if q.Has("uploads") {
+		if r.Method != http.MethodPost {
+			writeError(w, r, errMethodNotAllowed)
+			return
+		}
+		g.createMultipartUpload(w, r, bucket, key)
+		return
+	}
+	if q.Has("uploadId") {
+		uid, ok := parseUploadID(q.Get("uploadId"))
+		if !ok {
+			// An ID this server never minted: the upload cannot exist.
+			writeError(w, r, meta.ErrNoSuchUpload)
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			if r.Header.Get("x-amz-copy-source") != "" {
+				writeError(w, r, errNotImplemented) // UploadPartCopy: with CopyObject's pass
+				return
+			}
+			g.uploadPart(w, r, id, bucket, key, uid)
+		case http.MethodPost:
+			g.completeMultipartUpload(w, r, id, bucket, key, uid)
+		case http.MethodGet:
+			g.listParts(w, r, bucket, key, uid)
+		case http.MethodDelete:
+			g.abortMultipartUpload(w, r, bucket, key, uid)
+		default:
+			writeError(w, r, errMethodNotAllowed)
+		}
+		return
+	}
+	if hasSubresource(q) {
 		writeError(w, r, errNotImplemented)
 		return
 	}

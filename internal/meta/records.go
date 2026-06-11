@@ -81,6 +81,40 @@ type VersionEntry struct {
 	// writes to unversioned and suspended-versioning buckets. At most one
 	// per key.
 	NullVersion bool
+
+	// Parts is the multipart assembly, in part order: a completed multipart
+	// upload's data stays where the parts were written, and a read
+	// concatenates them. Empty for whole PUTs (DataID is the one address)
+	// and delete markers. When set, DataID is zero, ETag holds the raw
+	// composite MD5 (ADR-0019: hex plus "-N" on the wire), and
+	// ObjectChecksum is empty — integrity is per part.
+	Parts []PartRef
+}
+
+// PartRef is one slice of a multipart object's data: the address it was
+// written under and the facts a read needs to fetch and verify it.
+type PartRef struct {
+	DataID   VersionID
+	Size     int64
+	Checksum []byte // SHA-256 of the part's bytes
+}
+
+// DataIDs returns every data-plane address the entry's bytes live at:
+// nothing for a delete marker, the single DataID for a whole PUT, the
+// per-part addresses for a multipart object. This is what reclaim and GC
+// must walk — forgetting a part would leak its blob.
+func (e VersionEntry) DataIDs() []VersionID {
+	if len(e.Parts) > 0 {
+		ids := make([]VersionID, len(e.Parts))
+		for i, p := range e.Parts {
+			ids[i] = p.DataID
+		}
+		return ids
+	}
+	if e.DataID.IsZero() {
+		return nil
+	}
+	return []VersionID{e.DataID}
 }
 
 // clone returns a copy sharing no mutable state with the original.
@@ -94,6 +128,14 @@ func (e VersionEntry) clone() VersionEntry {
 			sc[i] = slices.Clone(s)
 		}
 		e.ShardChecksums = sc
+	}
+	if e.Parts != nil {
+		ps := make([]PartRef, len(e.Parts))
+		for i, p := range e.Parts {
+			p.Checksum = slices.Clone(p.Checksum)
+			ps[i] = p
+		}
+		e.Parts = ps
 	}
 	return e
 }
@@ -127,6 +169,9 @@ type CurrentRecord struct {
 	Size          int64
 	ETag          []byte
 	CreatedUnixMS int64
+	// PartCount is the multipart part count, zero for whole PUTs: listings
+	// must render the composite ETag with its "-N" suffix (ADR-0019).
+	PartCount uint32
 }
 
 func currentRecordFor(e VersionEntry) CurrentRecord {
@@ -136,6 +181,7 @@ func currentRecordFor(e VersionEntry) CurrentRecord {
 		Size:          e.Size,
 		ETag:          slices.Clone(e.ETag),
 		CreatedUnixMS: e.CreatedUnixMS,
+		PartCount:     uint32(len(e.Parts)),
 	}
 }
 
@@ -146,4 +192,29 @@ type BucketConfig struct {
 	CreatedUnixMS     int64
 	Versioning        VersioningState
 	ObjectLockEnabled bool
+}
+
+// UploadRecord is one row under u/ — an in-progress multipart upload. It
+// carries what CompleteMultipartUpload needs to build the version entry;
+// the parts accumulate as sibling PartRecord rows under the same upload ID.
+type UploadRecord struct {
+	FormatVersion uint32
+	UploadID      VersionID
+	CreatedUnixMS int64
+	ContentType   string
+	UserMetadata  map[string]string
+}
+
+// PartRecord is one uploaded part of an in-progress multipart upload. Its
+// data is already durable under DataID when the row commits — the same
+// write-then-commit order as PutObject. Re-uploading a part number
+// replaces the row; the displaced blob is the caller's to reclaim.
+type PartRecord struct {
+	FormatVersion  uint32
+	PartNumber     uint32
+	DataID         VersionID
+	Size           int64
+	ETag           []byte // MD5, matched against CompleteMultipartUpload's part list
+	Checksum       []byte // SHA-256 of the part's bytes
+	UploadedUnixMS int64
 }

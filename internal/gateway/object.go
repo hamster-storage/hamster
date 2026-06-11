@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,19 +48,9 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 	}
 
 	var applyErr error
-	var replaced meta.VersionID
+	var replaced []meta.VersionID
 	g.onLoop(func() {
-		// A PUT to a bucket without versioning enabled replaces the key's
-		// null version; capture its data address so the blob can be
-		// reclaimed after the commit.
-		if cfg, ok := g.cfg.Store.GetBucket(bucket); ok && cfg.Versioning != meta.VersioningEnabled {
-			for _, v := range g.cfg.Store.ListVersions(bucket, key) {
-				if v.NullVersion && v.Kind == meta.KindObject {
-					replaced = v.DataID
-					break
-				}
-			}
-		}
+		replaced = g.replacedNullDataIDs(bucket, key)
 		// The result's possibly-bumped VersionID becomes the
 		// x-amz-version-id header when versioning is exposed (v0.5).
 		_, applyErr = g.cfg.Store.ApplyPutObject(meta.PutObject{
@@ -79,12 +70,29 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		writeError(w, r, applyErr)
 		return
 	}
-	if !replaced.IsZero() {
-		_ = g.cfg.Blobs.Remove(replaced) // best effort; otherwise an orphan for GC
+	for _, dataID := range replaced {
+		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 
 	w.Header().Set("ETag", quoteETag(etag[:]))
 	w.WriteHeader(http.StatusOK)
+}
+
+// replacedNullDataIDs captures the data addresses a commit to key on a
+// bucket without versioning enabled is about to displace — the null
+// version's blob, or every part of a multipart null version. Loop-owned
+// state: call only from a posted function, in the same trip as the apply.
+func (g *Gateway) replacedNullDataIDs(bucket, key string) []meta.VersionID {
+	cfg, ok := g.cfg.Store.GetBucket(bucket)
+	if !ok || cfg.Versioning == meta.VersioningEnabled {
+		return nil
+	}
+	for _, v := range g.cfg.Store.ListVersions(bucket, key) {
+		if v.NullVersion && v.Kind == meta.KindObject {
+			return v.DataIDs()
+		}
+	}
+	return nil
 }
 
 // getObject serves GET and HEAD. Range and conditional headers are handled
@@ -112,19 +120,38 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 		return
 	}
 
-	data, err := g.cfg.Blobs.Get(entry.DataID)
-	if err != nil {
-		writeError(w, r, errInternal)
-		return
-	}
 	// The real integrity check (ADR-0019: ETags are compatibility, this is
-	// integrity): verify the stored checksum before serving a single byte.
-	if sum := sha256.Sum256(data); !bytes.Equal(sum[:], entry.ObjectChecksum) {
-		writeError(w, r, errInternal)
-		return
+	// integrity): verify the stored checksums before serving a single byte.
+	// Whole PUTs carry one object checksum; multipart objects carry one per
+	// part, verified as the body is assembled from the part blobs.
+	var data []byte
+	if len(entry.Parts) > 0 {
+		data = make([]byte, 0, entry.Size)
+		for _, p := range entry.Parts {
+			part, err := g.cfg.Blobs.Get(p.DataID)
+			if err != nil {
+				writeError(w, r, errInternal)
+				return
+			}
+			if sum := sha256.Sum256(part); !bytes.Equal(sum[:], p.Checksum) {
+				writeError(w, r, errInternal)
+				return
+			}
+			data = append(data, part...)
+		}
+	} else {
+		var err error
+		if data, err = g.cfg.Blobs.Get(entry.DataID); err != nil {
+			writeError(w, r, errInternal)
+			return
+		}
+		if sum := sha256.Sum256(data); !bytes.Equal(sum[:], entry.ObjectChecksum) {
+			writeError(w, r, errInternal)
+			return
+		}
 	}
 
-	w.Header().Set("ETag", quoteETag(entry.ETag))
+	w.Header().Set("ETag", objectETag(entry.ETag, len(entry.Parts)))
 	if entry.ContentType != "" {
 		w.Header().Set("Content-Type", entry.ContentType)
 	} else {
@@ -142,14 +169,14 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	var res meta.DeleteObjectResult
 	var applyErr error
-	var removed meta.VersionID
+	var removed []meta.VersionID
 	g.onLoop(func() {
 		now := g.cfg.Clock.Now()
-		// Capture the current version's data address: if the delete
-		// removes a row (unversioned bucket), its blob can be reclaimed.
+		// Capture the current version's data addresses: if the delete
+		// removes a row (unversioned bucket), its blobs can be reclaimed.
 		if cur, ok := g.cfg.Store.Current(bucket, key); ok {
 			if e, ok := g.cfg.Store.GetVersion(bucket, key, cur.VersionID); ok {
-				removed = e.DataID
+				removed = e.DataIDs()
 			}
 		}
 		res, applyErr = g.cfg.Store.ApplyDeleteObject(meta.DeleteObject{
@@ -163,8 +190,10 @@ func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, k
 		writeError(w, r, applyErr)
 		return
 	}
-	if res.Removed && !removed.IsZero() {
-		_ = g.cfg.Blobs.Remove(removed) // best effort; otherwise an orphan for GC
+	if res.Removed {
+		for _, dataID := range removed {
+			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+		}
 	}
 	if res.MarkerCreated {
 		w.Header().Set("x-amz-delete-marker", "true")
@@ -191,4 +220,14 @@ func userMetadata(h http.Header) map[string]string {
 
 func quoteETag(etag []byte) string {
 	return `"` + hex.EncodeToString(etag) + `"`
+}
+
+// objectETag renders a stored object ETag for the wire: hex, quoted, with
+// the "-N" part-count suffix when the object was a multipart upload
+// (ADR-0019 — the composite form sync tools verify).
+func objectETag(etag []byte, partCount int) string {
+	if partCount > 0 {
+		return `"` + hex.EncodeToString(etag) + "-" + strconv.Itoa(partCount) + `"`
+	}
+	return quoteETag(etag)
 }

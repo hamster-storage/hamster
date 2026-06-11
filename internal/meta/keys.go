@@ -1,18 +1,26 @@
 package meta
 
-import "strings"
+import (
+	"encoding/binary"
+	"strings"
+)
 
 // Keyspace encoding, exactly as designed in docs/METADATA.md and ADR-0014:
 //
 //	b/<bucket>                                BucketConfig
 //	v/<bucket>\x00<key>\x00<~version-id>      VersionEntry — the truth
 //	c/<bucket>\x00<key>                       CurrentRecord — derived
+//	u/<bucket>\x00<key>\x00<upload-id>        UploadRecord — in-progress multipart
+//	u/<bucket>\x00<key>\x00<upload-id><part>  PartRecord — one uploaded part
 //
 // Components are NUL-delimited: bucket names are NUL-safe by their charset,
 // and object keys reject the literal NUL byte (validateObjectKey). The
 // version component is the bitwise complement of the ID, so the first row
-// under a key's prefix is always its newest version. Prefixes s/ (system),
-// u/ (multipart), and g/ (GC) are reserved.
+// under a key's prefix is always its newest version. Upload IDs are raw
+// 16-byte UUIDv7 (uncomplemented: ListMultipartUploads wants initiation
+// order, oldest first) and the part number is 4 bytes big-endian; both are
+// fixed-width, so the trailing components parse unambiguously even though
+// ID bytes may contain NUL. Prefixes s/ (system) and g/ (GC) are reserved.
 
 const nul = "\x00"
 
@@ -40,6 +48,34 @@ func complement(vid VersionID) VersionID {
 		vid[i] = ^vid[i]
 	}
 	return vid
+}
+
+func uploadRowKey(bucket, key string, uid VersionID) string {
+	return "u/" + bucket + nul + key + nul + string(uid[:])
+}
+
+func partRowKey(bucket, key string, uid VersionID, part uint32) string {
+	var p [4]byte
+	binary.BigEndian.PutUint32(p[:], part)
+	return uploadRowKey(bucket, key, uid) + string(p[:])
+}
+
+func uploadsScanPrefix(bucket string) string { return "u/" + bucket + nul }
+
+// uploadFromRow decodes an encoded u/ row key belonging to bucket. The
+// first NUL after the bucket prefix ends the object key (keys cannot
+// contain NUL); the fixed-width tail is either a 16-byte upload ID (the
+// upload row) or 20 bytes of upload ID plus part number (a part row).
+func uploadFromRow(rowKey, bucket string) (key string, uid VersionID, part uint32, isPart bool) {
+	rest := rowKey[len(uploadsScanPrefix(bucket)):]
+	i := strings.IndexByte(rest, 0)
+	key = rest[:i]
+	tail := rest[i+1:]
+	copy(uid[:], tail[:16])
+	if len(tail) == 20 {
+		return key, uid, binary.BigEndian.Uint32([]byte(tail[16:])), true
+	}
+	return key, uid, 0, false
 }
 
 // objectKeyFromCurrentRow recovers the object key from an encoded c/ row

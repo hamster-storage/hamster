@@ -29,21 +29,24 @@ func (s *Store) ApplyCreateBucket(p CreateBucket) error {
 	return nil
 }
 
-// ApplyDeleteBucket deletes a bucket if it holds no version rows — one
-// prefix seek inside the transaction (METADATA.md). Delete markers count:
-// a bucket with history is not empty.
+// ApplyDeleteBucket deletes a bucket if it holds no version rows and no
+// in-progress multipart uploads — one prefix seek each, inside the
+// transaction (METADATA.md). Delete markers count: a bucket with history
+// is not empty. Uploads count too (S3 parity): deleting the bucket from
+// under them would orphan their u/ rows and part data.
 func (s *Store) ApplyDeleteBucket(p DeleteBucket) error {
 	if _, ok := s.kv.get(bucketRowKey(p.Bucket)); !ok {
 		return ErrNoSuchBucket
 	}
-	empty := true
-	prefix := bucketVersionsScanPrefix(p.Bucket)
-	s.kv.scan(prefix, func(k string, _ any) bool {
-		empty = !hasPrefix(k, prefix)
-		return false
-	})
-	if !empty {
-		return ErrBucketNotEmpty
+	for _, prefix := range []string{bucketVersionsScanPrefix(p.Bucket), uploadsScanPrefix(p.Bucket)} {
+		empty := true
+		s.kv.scan(prefix, func(k string, _ any) bool {
+			empty = !hasPrefix(k, prefix)
+			return false
+		})
+		if !empty {
+			return ErrBucketNotEmpty
+		}
 	}
 	s.kv.delete(bucketRowKey(p.Bucket))
 	return nil

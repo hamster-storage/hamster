@@ -36,13 +36,16 @@ BadgerDB is a flat sorted key-value store; structure comes from key encoding. On
 | `b/` | `b/<bucket>` | `BucketConfig` | Bucket configuration |
 | `v/` | `v/<bucket>\x00<key>\x00<~version-id>` | `VersionEntry` | Version lists — **the truth** |
 | `c/` | `c/<bucket>\x00<key>` | `CurrentRecord` | Current-version index — **derived** |
+| `u/` | `u/<bucket>\x00<key>\x00<upload-id>` | `UploadRecord` | In-progress multipart uploads |
+| `u/` | `u/<bucket>\x00<key>\x00<upload-id><part>` | `PartRecord` | One uploaded part of an upload |
 
 Encoding rules:
 
 - **Components are NUL-delimited.** Bucket names are already NUL-safe (S3 constrains them to `[a-z0-9.-]`). Object keys are arbitrary UTF-8; Hamster rejects keys containing the literal NUL byte (`0x00` — the unprintable character, not the text "0x00"). No typeable string is affected; the only way to produce such a key is deliberately percent-encoding `%00` into the URL. (A documented deviation: AWS technically accepts NUL in keys. Nothing real uses it, and the flat encoding it buys is worth the asterisk.)
 - **NUL rejection is enforced twice, because a stored NUL would corrupt the keyspace** — the parser would split the encoded key at the wrong delimiter. Request validation rejects it at the S3 layer with `400 InvalidObjectName`, before any proposal exists. And apply independently rejects any proposal whose key contains `0x00` as malformed — a deterministic byte check, so replicas agree — which means no path, including a buggy internal caller, can ever put a NUL-bearing key into BadgerDB. The simulation harness's workload generator should attempt it. Because UTF-8 byte order equals code-point order, a raw scan returns keys in exactly the order S3 listings require.
 - **`~version-id` is the bitwise complement of the 16-byte UUIDv7.** UUIDv7 sorts oldest-first; the complement sorts newest-first, so the first row under a key's prefix is always its newest version — the order `ListObjectVersions` returns and the order current-version resolution wants.
-- Prefixes `u/` (multipart uploads) and `g/` (garbage/orphan tracking) are **reserved** for later features so they arrive additively.
+- **Upload IDs are raw 16-byte UUIDv7s** (minted like version IDs), stored *uncomplemented* because `ListMultipartUploads` wants initiation order, oldest first. The part number is 4 bytes big-endian. Both are fixed-width, so the trailing components of a `u/` row parse unambiguously even though ID bytes may contain NUL — the first NUL after the bucket still ends the object key, because keys cannot contain one.
+- The prefix `g/` (garbage/orphan tracking) is **reserved** for later features so they arrive additively.
 
 The keyspace is ordered by bucket then key, so the future multi-raft split ([ADR-0005](adr/0005-metadata-badgerdb-raft.md)) is a range split along boundaries this layout already respects.
 
@@ -88,6 +91,21 @@ message VersionEntry {
   // name it was durably written under. An address, never an identity;
   // zero for delete markers. Usually equal to version_id.
   bytes data_id = 18;   // 16 bytes
+
+  // Multipart assembly, in part order: a completed multipart upload's
+  // data stays where the parts were written, and reads concatenate them.
+  // Empty for whole PUTs. When set, data_id is zero, etag holds the raw
+  // composite MD5 (rendered hex + "-N", ADR-0019), and object_checksum
+  // is empty — integrity is carried per part.
+  repeated PartRef parts = 19;
+}
+
+// One slice of a multipart object's data: where it lives and how a read
+// verifies it.
+message PartRef {
+  bytes data_id  = 1;   // 16 bytes
+  int64 size     = 2;
+  bytes checksum = 3;   // SHA-256 of the part's bytes
 }
 
 // One row under c/ — derived listing row for the current version.
@@ -97,6 +115,30 @@ message CurrentRecord {
   int64  size           = 3;
   bytes  etag           = 4;
   int64  created_unix_ms = 5;
+  uint32 part_count     = 6;  // multipart part count; listings render etag with "-N"
+}
+
+// One row under u/ — an in-progress multipart upload. Carries what the
+// completion needs to build the version entry; parts accumulate as
+// sibling PartRecord rows.
+message UploadRecord {
+  uint32 format_version = 1;
+  bytes  upload_id      = 2;   // 16-byte UUIDv7
+  int64  created_unix_ms = 3;
+  string content_type   = 4;
+  map<string, string> user_metadata = 5;
+}
+
+// One uploaded part. Its data is durable under data_id before the row
+// commits — the same write-then-commit order as PutObject.
+message PartRecord {
+  uint32 format_version = 1;
+  uint32 part_number    = 2;   // 1..10000
+  bytes  data_id        = 3;
+  int64  size           = 4;
+  bytes  etag           = 5;   // MD5, matched against the completion's part list
+  bytes  checksum       = 6;   // SHA-256
+  int64  uploaded_unix_ms = 7;
 }
 
 message BucketConfig {
@@ -165,6 +207,10 @@ message Proposal {
     DeleteBucket       delete_bucket        = 8;
     UpdateLayout       update_layout        = 9;
     UpdateNode         update_node          = 10;
+    CreateMultipartUpload   create_multipart_upload   = 11;
+    UploadPart              upload_part               = 12;
+    CompleteMultipartUpload complete_multipart_upload = 13;
+    AbortMultipartUpload    abort_multipart_upload    = 14;
   }
 }
 ```
@@ -178,7 +224,11 @@ message Proposal {
 | DELETE (no version ID), unversioned | Delete the `v/` entry and the `c/` row |
 | DELETE with version ID | **Lock check first** — reject if held; else delete that `v/` entry; if it was newest, recompute `c/` from the next entry |
 | PutObjectRetention / LegalHold | **Lock check first** — COMPLIANCE may only strengthen; rewrite the lock fields of that `v/` entry |
-| CreateBucket / DeleteBucket | Insert/delete `b/` row; DeleteBucket verifies emptiness with one prefix seek inside the transaction |
+| CreateBucket / DeleteBucket | Insert/delete `b/` row; DeleteBucket verifies emptiness with one prefix seek each over `v/` and `u/` inside the transaction (in-progress uploads keep a bucket non-empty) |
+| CreateMultipartUpload | Insert the `u/` upload row |
+| UploadPart | Upsert one `u/` part row (the part's data is already durable); a replaced part's data address returns to the caller for reclaim |
+| CompleteMultipartUpload | Validate the client's part list against the part rows (ascending order, ETag match, min size for all but the last); insert the assembled `v/` entry exactly like a PUT (same bump, same null-version replacement, same `c/` upsert); delete all `u/` rows; unused parts' data addresses return for reclaim |
+| AbortMultipartUpload | Delete all of the upload's `u/` rows; part data addresses return for reclaim |
 | Join / layout change | Update `s/` rows; layout bumps `layout_version` |
 
 Two properties worth making explicit:
@@ -191,6 +241,7 @@ Two properties worth making explicit:
 
 - **`ListObjects(V2)`**: scan `c/<bucket>\x00` — every row is a live current object, already in S3 order. Prefixes and delimiters are seeks within the scan; `StartAfter`/continuation tokens are seek targets.
 - **`ListObjectVersions`**: scan `v/<bucket>\x00` — keys in order, versions newest-first within each key, delete markers included, exactly the wire shape the API needs.
+- **`ListMultipartUploads`**: scan `u/<bucket>\x00`, upload rows only — key order, then initiation order within a key, which is the S3 wire order. **`ListParts`**: scan one upload's part rows, numerically ordered by the fixed-width encoding.
 - **GET (current)**: one read of `c/`, then one read of the `v/` entry. **GET with version ID**: one read of `v/` directly (complement the ID).
 
 Strongly consistent reads come from the Raft layer (leader reads or read-index), per ADR-0005 — the keyspace just makes them cheap.
@@ -201,7 +252,6 @@ PUT writes shards *before* the metadata commit, so a crash mid-PUT leaves orphan
 
 ## Deliberately absent (deferred, additive)
 
-- **Multipart uploads** — reserved prefix `u/`, designed with the v0.1 S3 API surface.
 - **ACLs, bucket policies, IAM-shaped auth state** — with the API surface work.
 - **Usage accounting and quotas, scrub state** — later, additive rows.
 - **Multi-raft range metadata** — the bucket/key ordering already leaves the door open.

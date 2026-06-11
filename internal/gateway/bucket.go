@@ -318,7 +318,7 @@ func fillListing(contents *[]contentsEntry, prefixes *[]commonPrefixEntry, l lis
 		*contents = append(*contents, contentsEntry{
 			Key:          listEncode(o.Key, encode),
 			LastModified: iso8601(o.Current.CreatedUnixMS),
-			ETag:         quoteETag(o.Current.ETag),
+			ETag:         objectETag(o.Current.ETag, int(o.Current.PartCount)),
 			Size:         o.Current.Size,
 			StorageClass: "STANDARD",
 		})
