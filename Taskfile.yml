@@ -1,0 +1,37 @@
+# Hamster builds with CGO_ENABLED=0, always (CLAUDE.md, ADR-0002). The one
+# exception is the race detector, whose runtime needs cgo — race builds are
+# test-only and never shipped.
+version: '3'
+
+env:
+  CGO_ENABLED: '0'
+
+tasks:
+  build:
+    desc: Compile all packages
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run all tests, including the simulation harness
+    cmds:
+      - go test ./...
+
+  test-race:
+    desc: Run all tests under the race detector
+    env:
+      CGO_ENABLED: '1'
+    cmds:
+      - go test -race ./...
+
+  check:
+    desc: go vet and gofmt
+    cmds:
+      - go vet ./...
+      - |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "gofmt needed on:"
+          echo "$unformatted"
+          exit 1
+        fi

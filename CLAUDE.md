@@ -32,11 +32,13 @@ These are the load bearing design decisions. Code or docs that break them are wr
 
 ## Build, test, and lint
 
+Targets live in `Taskfile.yml` ([Task](https://taskfile.dev), not make):
+
 ```sh
-make build      # CGO_ENABLED=0 go build ./...
-make test       # all tests, including the simulation harness
-make test-race  # the same tests under the race detector (the detector needs cgo; race builds are never shipped)
-make check      # go vet + gofmt
+task build      # CGO_ENABLED=0 go build ./...
+task test       # all tests, including the simulation harness
+task test-race  # the same tests under the race detector (the detector needs cgo; race builds are never shipped)
+task check      # go vet + gofmt
 ```
 
 All four must pass before any commit.
