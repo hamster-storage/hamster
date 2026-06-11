@@ -426,8 +426,8 @@ func TestRequestValidation(t *testing.T) {
 	if code := e.errorCode(e.do("GET", "/bkt/k?tagging", nil, nil), 501); code != "NotImplemented" {
 		t.Fatalf("subresource: %s", code)
 	}
-	if code := e.errorCode(e.do("POST", "/bkt?delete", nil, nil), 501); code != "NotImplemented" {
-		t.Fatalf("batch delete: %s", code)
+	if code := e.errorCode(e.do("POST", "/bkt?notreal", nil, nil), 501); code != "NotImplemented" {
+		t.Fatalf("unknown bucket POST: %s", code)
 	}
 	if code := e.errorCode(e.do("PUT", "/locked", nil, map[string]string{
 		"x-amz-bucket-object-lock-enabled": "true",
