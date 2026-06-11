@@ -3,6 +3,7 @@ package meta
 import (
 	"bytes"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -18,12 +19,13 @@ type model struct {
 type modelBucket struct {
 	lockEnabled bool
 	versioning  VersioningState
-	objects     map[string][]modelVersion // oldest → newest, in commit order
+	objects     map[string][]modelVersion  // oldest → newest, in commit order
+	uploads     map[VersionID]*modelUpload // in-progress multipart uploads
 }
 
 type modelVersion struct {
 	id       VersionID
-	dataID   VersionID // the proposal's minted ID; zero for markers
+	dataID   VersionID // the proposal's minted ID; zero for markers and multipart
 	kind     Kind
 	size     int64
 	etag     []byte
@@ -32,6 +34,35 @@ type modelVersion struct {
 	retMode  RetentionMode
 	retUntil int64
 	hold     bool
+	parts    []modelPartRef // multipart assembly; nil for whole PUTs
+}
+
+type modelPartRef struct {
+	dataID VersionID
+	size   int64
+}
+
+type modelUpload struct {
+	key     string
+	created int64
+	parts   map[uint32]modelPart
+}
+
+type modelPart struct {
+	dataID VersionID
+	size   int64
+	etag   []byte
+}
+
+// partNumbers returns an upload's part numbers in ascending order — the
+// deterministic iteration the map cannot give.
+func (u *modelUpload) partNumbers() []uint32 {
+	nums := make([]uint32, 0, len(u.parts))
+	for n := range u.parts {
+		nums = append(nums, n)
+	}
+	slices.Sort(nums)
+	return nums
 }
 
 func newModel() *model {
@@ -103,6 +134,7 @@ func (m *model) createBucket(t *testing.T, p CreateBucket, got error) {
 		lockEnabled: p.ObjectLockEnabled,
 		versioning:  versioning,
 		objects:     make(map[string][]modelVersion),
+		uploads:     make(map[VersionID]*modelUpload),
 	}
 }
 
@@ -113,7 +145,7 @@ func (m *model) deleteBucket(t *testing.T, p DeleteBucket, got error) {
 	switch {
 	case b == nil:
 		want = ErrNoSuchBucket
-	case len(b.objects) > 0:
+	case len(b.objects) > 0 || len(b.uploads) > 0:
 		want = ErrBucketNotEmpty
 	}
 	if !confirm(t, "DeleteBucket", want, got) {
@@ -211,6 +243,159 @@ func (m *model) deleteObject(t *testing.T, p DeleteObject, res DeleteObjectResul
 	b.objects[p.Key] = append(b.objects[p.Key], modelVersion{
 		id: res.MarkerID, kind: KindDeleteMarker, created: p.ProposedAtUnixMS, null: null,
 	})
+}
+
+func (m *model) createUpload(t *testing.T, p CreateMultipartUpload, got error) {
+	t.Helper()
+	var want error
+	b := m.buckets[p.Bucket]
+	switch {
+	case b == nil:
+		want = ErrNoSuchBucket
+	case validateObjectKey(p.Key) != nil:
+		want = ErrInvalidObjectKey
+	case b.uploads[p.UploadID] != nil:
+		want = ErrUploadExists
+	}
+	if !confirm(t, "CreateMultipartUpload", want, got) {
+		return
+	}
+	b.uploads[p.UploadID] = &modelUpload{key: p.Key, created: p.ProposedAtUnixMS, parts: make(map[uint32]modelPart)}
+}
+
+func (m *model) uploadPart(t *testing.T, p UploadPart, res UploadPartResult, got error) {
+	t.Helper()
+	var want error
+	b := m.buckets[p.Bucket]
+	var up *modelUpload
+	switch {
+	case b == nil:
+		want = ErrNoSuchBucket
+	case validateObjectKey(p.Key) != nil:
+		want = ErrInvalidObjectKey
+	case p.PartNumber < 1 || p.PartNumber > MaxPartNumber:
+		want = ErrInvalidPartNumber
+	default:
+		if up = b.uploads[p.UploadID]; up == nil || up.key != p.Key {
+			up = nil
+			want = ErrNoSuchUpload
+		}
+	}
+	if !confirm(t, "UploadPart", want, got) {
+		return
+	}
+	if prior, ok := up.parts[p.PartNumber]; ok != !res.ReplacedDataID.IsZero() || (ok && prior.dataID != res.ReplacedDataID) {
+		t.Fatalf("UploadPart: replaced %v, model has %+v", res.ReplacedDataID, up.parts[p.PartNumber])
+	}
+	up.parts[p.PartNumber] = modelPart{dataID: p.DataID, size: p.Size, etag: slices.Clone(p.ETag)}
+}
+
+// completeUpload restates the completion contract independently: list
+// ordering first, then per-part existence, ETag, and size; on success the
+// upload becomes a committed version exactly like a PUT, and the unused
+// parts come back for reclaim in part-number order.
+func (m *model) completeUpload(t *testing.T, p CompleteMultipartUpload, res CompleteResult, got error) {
+	t.Helper()
+	var want error
+	b := m.buckets[p.Bucket]
+	var up *modelUpload
+	switch {
+	case b == nil:
+		want = ErrNoSuchBucket
+	case validateObjectKey(p.Key) != nil:
+		want = ErrInvalidObjectKey
+	default:
+		if up = b.uploads[p.UploadID]; up == nil || up.key != p.Key {
+			up = nil
+			want = ErrNoSuchUpload
+		} else if len(p.Parts) == 0 {
+			want = ErrInvalidPart
+		} else {
+			for i := 1; i < len(p.Parts) && want == nil; i++ {
+				if p.Parts[i].PartNumber <= p.Parts[i-1].PartNumber {
+					want = ErrInvalidPartOrder
+				}
+			}
+			for i, cp := range p.Parts {
+				if want != nil {
+					break
+				}
+				mp, ok := up.parts[cp.PartNumber]
+				switch {
+				case !ok || !bytes.Equal(mp.etag, cp.ETag):
+					want = ErrInvalidPart
+				case i < len(p.Parts)-1 && mp.size < MinPartSize:
+					want = ErrPartTooSmall
+				}
+			}
+		}
+	}
+	if !confirm(t, "CompleteMultipartUpload", want, got) {
+		return
+	}
+
+	used := make(map[uint32]bool, len(p.Parts))
+	var size int64
+	var parts []modelPartRef
+	for _, cp := range p.Parts {
+		mp := up.parts[cp.PartNumber]
+		size += mp.size
+		parts = append(parts, modelPartRef{dataID: mp.dataID, size: mp.size})
+		used[cp.PartNumber] = true
+	}
+	var wantDiscard []VersionID
+	for _, n := range up.partNumbers() {
+		if !used[n] {
+			wantDiscard = append(wantDiscard, up.parts[n].dataID)
+		}
+	}
+	if !slices.Equal(res.DiscardedDataIDs, wantDiscard) {
+		t.Fatalf("CompleteMultipartUpload: discarded %v, model expects %v", res.DiscardedDataIDs, wantDiscard)
+	}
+
+	if vs := b.objects[p.Key]; len(vs) > 0 && res.VersionID.Compare(vs[len(vs)-1].id) <= 0 {
+		t.Fatalf("CompleteMultipartUpload: committed ID %v does not sort after newest", res.VersionID)
+	}
+	null := b.versioning != VersioningEnabled
+	if null {
+		if i := b.findNull(p.Key); i >= 0 {
+			b.removeAt(p.Key, i)
+		}
+	}
+	b.objects[p.Key] = append(b.objects[p.Key], modelVersion{
+		id: res.VersionID, kind: KindObject, size: size,
+		etag: slices.Clone(p.ETag), created: p.ProposedAtUnixMS, null: null, parts: parts,
+	})
+	delete(b.uploads, p.UploadID)
+}
+
+func (m *model) abortUpload(t *testing.T, p AbortMultipartUpload, res AbortResult, got error) {
+	t.Helper()
+	var want error
+	b := m.buckets[p.Bucket]
+	var up *modelUpload
+	switch {
+	case b == nil:
+		want = ErrNoSuchBucket
+	case validateObjectKey(p.Key) != nil:
+		want = ErrInvalidObjectKey
+	default:
+		if up = b.uploads[p.UploadID]; up == nil || up.key != p.Key {
+			up = nil
+			want = ErrNoSuchUpload
+		}
+	}
+	if !confirm(t, "AbortMultipartUpload", want, got) {
+		return
+	}
+	var wantIDs []VersionID
+	for _, n := range up.partNumbers() {
+		wantIDs = append(wantIDs, up.parts[n].dataID)
+	}
+	if !slices.Equal(res.PartDataIDs, wantIDs) {
+		t.Fatalf("AbortMultipartUpload: reclaim list %v, model expects %v", res.PartDataIDs, wantIDs)
+	}
+	delete(b.uploads, p.UploadID)
 }
 
 func (m *model) deleteVersion(t *testing.T, p DeleteVersion, res DeleteVersionResult, got error) {
@@ -348,6 +533,14 @@ func (m *model) check(t *testing.T, s *Store) {
 					sv.RetainUntilUnixMS != mv.retUntil || sv.LegalHold != mv.hold {
 					t.Fatalf("%s/%s version %d mismatch:\nstore %+v\nmodel %+v", cfg.Name, key, j, sv, mv)
 				}
+				if len(sv.Parts) != len(mv.parts) {
+					t.Fatalf("%s/%s version %d: store has %d parts, model %d", cfg.Name, key, j, len(sv.Parts), len(mv.parts))
+				}
+				for pi, sp := range sv.Parts {
+					if sp.DataID != mv.parts[pi].dataID || sp.Size != mv.parts[pi].size {
+						t.Fatalf("%s/%s version %d part %d mismatch: %+v vs %+v", cfg.Name, key, j, pi, sp, mv.parts[pi])
+					}
+				}
 				if j > 0 && svs[j-1].VersionID.Compare(sv.VersionID) <= 0 {
 					t.Fatalf("%s/%s: version list is not strictly newest-first", cfg.Name, key)
 				}
@@ -358,7 +551,8 @@ func (m *model) check(t *testing.T, s *Store) {
 			if wantCur := newest.kind == KindObject; ok != wantCur {
 				t.Fatalf("%s/%s: current present=%v, want %v", cfg.Name, key, ok, wantCur)
 			} else if wantCur {
-				if cur.VersionID != newest.id || cur.Size != newest.size || !bytes.Equal(cur.ETag, newest.etag) {
+				if cur.VersionID != newest.id || cur.Size != newest.size || !bytes.Equal(cur.ETag, newest.etag) ||
+					cur.PartCount != uint32(len(newest.parts)) {
 					t.Fatalf("%s/%s: current record mismatch: %+v", cfg.Name, key, cur)
 				}
 				liveKeys = append(liveKeys, key)
@@ -384,9 +578,71 @@ func (m *model) check(t *testing.T, s *Store) {
 		if storeVersions != totalVersions {
 			t.Fatalf("bucket %q: store holds %d version rows, model %d", cfg.Name, storeVersions, totalVersions)
 		}
+
+		m.checkUploads(t, s, cfg.Name, mb)
 	}
 
 	m.checkDerivedIndex(t, s)
+}
+
+// checkUploads compares a bucket's u/ state against the model: the upload
+// listing (content and key-then-initiation order), every upload's part
+// rows, and the row count (no phantoms).
+func (m *model) checkUploads(t *testing.T, s *Store, bucket string, mb *modelBucket) {
+	t.Helper()
+
+	type uploadID struct {
+		key string
+		id  VersionID
+	}
+	var want []uploadID
+	for id, up := range mb.uploads {
+		want = append(want, uploadID{up.key, id})
+	}
+	slices.SortFunc(want, func(a, b uploadID) int {
+		if a.key != b.key {
+			return strings.Compare(a.key, b.key)
+		}
+		return a.id.Compare(b.id)
+	})
+	got := s.ListUploads(bucket, "", "", VersionID{}, len(want)+1)
+	if len(got) != len(want) {
+		t.Fatalf("bucket %q: store lists %d uploads, model has %d", bucket, len(got), len(want))
+	}
+	for i, g := range got {
+		if g.Key != want[i].key || g.Upload.UploadID != want[i].id {
+			t.Fatalf("bucket %q upload %d: store (%q, %v), model (%q, %v)",
+				bucket, i, g.Key, g.Upload.UploadID, want[i].key, want[i].id)
+		}
+	}
+
+	totalParts := 0
+	for id, up := range mb.uploads {
+		totalParts += len(up.parts)
+		parts, ok := s.ListUploadParts(bucket, up.key, id, 0, len(up.parts)+1)
+		if !ok || len(parts) != len(up.parts) {
+			t.Fatalf("bucket %q upload %v: store has %d parts (exists=%v), model %d", bucket, id, len(parts), ok, len(up.parts))
+		}
+		for _, sp := range parts {
+			mp, ok := up.parts[sp.PartNumber]
+			if !ok || sp.DataID != mp.dataID || sp.Size != mp.size || !bytes.Equal(sp.ETag, mp.etag) {
+				t.Fatalf("bucket %q upload %v part %d mismatch: %+v vs %+v", bucket, id, sp.PartNumber, sp, mp)
+			}
+		}
+	}
+
+	rows := 0
+	prefix := uploadsScanPrefix(bucket)
+	s.kv.scan(prefix, func(k string, _ any) bool {
+		if !hasPrefix(k, prefix) {
+			return false
+		}
+		rows++
+		return true
+	})
+	if rows != len(mb.uploads)+totalParts {
+		t.Fatalf("bucket %q: store holds %d u/ rows, model %d", bucket, rows, len(mb.uploads)+totalParts)
+	}
 }
 
 // checkDerivedIndex rebuilds what c/ should be from a raw scan of v/ and

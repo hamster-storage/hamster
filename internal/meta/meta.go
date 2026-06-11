@@ -30,6 +30,19 @@ var (
 	ErrObjectLocked           = errors.New("version is protected by object lock")
 	ErrInvalidVersioningState = errors.New("invalid versioning state change")
 	ErrInvalidRetention       = errors.New("invalid retention")
+	ErrNoSuchUpload           = errors.New("no such multipart upload")
+	ErrUploadExists           = errors.New("multipart upload ID already exists")
+	ErrInvalidPartNumber      = errors.New("part number out of range")
+	ErrInvalidPart            = errors.New("part not found or ETag mismatch")
+	ErrInvalidPartOrder       = errors.New("part list is not in ascending order")
+	ErrPartTooSmall           = errors.New("part below the minimum size")
+)
+
+// Multipart limits, S3 parity (docs/S3-API.md). Apply enforces both: the
+// minimum applies to every completed part except the last.
+const (
+	MinPartSize   = 5 << 20
+	MaxPartNumber = 10_000
 )
 
 // Store holds one replica's metadata state.

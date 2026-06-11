@@ -37,6 +37,8 @@ var (
 		"The specified key does not exist."}
 	errInvalidArgument = &s3Error{"InvalidArgument", http.StatusBadRequest,
 		"Invalid request argument."}
+	errMalformedXML = &s3Error{"MalformedXML", http.StatusBadRequest,
+		"The XML you provided was not well-formed or did not validate against the schema."}
 )
 
 // mapError translates a metadata-layer error into its S3 wire form.
@@ -60,6 +62,21 @@ func mapError(err error) *s3Error {
 		return &s3Error{"NoSuchVersion", http.StatusNotFound, "The specified version does not exist."}
 	case errors.Is(err, meta.ErrObjectLocked):
 		return &s3Error{"AccessDenied", http.StatusForbidden, "The object is protected by object lock."}
+	case errors.Is(err, meta.ErrNoSuchUpload):
+		return &s3Error{"NoSuchUpload", http.StatusNotFound,
+			"The specified multipart upload does not exist."}
+	case errors.Is(err, meta.ErrInvalidPartNumber):
+		return &s3Error{"InvalidArgument", http.StatusBadRequest,
+			"Part numbers must be integers between 1 and 10000."}
+	case errors.Is(err, meta.ErrInvalidPart):
+		return &s3Error{"InvalidPart", http.StatusBadRequest,
+			"One or more of the specified parts could not be found, or an ETag did not match."}
+	case errors.Is(err, meta.ErrInvalidPartOrder):
+		return &s3Error{"InvalidPartOrder", http.StatusBadRequest,
+			"The list of parts was not in ascending part number order."}
+	case errors.Is(err, meta.ErrPartTooSmall):
+		return &s3Error{"EntityTooSmall", http.StatusBadRequest,
+			"Each part except the last must be at least 5 MiB."}
 	default:
 		return errInternal
 	}
