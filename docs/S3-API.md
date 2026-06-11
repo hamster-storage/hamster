@@ -2,7 +2,7 @@
 
 This document defines Hamster's S3 compatibility: which operations exist, when they arrive, how authentication works, and what the semantics promise. Companion ADRs: [ADR-0018](adr/0018-sigv4-auth.md) (authentication) and [ADR-0019](adr/0019-md5-etags.md) (ETags).
 
-> **Status: design document.** Nothing here is implemented. Operations are commitments of intent, scheduled against [ROADMAP.md](ROADMAP.md).
+> **Status: partially implemented.** The gateway (`internal/gateway`) serves SigV4-authenticated bucket CRUD, PutObject/GetObject (with Range)/HeadObject/DeleteObject, and both ListObjects versions, verified end to end against the `aws` CLI — including its default `aws-chunked` streaming uploads. Still pending from the v0.1 table: multipart, `CopyObject`, `DeleteObjects`, virtual-hosted addressing, and `Content-MD5` enforcement. Everything else remains a commitment of intent, scheduled against [ROADMAP.md](ROADMAP.md).
 
 ## What "S3 compatible" means here
 
