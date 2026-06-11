@@ -9,13 +9,13 @@ Hamster is a self hosted, S3 compatible object store built around one idea: obje
 
 ## Why Hamster
 
-The self hosted S3 landscape shifted in 2026. MinIO archived its community edition and steered users toward a commercial product. The remaining open source options each ask you to give something up: SeaweedFS is capable but carries a lot of moving parts, and Garage is wonderfully simple but skips versioning and object lock.
+The self hosted S3 landscape shifted in 2026 when MinIO archived its community edition and steered users toward a commercial product. The open source stores that remain are good software, but they cluster at two ends: feature-rich systems that bring real operational weight, and admirably simple ones that leave out the features regulated data can't live without.
 
 Hamster aims for the missing middle:
 
 - The simplicity of a single binary you can run anywhere.
 - The durability of erasure coding, so storage stays cheap without giving up safety.
-- The compliance features that lightweight stores leave out: versioning, object lock, and WORM retention.
+- The compliance features that simpler stores skip: versioning, object lock, and WORM retention — the controls that retention and audit regimes (think HIPAA or SEC 17a-4) actually ask for.
 - A permissive Apache 2.0 license, so you can build on it without legal friction.
 
 ## Design principles
