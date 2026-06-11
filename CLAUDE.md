@@ -39,9 +39,10 @@ task build      # CGO_ENABLED=0 go build ./...
 task test       # all tests, including the simulation harness
 task test-race  # the same tests under the race detector (the detector needs cgo; race builds are never shipped)
 task check      # go vet + gofmt
+task compat     # third-party client compatibility suite (aws CLI, rclone, restic, s3cmd) against an in-process gateway; absent tools skip
 ```
 
-All four must pass before any commit.
+The first four must pass before any commit. `compat` is not part of the pre-commit gate (it shells out to locally installed third-party binaries — not hermetic), but run it for any change touching `internal/gateway` or `internal/sigv4`. Its tests live in `test/compat` behind the `compat` build tag.
 
 ## Code layout
 
