@@ -39,6 +39,8 @@ var (
 		"Invalid request argument."}
 	errMalformedXML = &s3Error{"MalformedXML", http.StatusBadRequest,
 		"The XML you provided was not well-formed or did not validate against the schema."}
+	errInvalidRequest = &s3Error{"InvalidRequest", http.StatusBadRequest,
+		"Copying an object to itself requires the REPLACE metadata directive."}
 )
 
 // mapError translates a metadata-layer error into its S3 wire form.

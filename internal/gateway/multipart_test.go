@@ -222,12 +222,6 @@ func TestMultipartErrors(t *testing.T) {
 			t.Fatalf("part number %s: %s", n, code)
 		}
 	}
-	// UploadPartCopy is honestly refused, not silently mis-served.
-	if code := e.errorCode(e.do("PUT", "/bkt/k?partNumber=1&uploadId="+uid, nil,
-		map[string]string{"x-amz-copy-source": "/bkt/other"}), 501); code != "NotImplemented" {
-		t.Fatalf("UploadPartCopy: %s", code)
-	}
-
 	// Completion failures, each with its S3 code.
 	complete := func(body []byte) *http.Response {
 		return e.do("POST", "/bkt/k?uploadId="+uid, body, nil)

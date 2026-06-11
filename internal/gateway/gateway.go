@@ -189,7 +189,7 @@ func (g *Gateway) serveObject(w http.ResponseWriter, r *http.Request, id *sigv4.
 		switch r.Method {
 		case http.MethodPut:
 			if r.Header.Get("x-amz-copy-source") != "" {
-				writeError(w, r, errNotImplemented) // UploadPartCopy: with CopyObject's pass
+				g.uploadPartCopy(w, r, bucket, key, uid)
 				return
 			}
 			g.uploadPart(w, r, id, bucket, key, uid)
@@ -211,7 +211,7 @@ func (g *Gateway) serveObject(w http.ResponseWriter, r *http.Request, id *sigv4.
 	switch r.Method {
 	case http.MethodPut:
 		if r.Header.Get("x-amz-copy-source") != "" {
-			writeError(w, r, errNotImplemented) // CopyObject: its own pass
+			g.copyObject(w, r, bucket, key)
 			return
 		}
 		g.putObject(w, r, id, bucket, key)

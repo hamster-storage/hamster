@@ -2,7 +2,7 @@
 
 This document defines Hamster's S3 compatibility: which operations exist, when they arrive, how authentication works, and what the semantics promise. Companion ADRs: [ADR-0018](adr/0018-sigv4-auth.md) (authentication) and [ADR-0019](adr/0019-md5-etags.md) (ETags).
 
-> **Status: partially implemented.** The gateway (`internal/gateway`) serves SigV4-authenticated bucket CRUD, PutObject/GetObject (with Range)/HeadObject/DeleteObject, both ListObjects versions, and the full multipart group (`CreateMultipartUpload` through `ListMultipartUploads`, with composite `-N` ETags per [ADR-0019](adr/0019-md5-etags.md)) — verified end to end against the `aws` CLI, including its default `aws-chunked` streaming uploads and its automatic multipart split above 8 MiB. Still pending from the v0.1 table: `CopyObject`, `DeleteObjects`, `UploadPartCopy`, virtual-hosted addressing, and `Content-MD5` enforcement. Everything else remains a commitment of intent, scheduled against [ROADMAP.md](ROADMAP.md).
+> **Status: partially implemented.** The gateway (`internal/gateway`) serves SigV4-authenticated bucket CRUD, PutObject/GetObject (with Range)/HeadObject/DeleteObject, both ListObjects versions, the full multipart group (`CreateMultipartUpload` through `ListMultipartUploads`, with composite `-N` ETags per [ADR-0019](adr/0019-md5-etags.md)), and `CopyObject`/`UploadPartCopy` (read-and-rewrite, with the COPY/REPLACE metadata directive and `x-amz-copy-source-range`; conditional and versioned sources are refused until their machinery exists) — verified end to end against the `aws` CLI, including its default `aws-chunked` streaming uploads, its automatic multipart split above 8 MiB, and server-side `s3 cp` copies. Still pending from the v0.1 table: `DeleteObjects`, virtual-hosted addressing, and `Content-MD5` enforcement. Everything else remains a commitment of intent, scheduled against [ROADMAP.md](ROADMAP.md).
 
 ## What "S3 compatible" means here
 
@@ -18,7 +18,7 @@ v0.1 is the single-node store, and it ships a *complete usable* S3 core — incl
 | Bucket | `CreateBucket`, `DeleteBucket`, `HeadBucket`, `GetBucketLocation` | Delete requires empty. Location returns the configured region string. |
 | Listing | `ListObjectsV2`, `ListObjects` (V1) | Both: V1 costs little and old tools still call it. Prefix, delimiter, continuation tokens — pure `c/` keyspace scans ([METADATA.md](METADATA.md)). |
 | Object | `PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `DeleteObjects`, `CopyObject` | `GetObject` supports `Range`. v0.1 `CopyObject` is a full server-side read-and-rewrite — shard sharing between versions would need GC refcounting; an optimization for later, not a semantic change. |
-| Multipart | `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListMultipartUploads`, `ListParts` | Upload state lives under the reserved `u/` metadata prefix. Each part is encoded independently; `CompleteMultipartUpload` is one metadata transaction assembling the part list into a version entry — the linearization point, like any PUT. `UploadPartCopy` deferred. |
+| Multipart | `CreateMultipartUpload`, `UploadPart`, `UploadPartCopy`, `CompleteMultipartUpload`, `AbortMultipartUpload`, `ListMultipartUploads`, `ListParts` | Upload state lives under the `u/` metadata prefix ([METADATA.md](METADATA.md)). Each part is encoded independently; `CompleteMultipartUpload` is one metadata transaction assembling the part list into a version entry — the linearization point, like any PUT. |
 | Auth | SigV4: `Authorization` header, presigned query URLs, `UNSIGNED-PAYLOAD`, and `aws-chunked` streaming signatures | See [Authentication](#authentication). Presigned GET/PUT URLs fall out of query-string SigV4 for free. |
 
 ## Arrival schedule for the rest
@@ -30,7 +30,7 @@ API groups land with the release that builds their machinery, matching the [road
 | v0.5 | Versioning: `PutBucketVersioning`, `GetBucketVersioning`, `ListObjectVersions`, `GetObject`/`HeadObject`/`DeleteObject` with `versionId`. The metadata already models version lists from v0.1; this release exposes them. |
 | v0.6 | Object lock: `PutObjectLockConfiguration`, `GetObjectLockConfiguration`, `PutObjectRetention`, `GetObjectRetention`, `PutObjectLegalHold`, `GetObjectLegalHold`, plus the `x-amz-object-lock-*` headers on PUT. |
 | v0.7 | Encryption at rest ([ADR-0021](adr/0021-envelope-encryption-at-rest.md)): `x-amz-server-side-encryption: AES256` reported on PUT/HEAD/GET when the cluster encrypts (SSE-S3 semantics; the key is cluster-managed, not per-request). SSE-KMS and SSE-C deferred. |
-| v0.x later | Tagging (`Put/Get/DeleteObjectTagging`), `x-amz-checksum-*` additional checksums, `UploadPartCopy`, lifecycle expiration (a deliberately small subset). |
+| v0.x later | Tagging (`Put/Get/DeleteObjectTagging`), `x-amz-checksum-*` additional checksums, conditional copies (`x-amz-copy-source-if-*`), lifecycle expiration (a deliberately small subset). |
 
 ## Authentication
 
