@@ -14,8 +14,8 @@ import (
 // Clock implements seam.Clock on the real time package.
 //
 // time.AfterFunc runs callbacks on a runtime goroutine, not on a node event
-// loop; the node runtime is responsible for wrapping callbacks so they are
-// posted into its loop, preserving the seam.Clock delivery contract.
+// loop; wrap a Clock with LoopClock to restore the seam.Clock delivery
+// contract.
 type Clock struct{}
 
 // Now implements seam.Clock.

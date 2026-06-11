@@ -45,7 +45,7 @@ All four must pass before any commit.
 
 ## Code layout
 
-- [`internal/seam`](internal/seam/) — the interfaces between core logic and the world: `Clock`, `Transport`, `Disk`. Core code receives these; it never touches the OS directly. Randomness is a seeded `*math/rand/v2.Rand`, no interface needed.
+- [`internal/seam`](internal/seam/) — the interfaces between core logic and the world: `Loop`, `Clock`, `Transport`, `Disk`. Core code receives these; it never touches the OS directly. Randomness is a seeded `*math/rand/v2.Rand`, no interface needed.
 - [`internal/sim`](internal/sim/) — the deterministic simulation harness ([ADR-0009](docs/adr/0009-deterministic-simulation-testing.md)): global event queue, virtual time, seeded PRNG, faulty network, crash-faithful disk. New core logic gets built and tested under this from day one.
 - [`internal/sys`](internal/sys/) — production adapters over the OS. Thin and boring by rule: **no logic in the adapters** — code that makes a decision belongs on the core side of the seam.
 

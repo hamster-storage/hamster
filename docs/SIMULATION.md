@@ -56,6 +56,13 @@ The honest residue: data-plane and adapter code can have concurrency bugs of its
 Production code never touches time, randomness, the network, or the filesystem directly (already a CLAUDE.md convention). It receives interfaces, which live in [`internal/seam`](../internal/seam/):
 
 ```go
+type Loop interface {
+    Post(fn func())
+    // The node's event loop: the single logical thread that owns all core
+    // state. Adapters and the data plane hand work back to the core by
+    // posting, never by sharing memory.
+}
+
 type Clock interface {
     Now() time.Time
     AfterFunc(d time.Duration, fn func()) Timer
