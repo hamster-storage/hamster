@@ -41,6 +41,6 @@ v1.0 is the line where Hamster asks to be trusted:
 
 - Stable formats with a Go style compatibility promise: v1 formats remain readable forever
 - Zero downtime rolling upgrades, validated by the upgrade test suite
-- The web console
+- The web console ([ADR-0020](adr/0020-embedded-htmx-web-console.md): embedded, on the admin port, server-rendered with htmx)
 
 See [ADR-0010](adr/0010-v1-compatibility-policy.md) for what the version numbers promise.
