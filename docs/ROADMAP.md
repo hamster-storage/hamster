@@ -1,6 +1,6 @@
 # Roadmap
 
-High level milestones only. Day to day work is tracked in GitHub Issues and Projects, not here.
+High level milestones only. Day to day work lives in the design docs themselves — each doc's open-questions section is the backlog (GitHub Issues may take over once the code matures).
 
 > Hamster is at v0 and not production ready. Everything below is a goal, not a shipped capability.
 
