@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (verification implemented in `internal/sigv4`, validated against the AWS example signatures)
 
 ## Context
 
