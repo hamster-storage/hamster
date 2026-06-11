@@ -25,7 +25,7 @@ These are the load bearing design decisions. Code or docs that break them are wr
 - Errors are wrapped with context (`fmt.Errorf("...: %w", err)`) and checked, not ignored.
 - No global mutable state; pass dependencies explicitly so the simulation harness can substitute clocks, networks, and disks.
 - Anything that touches time, randomness, the network, or the filesystem goes behind an interface that the simulator can control. Determinism is a feature, not a test affordance bolted on later.
-- Version IDs are UUIDv7 via `google/uuid` (`NewV7`), kept as `[16]byte` so the future standard library uuid type is a one line swap. See [ADR-0007](docs/adr/0007-uuidv7-version-ids.md).
+- Version IDs are UUIDv7, minted in-repo by `meta.NewVersionID` from explicit clock and PRNG inputs — `google/uuid`'s `NewV7` reads ambient time and randomness, which the determinism rule forbids. Kept as `[16]byte` (`meta.VersionID`). See [ADR-0007](docs/adr/0007-uuidv7-version-ids.md).
 - Prefer the standard library. Every dependency must justify itself — the single binary, no external services promise extends to keeping the module graph small.
 - **No cgo, anywhere.** Hamster builds with `CGO_ENABLED=0`, always. Dependencies must be pure Go — a library that requires cgo is disqualified no matter how good it is. (Go assembly is fine: that is how `klauspost/reedsolomon` gets its SIMD speed.) This is what keeps the binary truly static and cross-compilation trivial; see [ADR-0002](docs/adr/0002-single-binary-no-external-dependencies.md).
 - **Dependency licensing: permissive only.** Any imported package must be Apache 2.0 or similarly permissive (MIT, BSD, ISC), including transitive dependencies. No copyleft (GPL, LGPL, MPL) and no source-available licenses (BUSL, SSPL). Exceptions require an ADR. See [ADR-0011](docs/adr/0011-permissive-only-dependencies.md).
@@ -47,6 +47,7 @@ All four must pass before any commit.
 
 - [`internal/seam`](internal/seam/) — the interfaces between core logic and the world: `Loop`, `Clock`, `Transport`, `Disk`. Core code receives these; it never touches the OS directly. Randomness is a seeded `*math/rand/v2.Rand`, no interface needed.
 - [`internal/sim`](internal/sim/) — the deterministic simulation harness ([ADR-0009](docs/adr/0009-deterministic-simulation-testing.md)): global event queue, virtual time, seeded PRNG, faulty network, crash-faithful disk. New core logic gets built and tested under this from day one.
+- [`internal/meta`](internal/meta/) — the metadata model ([METADATA.md](docs/METADATA.md), [ADR-0014](docs/adr/0014-metadata-keyspace-design.md)): the version-list keyspace, deterministic apply, version IDs. Pure stdlib, no seam imports — proposals carry every input apply needs. Tested against an independent reference model with seeded randomized workloads.
 - [`internal/sys`](internal/sys/) — production adapters over the OS. Thin and boring by rule: **no logic in the adapters** — code that makes a decision belongs on the core side of the seam.
 
 ## Where the design lives

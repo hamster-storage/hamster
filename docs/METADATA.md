@@ -2,7 +2,7 @@
 
 This document designs the metadata layer: the protobuf records and the BadgerDB keyspace that hold everything Hamster knows about its objects. It is the concrete companion to [ADR-0005](adr/0005-metadata-badgerdb-raft.md) (where metadata lives), [ADR-0006](adr/0006-versioning-and-object-lock.md) (what versioning must support), [ADR-0008](adr/0008-versioned-formats-rolling-upgrades.md) (how formats evolve), and [ADR-0014](adr/0014-metadata-keyspace-design.md) (the keyspace decisions made here).
 
-> **Status: design document.** No `.proto` files or code exist yet. Message shapes below are illustrative and will be settled with the first v0.1 code — but the keyspace structure and the principles are the design of record.
+> **Status: design document, partially implemented.** The model lives in [`internal/meta`](../internal/meta/): the keyspace encoding, deterministic apply, and version-ID rules below are now code, tested against an independent reference model. Records are Go structs mirroring the protobuf sketches; the `.proto` files and wire/disk encodings land with persistence and the Raft log.
 
 ## Principles
 
@@ -202,5 +202,5 @@ PUT writes shards *before* the metadata commit, so a crash mid-PUT leaves orphan
 ## Open questions
 
 - ~~ETag semantics~~ — resolved by [ADR-0019](adr/0019-md5-etags.md): ETags are MD5 (compatibility), integrity rides the internal checksums; the `etag` field stores the MD5 or multipart composite.
-- Final proto field layout and the exact key-encoding bytes — settled with the first v0.1 code, with format conformance tests from day one.
+- ~~The exact key-encoding bytes~~ — settled in `internal/meta/keys.go`, with round-trip and ordering tests. Final proto field layout still lands with the persistence encoding, with format conformance tests from day one.
 - Whether `shard_checksums` should also be mirrored into shard file headers on disk (probably yes, for offline inspection) — a data-plane format question, not a metadata one.

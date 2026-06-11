@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted (amended 2026-06-11: IDs are minted in-repo from explicit inputs; the `google/uuid` dependency is dropped)
 
 ## Context
 
@@ -16,10 +16,11 @@ One sharp edge: the timestamp has millisecond precision, so two versions created
 
 ## Decision
 
-**Version IDs are UUIDv7**, generated via `google/uuid` (`uuid.NewV7()`).
+**Version IDs are UUIDv7**, minted in-repo (`meta.NewVersionID`) from explicit inputs: a clock reading and a PRNG, supplied by the caller. The RFC 9562 layout is about twenty lines of standard library code.
 
-- The ID is kept as a **`[16]byte`** value internally, so when the Go standard library ships its uuid type, adopting it is a one line swap.
-- **Intra-millisecond monotonicity is handled explicitly** — same-millisecond writes on a node must still produce strictly increasing IDs (RFC 9562 anticipates this with its monotonic counter methods), so ordering within the index never depends on luck.
+- The original decision named `google/uuid`'s `NewV7()`. It was dropped before any code shipped: `NewV7` reads the ambient wall clock and global `crypto/rand`, and the determinism convention (CLAUDE.md, [ADR-0009](0009-deterministic-simulation-testing.md)) requires that anything touching time or randomness take them as inputs the simulator controls. Wrapping the library to inject both is more code than the generator itself.
+- The ID is kept as a **`[16]byte`** value (`meta.VersionID`) internally, so a future standard library uuid type remains a small swap if ever wanted.
+- **Monotonicity is handled at apply time**: if a proposal's ID does not sort after the key's newest version, apply increments it as a 128-bit value ([METADATA.md](../METADATA.md), "commit order beats clock order"). This subsumes the intra-millisecond tiebreak concern — same-millisecond collisions, skewed clocks, and duplicate mints all resolve to strict per-key ordering by Raft commit. A bumped ID may no longer decode as a valid UUIDv7 timestamp; version IDs are opaque ordered values that start life as UUIDv7, which is why `created_unix_ms` is stored explicitly.
 
 ## Consequences
 
@@ -27,7 +28,7 @@ One sharp edge: the timestamp has millisecond precision, so two versions created
 - Write locality improves in BadgerDB: new versions land near each other in the keyspace.
 - Ordering across nodes is only as good as clock sync; the authoritative order of concurrent same-key writes is decided by the metadata transaction in Raft ([ADR-0005](0005-metadata-badgerdb-raft.md)), not by comparing IDs. UUIDv7 ordering is an index property, not a distributed-consistency mechanism.
 - Version IDs leak coarse creation timestamps. Acceptable for an object store, where last-modified is exposed anyway.
-- The `google/uuid` dependency is small, maintained, and quarantined behind the `[16]byte` representation.
+- No dependency at all: the generator is pure standard library, and determinism under simulation comes for free because the inputs are explicit.
 
 ## Alternatives considered
 
