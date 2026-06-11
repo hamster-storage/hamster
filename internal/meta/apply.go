@@ -99,6 +99,7 @@ func (s *Store) ApplyPutObject(p PutObject) (PutResult, error) {
 	entry := VersionEntry{
 		FormatVersion:     currentFormatVersion,
 		VersionID:         vid,
+		DataID:            p.VersionID, // the minted ID the data was written under, pre-bump
 		Kind:              KindObject,
 		Size:              p.Size,
 		CreatedUnixMS:     p.ProposedAtUnixMS,
