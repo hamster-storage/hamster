@@ -95,9 +95,9 @@ func (g *Gateway) replacedNullDataIDs(bucket, key string) []meta.VersionID {
 	return nil
 }
 
-// getObject serves GET and HEAD. Range and conditional headers are handled
-// by http.ServeContent over the in-memory blob.
-func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+// lookupCurrent resolves a key's current version entry on the loop. The
+// returned error is ready for writeError.
+func (g *Gateway) lookupCurrent(bucket, key string) (meta.VersionEntry, error) {
 	var entry meta.VersionEntry
 	var bucketOK, found bool
 	g.onLoop(func() {
@@ -112,43 +112,56 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 		entry, found = g.cfg.Store.GetVersion(bucket, key, cur.VersionID)
 	})
 	if !bucketOK {
-		writeError(w, r, meta.ErrNoSuchBucket)
-		return
+		return meta.VersionEntry{}, meta.ErrNoSuchBucket
 	}
 	if !found {
-		writeError(w, r, errNoSuchKey)
-		return
+		return meta.VersionEntry{}, errNoSuchKey
 	}
+	return entry, nil
+}
 
-	// The real integrity check (ADR-0019: ETags are compatibility, this is
-	// integrity): verify the stored checksums before serving a single byte.
-	// Whole PUTs carry one object checksum; multipart objects carry one per
-	// part, verified as the body is assembled from the part blobs.
-	var data []byte
+// readObjectData fetches and verifies an entry's bytes — the real
+// integrity check (ADR-0019: ETags are compatibility, this is integrity),
+// applied before a single byte is served or copied. Whole PUTs carry one
+// object checksum; multipart objects carry one per part, verified as the
+// body is assembled from the part blobs.
+func (g *Gateway) readObjectData(entry meta.VersionEntry) ([]byte, error) {
 	if len(entry.Parts) > 0 {
-		data = make([]byte, 0, entry.Size)
+		data := make([]byte, 0, entry.Size)
 		for _, p := range entry.Parts {
 			part, err := g.cfg.Blobs.Get(p.DataID)
 			if err != nil {
-				writeError(w, r, errInternal)
-				return
+				return nil, errInternal
 			}
 			if sum := sha256.Sum256(part); !bytes.Equal(sum[:], p.Checksum) {
-				writeError(w, r, errInternal)
-				return
+				return nil, errInternal
 			}
 			data = append(data, part...)
 		}
-	} else {
-		var err error
-		if data, err = g.cfg.Blobs.Get(entry.DataID); err != nil {
-			writeError(w, r, errInternal)
-			return
-		}
-		if sum := sha256.Sum256(data); !bytes.Equal(sum[:], entry.ObjectChecksum) {
-			writeError(w, r, errInternal)
-			return
-		}
+		return data, nil
+	}
+	data, err := g.cfg.Blobs.Get(entry.DataID)
+	if err != nil {
+		return nil, errInternal
+	}
+	if sum := sha256.Sum256(data); !bytes.Equal(sum[:], entry.ObjectChecksum) {
+		return nil, errInternal
+	}
+	return data, nil
+}
+
+// getObject serves GET and HEAD. Range and conditional headers are handled
+// by http.ServeContent over the in-memory blob.
+func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	entry, err := g.lookupCurrent(bucket, key)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	data, err := g.readObjectData(entry)
+	if err != nil {
+		writeError(w, r, err)
+		return
 	}
 
 	w.Header().Set("ETag", objectETag(entry.ETag, len(entry.Parts)))
