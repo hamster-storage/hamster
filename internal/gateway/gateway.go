@@ -241,6 +241,10 @@ func hasSubresource(q map[string][]string) bool {
 			"continuation-token", "start-after", "marker", "fetch-owner",
 			"response-content-type", "response-content-disposition":
 			continue
+		case "x-id":
+			// aws-sdk-go-v2 (rclone among others) tags every request with
+			// its operation name; real S3 ignores it.
+			continue
 		}
 		if strings.HasPrefix(k, "X-Amz-") {
 			continue // presigned-URL auth parameters

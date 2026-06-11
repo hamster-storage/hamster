@@ -426,6 +426,12 @@ func TestRequestValidation(t *testing.T) {
 	if code := e.errorCode(e.do("GET", "/bkt/k?tagging", nil, nil), 501); code != "NotImplemented" {
 		t.Fatalf("subresource: %s", code)
 	}
+	// aws-sdk-go-v2 tags every request with ?x-id=<operation>; it must not
+	// read as a subresource (rclone's PUTs broke on this in the compat suite).
+	e.expect(e.do("PUT", "/bkt/xid?x-id=PutObject", []byte("x"), nil), 200)
+	if got := e.expect(e.do("GET", "/bkt/xid?x-id=GetObject", nil, nil), 200); string(got) != "x" {
+		t.Fatalf("x-id round trip: %q", got)
+	}
 	if code := e.errorCode(e.do("POST", "/bkt?notreal", nil, nil), 501); code != "NotImplemented" {
 		t.Fatalf("unknown bucket POST: %s", code)
 	}
