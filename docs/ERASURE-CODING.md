@@ -126,6 +126,16 @@ The hard invariant stays node-level — never two shards of one object on the sa
 
 One cluster is one region. Raft quorum and shard writes are synchronous, so stretching a cluster across regions (us-east-1 to us-east-2) buys every write the inter-region round trip; spreading across AZs within a region is the intended wide case. Multi-region is a future replication feature between clusters, not a stretched cluster.
 
+### Downtime versus loss
+
+Two very different events hide inside "a node failed," and confusing them makes clusters look more fragile than they are:
+
+**A node down with its disk intact loses nothing, ever.** A power cut, a reboot, a crashed process, every node in the cluster turned off at once — turn them back on and the cluster resumes. Each node recovers its local state from disk (the WAL replays; torn tails from mid-write crashes are tolerated by design — the simulation harness's crash schedules exist to prove exactly this), Raft re-forms quorum, and the API returns with no operator action. While too many nodes are down the cluster is *unavailable* — below Raft quorum no API call answers, below the ack floor writes are refused — but unavailability is never loss, and recovery from it is "plug it back in." There is no scenario where restarting intact nodes requires re-joining, repair, or recovery ceremony. (A 3-node cluster with two nodes powered off is not a disaster; it is a cluster waiting for electricity.)
+
+**A destroyed disk permanently loses that node's shards, and the budget for that is `m`.** Each object tolerates losing up to `m` of its shards (per its own recorded parameters); repair rebuilds missing shards from any `k` survivors onto healthy capacity. The clock that matters is the repair window: while shards are missing, the remaining budget is smaller, and an object that loses more than `m` shards before repair catches up is gone — not damaged, not recoverable-with-effort: below `k` shards the information no longer exists. That boundary is not a Hamster limitation; it is the arithmetic every erasure-coded and every replicated system lives by. Redundancy is purchased capacity and `m` is the amount purchased — the only levers that move it are a wider profile, faster repair, and spreading shards across failure domains that don't fail together.
+
+When loss does exceed the budget, what Hamster owes the operator is an honest accounting: metadata replicates separately through Raft and routinely survives data losses it cannot repair (quorum intact, or [`cluster recover`](#replacing-dead-hardware) on a survivor), so the cluster can produce an authoritative inventory of exactly which objects are unrecoverable. For the audit-shaped user, "these objects were lost" is a categorically better answer than "we are not sure what we had."
+
 ### Replacing dead hardware
 
 - **Quorum intact** (any cluster of 3+ nodes — a dead disk among 15 doesn't blink): repair starts rebuilding the lost node's shards onto surviving capacity immediately, with no operator action. Replacement, whenever convenient: `hamster node init --data /mnt/newdisk`, `hamster cluster join`, `hamster cluster remove-node <dead-id>`. Rebalance flows partitions onto the fresh disk.
