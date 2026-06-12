@@ -16,9 +16,11 @@ const clusterUsage = `usage: hamster cluster <command> [flags]
 commands:
   init     create a new cluster: mint the CA and this node's identity
   token    mint a single-use join token (on the init node)
-  join     join an existing cluster with a token
+  join     join an existing cluster with a token (identity only; run starts it)
   run      run this cluster node (v0.2 preview: the replicated metadata
-           plane; S3 serving joins it with the erasure-coded data path)
+           plane; S3 serving joins it with the erasure-coded data path).
+           With -token, an uninitialized node joins first — one command,
+           restart-safe
   status   show cluster membership from a running node
 `
 
@@ -102,9 +104,27 @@ func clusterJoin(args []string) error {
 func clusterRun(args []string) error {
 	fs := flag.NewFlagSet("cluster run", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	node := fs.String("node", "", "this node's ID (first boot with -token only)")
+	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address (first boot with -token only)")
+	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address (first boot with -token only)")
+	token := fs.String("token", "", "join token: an uninitialized data directory joins before running; ignored once joined, so the same command line is restart-safe")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
+	}
+	if !cluster.Initialized(*dataDir) {
+		if *token == "" {
+			return fmt.Errorf("%s is not part of a cluster: run `hamster cluster init` or `hamster cluster join`, or pass -token to join and run in one step", *dataDir)
+		}
+		if *node == "" {
+			return fmt.Errorf("-node is required when joining with -token")
+		}
+		if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token); err != nil {
+			return err
+		}
+		log.Printf("joined as node %s", *node)
+	} else if *token != "" {
+		log.Printf("already a cluster member; ignoring -token")
 	}
 	n, err := cluster.Run(*dataDir)
 	if err != nil {
