@@ -22,6 +22,8 @@ commands:
            With -token, an uninitialized node joins first — one command,
            restart-safe
   status   show cluster membership from a running node
+  recover  rewrite a stopped survivor into a new single-voter cluster —
+           the last resort when a majority of voters is permanently lost
 `
 
 func clusterCmd(args []string) error {
@@ -40,6 +42,8 @@ func clusterCmd(args []string) error {
 		return clusterRun(args[1:])
 	case "status":
 		return clusterStatus(args[1:])
+	case "recover":
+		return clusterRecover(args[1:])
 	default:
 		fmt.Fprint(os.Stderr, clusterUsage)
 		os.Exit(2)
@@ -137,6 +141,46 @@ func clusterRun(args []string) error {
 	<-stop
 	log.Printf("hamster cluster node: shutting down")
 	n.Stop()
+	return nil
+}
+
+func clusterRecover(args []string) error {
+	fs := flag.NewFlagSet("cluster recover", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "the surviving node's data directory (required)")
+	force := fs.Bool("force", false, "confirm: the other members are gone forever and their data directories will never run again")
+	fs.Parse(args)
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
+	}
+	if !*force {
+		fmt.Fprintln(os.Stderr, `cluster recover rewrites this stopped node into a NEW single-voter cluster.
+
+Use it only when a majority of voters is permanently lost — dead disks,
+not a reboot. It is irreversible:
+
+  - everything in this node's local log becomes the cluster's history,
+    including entries the old cluster may never have acknowledged
+  - every other member is removed; their data directories hold a
+    competing history and MUST NEVER run again
+  - the cluster then grows again with fresh join tokens
+
+If the missing nodes might come back, start them instead - quorum will
+re-form on its own. To proceed, rerun with -force.`)
+		os.Exit(2)
+	}
+	sum, err := cluster.Recover(*dataDir)
+	if err != nil {
+		return err
+	}
+	log.Printf("recovered: a new single-voter cluster at log index %d", sum.LastIndex)
+	for _, m := range sum.Removed {
+		log.Printf("removed: %s (raft id %d, %s) — its data directory must never run again", m.Addr, m.ID, m.Dial)
+	}
+	if !cluster.CanIssue(*dataDir) {
+		log.Printf("WARNING: this node does not hold the cluster CA key (ca.key lives on the init node);")
+		log.Printf("WARNING: it cannot mint join tokens, so this cluster cannot grow until the CA is restored")
+	}
+	log.Printf("next: hamster cluster run -data-dir %s", *dataDir)
 	return nil
 }
 

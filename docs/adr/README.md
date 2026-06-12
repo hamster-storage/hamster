@@ -32,6 +32,7 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0022](0022-cluster-mtls.md) | Mutual TLS for all inter-node traffic, cluster CA minted at init |
 | [0023](0023-handwritten-protowire-codecs.md) | Hand-written protowire codecs for metadata records, deterministic, unknown-preserving |
 | [0024](0024-deterministic-election-timing.md) | Hamster owns Raft election timing: external, seeded, simulator-schedulable |
+| [0025](0025-force-new-cluster-recovery.md) | `cluster recover` is an offline force-new-cluster, and the local log wins |
 
 ## Template
 

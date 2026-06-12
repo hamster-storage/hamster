@@ -160,6 +160,86 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	}
 }
 
+// TestRecoverRebuildsSingleVoterCluster: a two-node cluster loses n2
+// forever; recover rewrites the stopped n1 into a sole-voter cluster that
+// runs, leads, and grows again with a fresh token.
+func TestRecoverRebuildsSingleVoterCluster(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "rec", "n1", freeAddr(t), freeAddr(t), now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	tok, err := MintToken(d1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Join(d2, "n2", freeAddr(t), freeAddr(t), tok); err != nil {
+		t.Fatal(err)
+	}
+	n2, err := Run(d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n2.Stop()
+	waitStatus(t, d1, "", "two voters before the disaster", func(ms []Member) bool {
+		return len(ms) == 2 && voters(ms) == 2
+	})
+
+	// Recovery refuses a running node.
+	if _, err := Recover(d1); err == nil {
+		t.Fatal("recover ran against a live node")
+	}
+
+	// The disaster: n2 is gone forever, n1 stopped for offline recovery.
+	n2.Stop()
+	n1.Stop()
+	sum, err := Recover(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Removed) != 1 || string(sum.Removed[0].Addr) != "n2" {
+		t.Fatalf("recovery removed %v, want n2", sum.Removed)
+	}
+
+	n1b, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1b.Stop()
+	waitStatus(t, d1, "", "the survivor leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].NodeID == "n1" && ms[0].Leader && !ms[0].Learner
+	})
+
+	// And it grows again.
+	tok3, err := MintToken(d1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Join(d3, "n3", freeAddr(t), freeAddr(t), tok3); err != nil {
+		t.Fatal(err)
+	}
+	n3, err := Run(d3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n3.Stop()
+	ms := waitStatus(t, d1, "", "the recovered cluster growing to two voters", func(ms []Member) bool {
+		return len(ms) == 2 && voters(ms) == 2
+	})
+	// The dead member's Raft ID is never reissued.
+	for _, m := range ms {
+		if m.NodeID == "n3" && m.RaftID <= sum.Removed[0].ID {
+			t.Fatalf("n3 got raft id %d, not above the removed member's %d", m.RaftID, sum.Removed[0].ID)
+		}
+	}
+}
+
 func TestTokenRoundTrip(t *testing.T) {
 	tok := token{JoinAddr: "10.0.0.1:7947", CAHash: [32]byte{1, 2, 3}, ID: "abcd", Secret: []byte{9, 9, 9}}
 	got, err := decodeToken(encodeToken(tok))
