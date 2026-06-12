@@ -39,10 +39,11 @@ task build      # CGO_ENABLED=0 go build ./...
 task test       # all tests, including the simulation harness
 task test-race  # the same tests under the race detector (the detector needs cgo; race builds are never shipped)
 task check      # go vet + gofmt
+task e2e        # end-to-end suite over the real binary: real processes, real CLI, loopback mTLS (test/e2e, `e2e` build tag)
 task compat     # third-party client compatibility suite (aws CLI, rclone, restic, s3cmd) against an in-process gateway; absent tools skip
 ```
 
-The first four must pass before any commit. `compat` is not part of the pre-commit gate (it shells out to locally installed third-party binaries — not hermetic), but run it for any change touching `internal/gateway` or `internal/sigv4`. Its tests live in `test/compat` behind the `compat` build tag.
+The first four must pass before any commit. `e2e` and `compat` are not part of the pre-commit gate (`e2e` builds and spawns real processes — hermetic but slower; `compat` shells out to locally installed third-party binaries — not hermetic). Run `e2e` for changes touching `cmd/hamster` or `internal/cluster`, and `compat` for changes touching `internal/gateway` or `internal/sigv4`. Its tests live in `test/compat` behind the `compat` build tag.
 
 ## Code layout
 

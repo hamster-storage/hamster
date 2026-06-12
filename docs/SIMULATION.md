@@ -139,6 +139,8 @@ Every simulated run drives a generated workload (PUTs, GETs, overwrites, deletes
 
 ## Layer 2: end to end tests (real binaries)
 
+> **Status:** the first incarnation exists (`test/e2e`, `task e2e`): the v0.2 cluster lifecycle against the built binary — init, token joins, status, leader failover on SIGINT, restart from disk, clean shutdown — plus an S3 serve smoke. The upgrade suite below arrives with the feature-gate machinery (v0.8).
+
 ### Direct process execution, not containers
 
 The e2e suite spawns Hamster binaries as **plain child processes on localhost** — each with its own data directory, its own ports, talking over real loopback sockets. No Docker, no testcontainers. The reasoning:
