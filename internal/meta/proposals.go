@@ -5,8 +5,9 @@ package meta
 // gateway-minted version ID — because apply reads no ambient state
 // (METADATA.md principle 4). The gateway fills these from its seam.Clock
 // and World rand; apply trusts the fields and validates the semantics.
-// Protobuf encodings arrive with the Raft log; these shapes are the design
-// of record.
+// The wire encoding for the Raft log lives in proposal_codec.go
+// (EncodeProposal/DecodeProposal); field numbers match the Proposal
+// envelope in METADATA.md and are pinned by golden tests.
 
 // CreateBucket creates a bucket. ObjectLockEnabled implies versioning,
 // enabled at creation and never suspendable (S3 semantics).
