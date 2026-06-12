@@ -30,3 +30,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local dev artifacts: built server binaries and serve data directories
+/hamster
+/cmd/hamster/hamster
+/cmd/hamster/data/
+/data/
