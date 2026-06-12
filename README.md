@@ -57,7 +57,9 @@ aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://stash
 aws --endpoint-url http://127.0.0.1:9000 s3 cp video.mp4 s3://stash/
 ```
 
-rclone, restic, and s3cmd work too — a [compatibility suite](test/compat/) runs all four against every change. The v0.1 server is a single durable node (this is the dev preview: real workloads should wait for clustering and erasure coding); `hamster cluster` commands arrive with v0.2.
+## Clients
+
+`aws s3`, `rclone`, `restic`, and `s3cmd work too` — a [compatibility suite](test/compat/) runs all four against every change. The v0.1 server is a single durable node (this is the dev preview: real workloads should wait for clustering and erasure coding); `hamster cluster` commands arrive with v0.2.
 
 ## Roadmap
 
