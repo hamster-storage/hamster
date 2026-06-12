@@ -33,18 +33,17 @@ Hamster aims for the missing middle:
 
 High level and honest: a check mark means shipped and tested, not promised. Versions beyond that are the [roadmap](docs/ROADMAP.md)'s plan and may shift as the code pushes back.
 
-| Feature | Status | Version |
+| Version | Features | Status |
 |---|---|---|
-| Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with `aws`, `rclone`, `restic`, `s3cmd`) | ✅ | v0.1 |
-| Durable single-node store, streaming uploads | ✅ | v0.1 |
-| Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | 🚧 in progress | v0.2 |
-| Erasure-coded durability with self-healing repair | planned | v0.3 |
-| Partitioned placement and online rebalancing | planned | v0.4 |
-| Object versioning | planned | v0.5 |
-| Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned | v0.6 |
-| Encryption at rest (SSE-S3) | planned | v0.7 |
-| Zero-downtime rolling upgrades | planned | v0.8+ |
-| Web console | planned | v1.0 |
+| [v0.1](https://github.com/hamster-storage/hamster/releases/tag/v0.1.0) | <ul><li>Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with <code>aws</code>, <code>rclone</code>, <code>restic</code>, <code>s3cmd</code>)</li><li>Durable single-node store with streaming uploads</li></ul> | ✅ |
+| v0.2 | Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | 🚧 in progress |
+| v0.3 | Erasure-coded durability with self-healing repair | planned |
+| v0.4 | Partitioned placement and online rebalancing | planned |
+| v0.5 | Object versioning | planned |
+| v0.6 | Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned |
+| v0.7 | Encryption at rest (SSE-S3) | planned |
+| v0.8+ | Zero-downtime rolling upgrades | planned |
+| v1.0 | <ul><li>Web console</li><li>Stable formats with a compatibility promise</li></ul> | planned |
 
 ## Quick start
 
