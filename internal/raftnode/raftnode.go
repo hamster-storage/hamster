@@ -2,13 +2,18 @@
 // real time through seam.Clock, the faulty or real network through
 // seam.Transport, durability through a wal.Log on a seam.Disk. The library
 // is the inert consensus state machine ADR-0012 chose; this package is the
-// assembly it left to us — the write-ahead log, the transport glue, apply,
-// and (ADR-0024) the election timer.
+// assembly it left to us — the write-ahead log, snapshots, the transport
+// glue, apply, and (ADR-0024) the election timer.
 //
-// The metadata store is rebuilt at boot by replaying the committed prefix
-// of the Raft log into a fresh meta.Store: the log is the durability, the
-// store is a deterministic function of it. Snapshots arrive later to
-// compact the replay; until then the log only grows.
+// The metadata store is rebuilt at boot from the newest snapshot plus the
+// committed log tail: the log is the durability, the store a deterministic
+// function of it. Every SnapshotEntries applied entries, the node dumps
+// the store, hands the dump to raft as the snapshot at that index, and
+// rotates its log: one new file whose opening frame carries the snapshot,
+// the hard state, and the uncompacted tail — one frame, so a torn rotation
+// is simply an invalid file and boot falls back to the previous one, which
+// is only removed once the new frame is durable. The same rotation installs
+// a snapshot a leader streams to a lagging follower (MsgSnap).
 //
 // A Node is owned by its event loop, like every core component: every
 // method, timer callback, and message must run on the node's single
@@ -18,10 +23,13 @@ package raftnode
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"math"
 	"math/rand/v2"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"go.etcd.io/raft/v3"
@@ -38,7 +46,7 @@ import (
 // with a log index.
 var ErrNotLeader = errors.New("raftnode: not the leader")
 
-// Config assembles a Node. All fields are required.
+// Config assembles a Node. All fields are required unless noted.
 type Config struct {
 	// ID is this node's Raft ID; Peers maps every cluster member's Raft ID
 	// to its transport address, this node included. v0.2's first cut is a
@@ -56,7 +64,14 @@ type Config struct {
 	// again, drawn from Rand per ADR-0024.
 	TickInterval  time.Duration
 	ElectionTicks int
+
+	// SnapshotEntries is how many applied entries accumulate before the
+	// node snapshots the store and compacts its log. Zero means the
+	// default.
+	SnapshotEntries uint64
 }
+
+const defaultSnapshotEntries = 4096
 
 // Node is one Raft-replicated metadata replica.
 type Node struct {
@@ -64,20 +79,29 @@ type Node struct {
 	rn      *raft.RawNode
 	storage *raft.MemoryStorage
 	log     *wal.Log
+	logSeq  uint64
 	store   *meta.Store
 
 	applied   uint64
+	snapIndex uint64
+	confState raftpb.ConfState
 	waiters   map[uint64][]func(any, error) // log index → callbacks for this node's proposals
 	proposing []func(any, error)            // accepted by Propose, not yet paired to an index
 
 	lastHeard     time.Time     // last leader contact (or own leadership)
 	electionAfter time.Duration // silence budget before campaigning; re-drawn per campaign
+
+	snapshotsReceived int // streamed installs (MsgSnap), not self-compactions
 }
 
-// New boots a node from its disk: an empty log bootstraps a fresh cluster
-// from Peers; anything else is a restart, replayed. The returned node has
-// scheduled its ticks and is ready for messages.
+// New boots a node from its disk: an empty disk bootstraps a fresh cluster
+// from Peers; anything else is a restart, recovered from the newest valid
+// log file. The returned node has scheduled its ticks and is ready for
+// messages.
 func New(cfg Config) (*Node, error) {
+	if cfg.SnapshotEntries == 0 {
+		cfg.SnapshotEntries = defaultSnapshotEntries
+	}
 	n := &Node{
 		cfg:     cfg,
 		storage: raft.NewMemoryStorage(),
@@ -85,26 +109,8 @@ func New(cfg Config) (*Node, error) {
 		store:   meta.NewStore(),
 	}
 
-	log, records, err := wal.Open(cfg.Disk, "raft/log")
+	fresh, err := n.recover()
 	if err != nil {
-		return nil, err
-	}
-	n.log = log
-	for i, rec := range records {
-		hs, entries, err := decodeRecord(rec)
-		if err != nil {
-			return nil, fmt.Errorf("raftnode: replaying record %d: %w", i, err)
-		}
-		if err := n.storage.Append(entries); err != nil {
-			return nil, fmt.Errorf("raftnode: replaying record %d: %w", i, err)
-		}
-		if !raft.IsEmptyHardState(hs) {
-			if err := n.storage.SetHardState(hs); err != nil {
-				return nil, fmt.Errorf("raftnode: replaying record %d: %w", i, err)
-			}
-		}
-	}
-	if err := n.applyCommitted(); err != nil {
 		return nil, err
 	}
 
@@ -132,7 +138,7 @@ func New(cfg Config) (*Node, error) {
 	}
 	n.rn = rn
 
-	if len(records) == 0 {
+	if fresh {
 		// A fresh cluster. Sorted: map order must not shape the log.
 		peers := make([]raft.Peer, 0, len(cfg.Peers))
 		for _, id := range slices.Sorted(maps.Keys(cfg.Peers)) {
@@ -150,9 +156,156 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
+// recover finds the newest valid log file, replays it, and removes every
+// other log file (older ones are superseded, newer ones are torn
+// rotations). It reports whether the disk held no log at all — a fresh
+// node.
+func (n *Node) recover() (fresh bool, err error) {
+	names, err := n.cfg.Disk.List()
+	if err != nil {
+		return false, fmt.Errorf("raftnode: listing disk: %w", err)
+	}
+	var seqs []uint64
+	for _, name := range names {
+		if rest, ok := strings.CutPrefix(name, "raft/log."); ok {
+			seq, err := strconv.ParseUint(rest, 10, 64)
+			if err != nil {
+				return false, fmt.Errorf("raftnode: alien log file %q", name)
+			}
+			seqs = append(seqs, seq)
+		}
+	}
+	if len(seqs) == 0 {
+		n.logSeq = 1
+		n.log, _, err = wal.Open(n.cfg.Disk, logName(1))
+		return true, err
+	}
+	slices.Sort(seqs)
+	slices.Reverse(seqs)
+
+	for i, seq := range seqs {
+		log, records, err := wal.Open(n.cfg.Disk, logName(seq))
+		if err != nil {
+			return false, err
+		}
+		if !validLog(records, i == len(seqs)-1) {
+			continue // a torn rotation; fall back to the previous file
+		}
+		n.log, n.logSeq = log, seq
+		if err := n.replay(records); err != nil {
+			return false, err
+		}
+		for _, other := range seqs {
+			if other != seq {
+				n.removeLog(other)
+			}
+		}
+		return false, nil
+	}
+	return false, fmt.Errorf("raftnode: no valid log file among %d candidates", len(seqs))
+}
+
+// validLog reports whether a log file's records can carry a node's state:
+// the opening frame holds a snapshot (every rotated file does), or this is
+// the oldest file — the bootstrap log, which starts bare.
+func validLog(records [][]byte, oldest bool) bool {
+	if oldest {
+		return true
+	}
+	if len(records) == 0 {
+		return false
+	}
+	rec, err := decodeRecord(records[0])
+	return err == nil && !raft.IsEmptySnap(rec.snap)
+}
+
+// replay feeds a log file's records through storage and the store: exactly
+// the path a live node takes, minus the network.
+func (n *Node) replay(records [][]byte) error {
+	for i, raw := range records {
+		rec, err := decodeRecord(raw)
+		if err != nil {
+			return fmt.Errorf("raftnode: replaying record %d: %w", i, err)
+		}
+		if !raft.IsEmptySnap(rec.snap) {
+			if err := n.restoreSnapshot(rec.snap); err != nil {
+				return fmt.Errorf("raftnode: replaying record %d: %w", i, err)
+			}
+		}
+		if err := n.storage.Append(rec.entries); err != nil {
+			return fmt.Errorf("raftnode: replaying record %d: %w", i, err)
+		}
+		if !raft.IsEmptyHardState(rec.hs) {
+			if err := n.storage.SetHardState(rec.hs); err != nil {
+				return fmt.Errorf("raftnode: replaying record %d: %w", i, err)
+			}
+		}
+	}
+	return n.applyCommitted()
+}
+
+// restoreSnapshot resets storage and store to a snapshot — the shared core
+// of boot replay and MsgSnap installation.
+func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
+	store, err := decodeSnapshotData(snap.Data)
+	if err != nil {
+		return fmt.Errorf("snapshot data: %w", err)
+	}
+	if err := n.storage.ApplySnapshot(snap); err != nil {
+		return fmt.Errorf("apply snapshot: %w", err)
+	}
+	n.store = store
+	n.applied = snap.Metadata.Index
+	n.snapIndex = snap.Metadata.Index
+	n.confState = snap.Metadata.ConfState
+	return nil
+}
+
+// applyCommitted replays the already-committed log tail into the store at
+// boot. Deterministic apply makes the rebuilt replica bit-identical.
+func (n *Node) applyCommitted() error {
+	hs, cs, err := n.storage.InitialState()
+	if err != nil {
+		return err
+	}
+	if len(cs.Voters) > 0 {
+		n.confState = cs
+	}
+	last, err := n.storage.LastIndex()
+	if err != nil {
+		return err
+	}
+	commit := min(hs.Commit, last)
+	if commit <= n.applied {
+		return nil
+	}
+	ents, err := n.storage.Entries(n.applied+1, commit+1, math.MaxUint64)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
+			p, err := meta.DecodeProposal(e.Data)
+			if err != nil {
+				return fmt.Errorf("raftnode: replay entry %d: %w", e.Index, err)
+			}
+			// Deterministic validation refusals replay too: they are
+			// outcomes, not failures.
+			_, _ = n.store.Apply(p)
+		}
+		n.applied = e.Index
+	}
+	return nil
+}
+
 // Store is the replica's metadata state, for reads. Loop-owned, like the
 // node itself.
 func (n *Node) Store() *meta.Store { return n.store }
+
+// SnapshotsReceived counts the snapshots this node installed from a
+// leader's stream (MsgSnap) — the catch-up path for a replica whose log
+// fell behind the cluster's compaction. Self-compactions do not count.
+func (n *Node) SnapshotsReceived() int { return n.snapshotsReceived }
 
 // Leader reports the node's view of leadership: the leader's Raft ID
 // (zero when unknown) and whether this node is it.
@@ -230,10 +383,26 @@ func (n *Node) processReady() {
 	for n.rn.HasReady() {
 		rd := n.rn.Ready()
 
-		// 1. Durability first: hard state and entries hit the WAL before
-		// anything that depends on them leaves the node.
-		if !raft.IsEmptyHardState(rd.HardState) || len(rd.Entries) > 0 {
-			if err := n.log.Append(encodeRecord(rd.HardState, rd.Entries)); err != nil {
+		// 1. Durability first: snapshot, hard state, and entries hit the
+		// WAL before anything that depends on them leaves the node. A
+		// snapshot install is a log rotation; otherwise it is one
+		// appended record.
+		if !raft.IsEmptySnap(rd.Snapshot) {
+			n.snapshotsReceived++
+			if err := n.restoreSnapshot(rd.Snapshot); err != nil {
+				panic(fmt.Sprintf("raftnode %d: install snapshot: %v", n.cfg.ID, err))
+			}
+			if err := n.storage.Append(rd.Entries); err != nil {
+				panic(fmt.Sprintf("raftnode %d: storage append: %v", n.cfg.ID, err))
+			}
+			if !raft.IsEmptyHardState(rd.HardState) {
+				if err := n.storage.SetHardState(rd.HardState); err != nil {
+					panic(fmt.Sprintf("raftnode %d: hard state: %v", n.cfg.ID, err))
+				}
+			}
+			n.rotate(record{hs: n.currentHardState(rd.HardState), entries: rd.Entries, snap: rd.Snapshot})
+		} else if !raft.IsEmptyHardState(rd.HardState) || len(rd.Entries) > 0 {
+			if err := n.log.Append(encodeRecord(record{hs: rd.HardState, entries: rd.Entries})); err != nil {
 				// A node that cannot persist cannot participate. Storage
 				// failure handling is a later pass; for now this is loud.
 				panic(fmt.Sprintf("raftnode %d: wal append: %v", n.cfg.ID, err))
@@ -249,7 +418,9 @@ func (n *Node) processReady() {
 		}
 		n.claimIndexes(rd.Entries)
 
-		// 2. Messages, only after persistence.
+		// 2. Messages, only after persistence. A snapshot message is
+		// complete the moment Send returns (the transport owns delivery),
+		// so report it sent: raft resumes normal replication probing.
 		for _, m := range rd.Messages {
 			to, ok := n.cfg.Peers[m.To]
 			if !ok {
@@ -260,15 +431,101 @@ func (n *Node) processReady() {
 				panic(fmt.Sprintf("raftnode %d: marshal message: %v", n.cfg.ID, err))
 			}
 			n.cfg.Transport.Send(to, data)
+			if m.Type == raftpb.MsgSnap {
+				n.rn.ReportSnapshot(m.To, raft.SnapshotFinish)
+			}
 		}
 
-		// 3. Apply what committed.
+		// 3. Apply what committed, then consider compacting.
 		for _, e := range rd.CommittedEntries {
 			n.applyEntry(e)
 		}
+		n.maybeSnapshot()
 
 		n.rn.Advance(rd)
 	}
+}
+
+// currentHardState resolves the hard state a rotation must carry: the
+// Ready's, or storage's standing one when the Ready brought none — a
+// rotated log without a hard state would forget votes.
+func (n *Node) currentHardState(rdHS raftpb.HardState) raftpb.HardState {
+	if !raft.IsEmptyHardState(rdHS) {
+		return rdHS
+	}
+	hs, _, err := n.storage.InitialState()
+	if err != nil {
+		panic(fmt.Sprintf("raftnode %d: initial state: %v", n.cfg.ID, err))
+	}
+	return hs
+}
+
+// maybeSnapshot compacts once enough entries have applied since the last
+// snapshot: dump the store, hand raft the snapshot at the applied index,
+// drop the log prefix, rotate the WAL.
+func (n *Node) maybeSnapshot() {
+	if n.applied-n.snapIndex < n.cfg.SnapshotEntries {
+		return
+	}
+	snap, err := n.storage.CreateSnapshot(n.applied, &n.confState, encodeSnapshotData(n.store.Dump()))
+	if err != nil {
+		panic(fmt.Sprintf("raftnode %d: create snapshot: %v", n.cfg.ID, err))
+	}
+	if err := n.storage.Compact(n.applied); err != nil {
+		panic(fmt.Sprintf("raftnode %d: compact: %v", n.cfg.ID, err))
+	}
+	n.snapIndex = n.applied
+
+	// The rotation frame carries the uncompacted tail — entries above the
+	// snapshot that peers have been promised — and the standing hard
+	// state.
+	var tail []raftpb.Entry
+	last, err := n.storage.LastIndex()
+	if err != nil {
+		panic(fmt.Sprintf("raftnode %d: last index: %v", n.cfg.ID, err))
+	}
+	if last > n.applied {
+		tail, err = n.storage.Entries(n.applied+1, last+1, math.MaxUint64)
+		if err != nil {
+			panic(fmt.Sprintf("raftnode %d: tail entries: %v", n.cfg.ID, err))
+		}
+	}
+	n.rotate(record{hs: n.currentHardState(raftpb.HardState{}), entries: tail, snap: snap})
+}
+
+// rotate replaces the log with a new file whose opening frame is rec —
+// snapshot, hard state, and tail together, one frame, so a crash anywhere
+// leaves either the complete new file or a fallback to the old one. The
+// old file is removed only after the new frame is durable.
+func (n *Node) rotate(rec record) {
+	seq := n.logSeq + 1
+	n.removeLog(seq) // a torn rotation may have left a corpse with this name
+	log, records, err := wal.Open(n.cfg.Disk, logName(seq))
+	if err != nil || len(records) != 0 {
+		panic(fmt.Sprintf("raftnode %d: rotate open: %d leftover records, %v", n.cfg.ID, len(records), err))
+	}
+	if err := log.Append(encodeRecord(rec)); err != nil {
+		panic(fmt.Sprintf("raftnode %d: rotate append: %v", n.cfg.ID, err))
+	}
+	old := n.logSeq
+	n.log, n.logSeq = log, seq
+	n.removeLog(old)
+}
+
+// removeLog deletes a log file, best effort: a leftover is wasted space
+// the next rotation reclaims, never a correctness problem.
+func (n *Node) removeLog(seq uint64) {
+	if err := n.cfg.Disk.Remove(logName(seq)); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			panic(fmt.Sprintf("raftnode %d: remove log %d: %v", n.cfg.ID, seq, err))
+		}
+		return
+	}
+	_ = n.cfg.Disk.Sync(logName(seq))
+}
+
+func logName(seq uint64) string {
+	return "raft/log." + strconv.FormatUint(seq, 10)
 }
 
 // claimIndexes pairs this node's in-flight proposals with the log indexes
@@ -300,9 +557,7 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 		if err := cc.Unmarshal(e.Data); err != nil {
 			panic(fmt.Sprintf("raftnode %d: conf change at %d: %v", n.cfg.ID, e.Index, err))
 		}
-		if n.rn != nil {
-			n.rn.ApplyConfChange(cc)
-		}
+		n.confState = *n.rn.ApplyConfChange(cc)
 	case raftpb.EntryNormal:
 		if len(e.Data) == 0 {
 			return // the leader's commit-barrier no-op
@@ -320,49 +575,6 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 		}
 		delete(n.waiters, e.Index)
 	}
-}
-
-// applyCommitted replays the already-committed prefix of the log into the
-// fresh store at boot. Deterministic apply makes the rebuilt store
-// bit-identical to the pre-crash one. ConfChange entries are applied to
-// membership later by raft itself (Applied in the config tells it where
-// replay ended); here they only advance the cursor.
-func (n *Node) applyCommitted() error {
-	hs, _, err := n.storage.InitialState()
-	if err != nil {
-		return err
-	}
-	last, err := n.storage.LastIndex()
-	if err != nil {
-		return err
-	}
-	commit := min(hs.Commit, last)
-	if commit == 0 {
-		return nil
-	}
-	first, err := n.storage.FirstIndex()
-	if err != nil {
-		return err
-	}
-	ents, err := n.storage.Entries(first, commit+1, math.MaxUint64)
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
-			p, err := meta.DecodeProposal(e.Data)
-			if err != nil {
-				return fmt.Errorf("raftnode: replay entry %d: %w", e.Index, err)
-			}
-			if _, err := n.store.Apply(p); err != nil {
-				// Deterministic validation refusals replay too; they are
-				// outcomes, not failures.
-				_ = err
-			}
-		}
-		n.applied = e.Index
-	}
-	return nil
 }
 
 // quietLogger drops the library's logging: the simulator's traces and this
