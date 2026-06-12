@@ -57,6 +57,14 @@ func newTestNet(t *testing.T, ids ...seam.NodeID) *testNet {
 	for _, id := range ids {
 		n.start(t, id)
 	}
+	// The transport copies Peers at construction, so nodes started before
+	// a later node bound its port never saw its address — register the
+	// full book on everyone, the same way cluster growth does.
+	for _, tr := range n.trans {
+		for id, addr := range peers {
+			tr.AddPeer(id, addr)
+		}
+	}
 	t.Cleanup(func() {
 		for _, tr := range n.trans {
 			tr.Close()

@@ -35,6 +35,7 @@ type Transport struct {
 	done chan struct{}
 
 	mu     sync.Mutex
+	addrs  map[seam.NodeID]string // peer dial addresses; grows via AddPeer
 	peers  map[seam.NodeID]*peer
 	conns  map[net.Conn]bool // inbound, so Close can unblock readers
 	closed bool
@@ -48,8 +49,11 @@ type TransportConfig struct {
 	NodeID seam.NodeID
 	// Listen is the address to accept peers on.
 	Listen string
-	// Peers maps every peer's node ID to its dial address. The map is
-	// read concurrently and must not change after construction.
+	// Peers seeds the dial addresses: node ID → address. The transport
+	// copies it; AddPeer registers peers discovered later (cluster
+	// growth). A peer's first registered address wins — moving a node
+	// means restarting the cluster's transports, addresses are static
+	// state (v0.2).
 	Peers map[seam.NodeID]string
 	// Cert is this node's certificate and key; CA is the cluster CA both
 	// sides verify against.
@@ -89,8 +93,12 @@ func NewTransport(cfg TransportConfig) (*Transport, error) {
 		cfg:   cfg,
 		ln:    ln,
 		done:  make(chan struct{}),
+		addrs: make(map[seam.NodeID]string),
 		peers: make(map[seam.NodeID]*peer),
 		conns: make(map[net.Conn]bool),
+	}
+	for id, addr := range cfg.Peers {
+		t.addrs[id] = addr
 	}
 	t.wg.Add(1)
 	go t.acceptLoop()
@@ -100,14 +108,25 @@ func NewTransport(cfg TransportConfig) (*Transport, error) {
 // Addr is the address the transport accepts peers on.
 func (t *Transport) Addr() string { return t.ln.Addr().String() }
 
+// AddPeer registers a peer discovered after construction — a node that
+// joined the cluster. The first registered address for an ID wins.
+func (t *Transport) AddPeer(id seam.NodeID, addr string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, ok := t.addrs[id]; !ok {
+		t.addrs[id] = addr
+	}
+}
+
 // Send implements seam.Transport.
 func (t *Transport) Send(to seam.NodeID, msg []byte) {
-	addr, ok := t.cfg.Peers[to]
-	if !ok {
-		return
-	}
 	t.mu.Lock()
 	if t.closed {
+		t.mu.Unlock()
+		return
+	}
+	addr, ok := t.addrs[to]
+	if !ok {
 		t.mu.Unlock()
 		return
 	}

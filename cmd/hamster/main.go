@@ -1,10 +1,17 @@
 // Command hamster is the Hamster server binary.
 //
-// The only command so far is serve: a single-node S3 endpoint over the v0.1
-// gateway. Object data lives as blobs under <data-dir>/blobs, metadata in
-// BadgerDB under <data-dir>/meta (ADR-0005) — both survive a restart. Still
-// a development preview: single node, no erasure coding, v0 formats may
-// change between releases (ROADMAP.md).
+// serve runs a single-node S3 endpoint over the v0.1 gateway: object data
+// as blobs under <data-dir>/blobs, metadata in BadgerDB under
+// <data-dir>/meta (ADR-0005) — both survive a restart.
+//
+// cluster manages the v0.2 metadata cluster preview (internal/cluster):
+// init mints the cluster CA and the first node, token and join grow it
+// (ADR-0022), run starts a node, status shows membership. The S3 gateway
+// stays on the single-node path until the erasure-coded data path arrives
+// (v0.3).
+//
+// Still a development preview: v0 formats may change between releases
+// (ROADMAP.md).
 package main
 
 import (
@@ -33,15 +40,23 @@ var version = "dev"
 
 func main() {
 	log.SetFlags(0)
-	if len(os.Args) >= 2 && os.Args[1] == "version" {
-		fmt.Println("hamster", version)
-		return
-	}
-	if len(os.Args) < 2 || os.Args[1] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags] | hamster version")
+	if len(os.Args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags] | hamster cluster <command> | hamster version")
 		os.Exit(2)
 	}
-	if err := serve(os.Args[2:]); err != nil {
+	var err error
+	switch os.Args[1] {
+	case "version":
+		fmt.Println("hamster", version)
+	case "serve":
+		err = serve(os.Args[2:])
+	case "cluster":
+		err = clusterCmd(os.Args[2:])
+	default:
+		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags] | hamster cluster <command> | hamster version")
+		os.Exit(2)
+	}
+	if err != nil {
 		log.Fatalf("hamster: %v", err)
 	}
 }
