@@ -34,18 +34,33 @@ type cluster struct {
 	worlds      map[uint64]*sim.World
 	ids         map[uint64]seam.NodeID
 	down        map[uint64]bool
-	snapEntries uint64 // 0: package default (snapshots effectively off in tests)
+	rosters     map[uint64]string // each node's latest OnMembershipChange report
+	snapEntries uint64            // 0: package default (snapshots effectively off in tests)
 }
 
 func newCluster(t *testing.T, seed uint64, net sim.NetConfig) *cluster {
 	c := &cluster{
 		t: t, s: sim.New(seed, net),
-		nodes:  make(map[uint64]*raftnode.Node),
-		worlds: make(map[uint64]*sim.World),
-		ids:    map[uint64]seam.NodeID{1: "n1", 2: "n2", 3: "n3"},
-		down:   make(map[uint64]bool),
+		nodes:   make(map[uint64]*raftnode.Node),
+		worlds:  make(map[uint64]*sim.World),
+		ids:     map[uint64]seam.NodeID{1: "n1", 2: "n2", 3: "n3"},
+		down:    make(map[uint64]bool),
+		rosters: make(map[uint64]string),
 	}
 	return c
+}
+
+// roster formats a membership report the way tests assert on it.
+func roster(ms []raftnode.Member) string {
+	var parts []string
+	for _, m := range ms {
+		role := "voter"
+		if m.Learner {
+			role = "learner"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", m.Addr, role))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (c *cluster) start() *cluster {
@@ -61,7 +76,8 @@ func (c *cluster) boot(id uint64, join bool) sim.BootFunc {
 			ID: id, Peers: c.ids, Join: join,
 			Clock: w.Clock, Transport: w.Transport, Disk: w.Disk, Rand: w.Rand,
 			TickInterval: tick, ElectionTicks: electionTicks,
-			SnapshotEntries: c.snapEntries,
+			SnapshotEntries:    c.snapEntries,
+			OnMembershipChange: func(ms []raftnode.Member) { c.rosters[id] = roster(ms) },
 		})
 		if err != nil {
 			c.t.Fatalf("boot node %d: %v", id, err)
@@ -586,6 +602,15 @@ func TestJoinerRequestsOwnAdmission(t *testing.T) {
 			c.s.AddNode("n4", c.boot(4, true))
 			c.waitMembers(4, 4)
 			c.converged(model)
+
+			// Every replica reported the change to its composition root
+			// (the callback behind the membership log lines).
+			want := "n1=voter n2=voter n3=voter n4=voter"
+			for id := uint64(1); id <= 4; id++ {
+				if c.rosters[id] != want {
+					t.Fatalf("node %d's last membership report: %q, want %q", id, c.rosters[id], want)
+				}
+			}
 		})
 	}
 }
