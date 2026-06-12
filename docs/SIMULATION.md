@@ -2,7 +2,7 @@
 
 This document designs the testing strategy that [ADR-0009](adr/0009-deterministic-simulation-testing.md) committed to: deterministic simulation as the primary correctness mechanism, plus end to end tests against real binaries. It is the blueprint for the harness, written before the code on purpose — the harness shapes the architecture, not the other way around.
 
-> **Status: design document.** Nothing described here exists yet. The harness is built alongside the first core code in v0.1, never retrofitted.
+> **Status: design document, foundations implemented.** The harness skeleton lives in [`internal/sim`](../internal/sim/): the global event queue, virtual time, the seeded PRNG, the faulty network (drops, duplication, latency, asymmetric partitions), and the crash-faithful disk (unsynced writes lost or torn, durable content honored — including under the write buffer's appends). The first real composition runs under it: a single-node store — metadata store, blob store, and the WAL persister ([`internal/wal`](../internal/wal/)) — crash-and-restarted adversarially across seeds and checked against a reference model, the single-node degenerate case of the checking loop below. The full fault schedules, multi-node workloads, and the remaining invariants arrive with the features they check (Raft in v0.2, erasure coding in v0.3), never retrofitted.
 
 ## Two layers, two jobs
 
@@ -174,4 +174,4 @@ Stated plainly so nobody over-trusts it:
 
 - ~~Exact interface shapes — settled with the first v0.1 code, not in this doc.~~ Settled: first cut lives in `internal/seam`, shown above.
 - `testing/synctest` for adapter-level concurrency tests (production write-buffer timers, HTTP timeouts) where fake time helps but seed-replay is not needed: likely yes, as a third, minor layer.
-- Whether the workload generator and model checker live in-repo from v0.1 (likely) or start as a hardcoded scenario list and grow.
+- ~~Whether the workload generator and model checker live in-repo from v0.1 (likely) or start as a hardcoded scenario list and grow.~~ Settled: in-repo from v0.1 — the metadata reference model in `internal/meta`'s tests and the crash-recovery workload in `internal/sim`'s single-node integration. Both grow into the cluster-wide checker as the features land.
