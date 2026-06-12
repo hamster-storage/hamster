@@ -7,7 +7,6 @@ import (
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/hamster-storage/hamster/internal/meta"
-	"github.com/hamster-storage/hamster/internal/seam"
 )
 
 // Snapshot data must round-trip a store exactly: dump, encode, decode,
@@ -23,7 +22,11 @@ func TestSnapshotDataRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	members := map[uint64]seam.NodeID{1: "n1", 2: "n2", 7: "node-seven"}
+	members := map[uint64]peerInfo{
+		1: {node: "n1", dial: "10.0.0.1:7946"},
+		2: {node: "n2", dial: "10.0.0.2:7946"},
+		7: {node: "node-seven"}, // no dial: the simulator's shape
+	}
 	restored, restoredMembers, err := decodeSnapshotData(encodeSnapshotData(s.Dump(), members))
 	if err != nil {
 		t.Fatal(err)

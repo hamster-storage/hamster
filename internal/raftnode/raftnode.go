@@ -58,10 +58,17 @@ type Config struct {
 	ID    uint64
 	Peers map[uint64]seam.NodeID
 
+	// Dials optionally maps Raft IDs to TCP dial addresses, alongside the
+	// transport identities in Peers. The simulator never sets it (identity
+	// is the address there); production does, and the addresses replicate
+	// with membership so Members can report where everyone lives.
+	Dials map[uint64]string
+
 	// Join marks a node started to join an existing cluster: a fresh disk
-	// does not bootstrap a new cluster, it waits to be admitted — the
-	// leader's AddNode brings the log to it. Ignored when the disk already
-	// holds state (a restart is a restart).
+	// does not bootstrap a new cluster, and until membership includes this
+	// node it periodically asks the cluster to admit it (an admit message
+	// any current leader answers with AddNode). Admission is driven by the
+	// joiner so nobody has to chase the leader around.
 	Join bool
 
 	Clock     seam.Clock
@@ -106,12 +113,13 @@ type Node struct {
 	applied   uint64
 	snapIndex uint64
 	confState raftpb.ConfState
-	peers     map[uint64]seam.NodeID        // the address book: seeded by Config.Peers, maintained by conf changes and snapshots
+	peers     map[uint64]peerInfo           // the address book: seeded by Config.Peers/Dials, maintained by conf changes and snapshots
 	waiters   map[uint64][]func(any, error) // log index → callbacks for this node's proposals
 	proposing []func(any, error)            // accepted by Propose, not yet paired to an index
 
-	confCooldown int  // ticks before the next membership proposal; paces promotion retries
-	confChanged  bool // a conf change applied since the last snapshot; forces the next one
+	confCooldown  int  // ticks before the next membership proposal; paces promotion retries
+	confChanged   bool // a conf change applied since the last snapshot; forces the next one
+	admitCooldown int  // ticks before a joiner's next admission request
 
 	lastHeard     time.Time     // last leader contact (or own leadership)
 	electionAfter time.Duration // silence budget before campaigning; re-drawn per campaign
@@ -130,11 +138,13 @@ func New(cfg Config) (*Node, error) {
 	n := &Node{
 		cfg:     cfg,
 		storage: raft.NewMemoryStorage(),
-		peers:   make(map[uint64]seam.NodeID),
+		peers:   make(map[uint64]peerInfo),
 		waiters: make(map[uint64][]func(any, error)),
 		store:   meta.NewStore(),
 	}
-	maps.Copy(n.peers, cfg.Peers)
+	for id, node := range cfg.Peers {
+		n.peers[id] = peerInfo{node: node, dial: cfg.Dials[id]}
+	}
 
 	fresh, err := n.recover()
 	if err != nil {
@@ -172,7 +182,7 @@ func New(cfg Config) (*Node, error) {
 		}
 		peers := make([]raft.Peer, 0, len(cfg.Peers))
 		for _, id := range slices.Sorted(maps.Keys(cfg.Peers)) {
-			peers = append(peers, raft.Peer{ID: id, Context: encodeMember(id, cfg.Peers[id])})
+			peers = append(peers, raft.Peer{ID: id, Context: encodeMember(id, n.peers[id])})
 		}
 		if err := rn.Bootstrap(peers); err != nil {
 			return nil, fmt.Errorf("raftnode: bootstrap: %w", err)
@@ -332,11 +342,19 @@ func (n *Node) Propose(p any, done func(any, error)) {
 	n.processReady()
 }
 
+// peerInfo is one address-book entry: the transport identity messages are
+// sent to, and (in production) the TCP address it dials to.
+type peerInfo struct {
+	node seam.NodeID
+	dial string
+}
+
 // Member is one cluster member as a replica knows it: Raft ID, transport
-// address, and role.
+// identity, dial address (empty under the simulator), and role.
 type Member struct {
 	ID      uint64
 	Addr    seam.NodeID
+	Dial    string
 	Learner bool
 }
 
@@ -345,26 +363,35 @@ type Member struct {
 func (n *Node) Members() []Member {
 	var ms []Member
 	for _, id := range n.confState.Voters {
-		ms = append(ms, Member{ID: id, Addr: n.peers[id]})
+		ms = append(ms, Member{ID: id, Addr: n.peers[id].node, Dial: n.peers[id].dial})
 	}
 	for _, id := range n.confState.Learners {
-		ms = append(ms, Member{ID: id, Addr: n.peers[id], Learner: true})
+		ms = append(ms, Member{ID: id, Addr: n.peers[id].node, Dial: n.peers[id].dial, Learner: true})
 	}
 	slices.SortFunc(ms, func(a, b Member) int { return cmp.Compare(a.ID, b.ID) })
 	return ms
 }
 
-// AddNode proposes admitting a node at the given transport address,
-// leader-only. Every node is admitted as a learner — it has a whole log to
-// catch up on before its vote could help anyone — and promotion to voter
-// is automatic (ADR-0017) once it is caught up, while the voter count is
-// under the cap. The change is asynchronous and raft drops a membership
-// change proposed while another is uncommitted, so callers confirm through
-// Members and retry; admission is idempotent.
-func (n *Node) AddNode(id uint64, addr seam.NodeID) error {
+// isMember reports whether a Raft ID is in the applied configuration.
+func (n *Node) isMember(id uint64) bool {
+	return slices.Contains(n.confState.Voters, id) || slices.Contains(n.confState.Learners, id)
+}
+
+// AddNode proposes admitting a node at the given addresses, leader-only.
+// Every node is admitted as a learner — it has a whole log to catch up on
+// before its vote could help anyone — and promotion to voter is automatic
+// (ADR-0017) once it is caught up, while the voter count is under the cap.
+// A current member is left exactly as it is: re-admitting a voter as a
+// learner would demote it, and a retried admission must not. The change is
+// asynchronous and raft drops a membership change proposed while another
+// is uncommitted, so callers confirm through Members and retry.
+func (n *Node) AddNode(id uint64, addr seam.NodeID, dial string) error {
+	if n.isMember(id) {
+		return nil
+	}
 	return n.proposeConfChange(raftpb.ConfChange{
 		Type: raftpb.ConfChangeAddLearnerNode, NodeID: id,
-		Context: encodeMember(id, addr),
+		Context: encodeMember(id, peerInfo{node: addr, dial: dial}),
 	})
 }
 
@@ -418,22 +445,62 @@ func (n *Node) maybePromote() {
 	}
 }
 
-// HandleMessage implements seam.MessageHandler: one Raft message off the
-// wire.
+// maybeRequestAdmission is the joining side of membership: until the
+// applied configuration includes this node, periodically send an admit
+// message to every known peer. Whichever of them is leader answers with
+// AddNode; everyone else drops it. Idempotent, paced, and joiner-driven —
+// the joiner is the only party with an interest in retrying.
+func (n *Node) maybeRequestAdmission() {
+	if !n.cfg.Join || n.isMember(n.cfg.ID) {
+		return
+	}
+	if n.admitCooldown > 0 {
+		n.admitCooldown--
+		return
+	}
+	n.admitCooldown = n.cfg.ElectionTicks
+	admit := encodeEnvelope(kindAdmit, encodeMember(n.cfg.ID, n.peers[n.cfg.ID]))
+	for _, id := range slices.Sorted(maps.Keys(n.peers)) {
+		if id != n.cfg.ID {
+			n.cfg.Transport.Send(n.peers[id].node, admit)
+		}
+	}
+}
+
+// HandleMessage implements seam.MessageHandler: one enveloped message off
+// the wire — raft traffic, or a joiner asking to be admitted.
 func (n *Node) HandleMessage(from seam.NodeID, msg []byte) {
-	var m raftpb.Message
-	if err := m.Unmarshal(msg); err != nil {
+	kind, payload, err := decodeEnvelope(msg)
+	if err != nil {
 		return // a corrupt frame is dropped; the sender will retry
 	}
-	switch m.Type {
-	case raftpb.MsgApp, raftpb.MsgHeartbeat, raftpb.MsgSnap:
-		// Leader-origin traffic: the election clock resets.
-		n.lastHeard = n.cfg.Clock.Now()
+	switch kind {
+	case kindRaft:
+		var m raftpb.Message
+		if err := m.Unmarshal(payload); err != nil {
+			return
+		}
+		switch m.Type {
+		case raftpb.MsgApp, raftpb.MsgHeartbeat, raftpb.MsgSnap:
+			// Leader-origin traffic: the election clock resets.
+			n.lastHeard = n.cfg.Clock.Now()
+		}
+		if err := n.rn.Step(m); err != nil {
+			return // e.g. a message from a removed peer; raft says ignore
+		}
+		n.processReady()
+	case kindAdmit:
+		id, info, err := decodeMember(payload)
+		if err != nil || id == 0 {
+			return
+		}
+		// Leader-only by AddNode's own check; current members are left
+		// alone there too. A non-leader simply drops it — the joiner
+		// retries everyone.
+		_ = n.AddNode(id, info.node, info.dial)
 	}
-	if err := n.rn.Step(m); err != nil {
-		return // e.g. a message from a removed peer; raft says ignore
-	}
-	n.processReady()
+	// Unknown kinds fall through: an upgraded peer may speak kinds this
+	// version does not know, and the transport contract allows loss.
 }
 
 // onTick drives heartbeats and the ADR-0024 election clock.
@@ -444,6 +511,7 @@ func (n *Node) onTick() {
 		n.confCooldown--
 	}
 
+	n.maybeRequestAdmission()
 	now := n.cfg.Clock.Now()
 	if _, leader := n.Leader(); leader {
 		n.lastHeard = now
@@ -519,7 +587,7 @@ func (n *Node) processReady() {
 			if err != nil {
 				panic(fmt.Sprintf("raftnode %d: marshal message: %v", n.cfg.ID, err))
 			}
-			n.cfg.Transport.Send(to, data)
+			n.cfg.Transport.Send(to.node, encodeEnvelope(kindRaft, data))
 			if m.Type == raftpb.MsgSnap {
 				n.rn.ReportSnapshot(m.To, raft.SnapshotFinish)
 			}
@@ -660,11 +728,11 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 		switch cc.Type {
 		case raftpb.ConfChangeAddNode, raftpb.ConfChangeAddLearnerNode:
 			if len(cc.Context) > 0 {
-				id, addr, err := decodeMember(cc.Context)
+				id, info, err := decodeMember(cc.Context)
 				if err != nil || id != cc.NodeID {
 					panic(fmt.Sprintf("raftnode %d: conf change at %d: member context for %d: %v", n.cfg.ID, e.Index, cc.NodeID, err))
 				}
-				n.peers[id] = addr
+				n.peers[id] = info
 			}
 		case raftpb.ConfChangeRemoveNode:
 			delete(n.peers, cc.NodeID)

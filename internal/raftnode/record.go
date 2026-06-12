@@ -37,16 +37,38 @@ import (
 //
 //	message Member {
 //	  uint64 raft_id = 1;
-//	  string addr = 2;  // the transport address (seam.NodeID)
+//	  string addr = 2;  // transport identity (seam.NodeID — the certificate CN)
+//	  string dial = 3;  // TCP dial address; empty under the simulator, where identity is the address
 //	}
 //
 // Member doubles as the ConfChange context: an AddNode/AddLearnerNode
 // entry carries the new member's address, which is how every replica's
 // address book stays consistent with the configuration it applies.
+//
+// Every message on the cluster transport travels in a versioned envelope
+// (invariant 2 — raftpb.Message itself carries no format version), which
+// also gives admission a lane of its own:
+//
+//	message Envelope {
+//	  uint32 format_version = 1;
+//	  uint32 kind = 2;   // 1 raft (payload: raftpb.Message), 2 admit (payload: Member)
+//	  bytes payload = 3;
+//	}
+//
+// An unknown kind is dropped, not an error: an upgraded peer may speak
+// kinds this version does not know, and the transport contract already
+// allows loss.
 
 const (
 	recordFormatVersion   = 1
 	snapshotFormatVersion = 1
+	envelopeFormatVersion = 1
+)
+
+// Envelope kinds.
+const (
+	kindRaft  = 1
+	kindAdmit = 2
 )
 
 // record is one decoded WAL frame.
@@ -123,7 +145,7 @@ func decodeRecord(b []byte) (record, error) {
 
 // encodeSnapshotData serializes a store dump and the address book as a
 // snapshot payload. Members are emitted in raft-ID order.
-func encodeSnapshotData(rows []meta.Row, members map[uint64]seam.NodeID) []byte {
+func encodeSnapshotData(rows []meta.Row, members map[uint64]peerInfo) []byte {
 	b := protowire.AppendTag(nil, 1, protowire.VarintType)
 	b = protowire.AppendVarint(b, snapshotFormatVersion)
 	for _, r := range rows {
@@ -143,9 +165,9 @@ func encodeSnapshotData(rows []meta.Row, members map[uint64]seam.NodeID) []byte 
 
 // decodeSnapshotData rebuilds a store and the address book from a snapshot
 // payload.
-func decodeSnapshotData(b []byte) (*meta.Store, map[uint64]seam.NodeID, error) {
+func decodeSnapshotData(b []byte) (*meta.Store, map[uint64]peerInfo, error) {
 	store := meta.NewStore()
-	members := make(map[uint64]seam.NodeID)
+	members := make(map[uint64]peerInfo)
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
@@ -159,11 +181,11 @@ func decodeSnapshotData(b []byte) (*meta.Store, map[uint64]seam.NodeID, error) {
 			}
 			b = b[n:]
 			if num == 3 {
-				id, addr, err := decodeMember(v)
+				id, info, err := decodeMember(v)
 				if err != nil {
 					return nil, nil, err
 				}
-				members[id] = addr
+				members[id] = info
 				continue
 			}
 			key, value, err := decodeSnapshotRow(v)
@@ -186,45 +208,100 @@ func decodeSnapshotData(b []byte) (*meta.Store, map[uint64]seam.NodeID, error) {
 
 // encodeMember serializes one Member record (see the package sketch): a
 // snapshot's members entry and the ConfChange context are the same bytes.
-func encodeMember(id uint64, addr seam.NodeID) []byte {
+func encodeMember(id uint64, info peerInfo) []byte {
 	b := protowire.AppendTag(nil, 1, protowire.VarintType)
 	b = protowire.AppendVarint(b, id)
 	b = protowire.AppendTag(b, 2, protowire.BytesType)
-	b = protowire.AppendString(b, string(addr))
+	b = protowire.AppendString(b, string(info.node))
+	if info.dial != "" {
+		b = protowire.AppendTag(b, 3, protowire.BytesType)
+		b = protowire.AppendString(b, info.dial)
+	}
 	return b
 }
 
-func decodeMember(b []byte) (id uint64, addr seam.NodeID, err error) {
+func decodeMember(b []byte) (id uint64, info peerInfo, err error) {
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
-			return 0, "", protowire.ParseError(n)
+			return 0, peerInfo{}, protowire.ParseError(n)
 		}
 		b = b[n:]
 		switch {
 		case num == 1 && typ == protowire.VarintType:
 			v, n := protowire.ConsumeVarint(b)
 			if n < 0 {
-				return 0, "", protowire.ParseError(n)
+				return 0, peerInfo{}, protowire.ParseError(n)
 			}
 			b = b[n:]
 			id = v
 		case num == 2 && typ == protowire.BytesType:
 			v, n := protowire.ConsumeBytes(b)
 			if n < 0 {
-				return 0, "", protowire.ParseError(n)
+				return 0, peerInfo{}, protowire.ParseError(n)
 			}
 			b = b[n:]
-			addr = seam.NodeID(v)
+			info.node = seam.NodeID(v)
+		case num == 3 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return 0, peerInfo{}, protowire.ParseError(n)
+			}
+			b = b[n:]
+			info.dial = string(v)
 		default:
 			n := protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
-				return 0, "", protowire.ParseError(n)
+				return 0, peerInfo{}, protowire.ParseError(n)
 			}
 			b = b[n:]
 		}
 	}
-	return id, addr, nil
+	return id, info, nil
+}
+
+// encodeEnvelope wraps one transport message.
+func encodeEnvelope(kind uint64, payload []byte) []byte {
+	b := protowire.AppendTag(nil, 1, protowire.VarintType)
+	b = protowire.AppendVarint(b, envelopeFormatVersion)
+	b = protowire.AppendTag(b, 2, protowire.VarintType)
+	b = protowire.AppendVarint(b, kind)
+	b = protowire.AppendTag(b, 3, protowire.BytesType)
+	b = protowire.AppendBytes(b, payload)
+	return b
+}
+
+func decodeEnvelope(b []byte) (kind uint64, payload []byte, err error) {
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return 0, nil, protowire.ParseError(n)
+		}
+		b = b[n:]
+		switch {
+		case num == 2 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return 0, nil, protowire.ParseError(n)
+			}
+			b = b[n:]
+			kind = v
+		case num == 3 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return 0, nil, protowire.ParseError(n)
+			}
+			b = b[n:]
+			payload = v
+		default:
+			n := protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return 0, nil, protowire.ParseError(n)
+			}
+			b = b[n:]
+		}
+	}
+	return kind, payload, nil
 }
 
 func decodeSnapshotRow(b []byte) (key string, value []byte, err error) {
