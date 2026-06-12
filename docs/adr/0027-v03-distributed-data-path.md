@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. Implemented so far: placement ([`internal/place`](../../internal/place/)), the shard transfer protocol ([`internal/datapath`](../../internal/datapath/)), and the PUT coordinator with the ack rule ([`internal/coord`](../../internal/coord/)) — proven under simulated cluster schedules (crashed receivers, down nodes, floor refusals, mid-PUT coordinator loss). The network GET coordinator and the `hamster serve` wiring are the remaining passes.
 
 ## Context
 
@@ -40,6 +40,7 @@ The hard constraints: object data never passes through the Raft log (critical in
 - The whole data path — placement, transfer, ack rule, commit ordering — runs under the simulation harness, which can now check SIMULATION.md invariant 1 as written: each object's budget at ack (`durable − k`), not an assumed `m`.
 - Bounded memory per in-flight PUT (`k+m` × window) and per GET (covering slices), independent of object size.
 - A v0.3 cluster cannot grow its data-plane membership safely; `cluster join` remains a metadata-plane operation until v0.4. Honest, documented, temporary.
+- v0.3 has no replicated health view (that arrives with v0.4's node records), so a PUT discovers a down node by its shard write timing out — a degraded write pays the timeout before acking at the floor. Slow, correct, temporary.
 - The read path's prefetch-then-decode shape serves ranged GETs in one round trip of slice fetches, but very large whole-object GETs decode in stripe windows — streaming decode state machines can replace the prefetch later without protocol changes.
 - 4096 partitions bounds the useful cluster size generously (ADR-0004's overprovisioning argument) and costs nothing while small.
 
