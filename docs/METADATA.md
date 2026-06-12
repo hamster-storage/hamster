@@ -55,7 +55,9 @@ The keyspace is ordered by bucket then key, so the future multi-raft split ([ADR
 
 ## Records
 
-Illustrative shapes — field names and numbers settle with the first code. Every message starts with `format_version`.
+The sketches below are the schema document: the codecs in [`internal/meta/codec.go`](../internal/meta/codec.go) implement these messages with exactly these field numbers, and golden tests pin the encoded bytes. Every message starts with `format_version`.
+
+A note on tooling, because it surprises people: **there are no `.proto` files in the repo and no `protoc` step in the build.** Three things usually travel together — `.proto` schema files, the `protoc` code generator, and the protobuf wire format — and Hamster keeps only the last one. The records are ordinary protobuf messages, bit-for-bit; any protobuf implementation in any language, given a `.proto` transcribed from the sketches below, decodes Hamster's rows. The encoders and decoders are written by hand on the official low-level `protowire` helpers because the messages are few and small, and because rolling upgrades demand two guarantees the generated code does not provide: the same record encodes to the same bytes on every node, and a record rewritten by an older node keeps the fields a newer node wrote. The full reasoning — and why MessagePack, FlatBuffers, and friends were not chosen instead — is [ADR-0023](adr/0023-handwritten-protowire-codecs.md).
 
 ```proto
 // One row under v/ — one version of one key. Immutable after commit,
