@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"time"
 
 	"github.com/hamster-storage/hamster/internal/blob"
 	"github.com/hamster-storage/hamster/internal/gateway"
@@ -43,6 +44,39 @@ func main() {
 	if err := serve(os.Args[2:]); err != nil {
 		log.Fatalf("hamster: %v", err)
 	}
+}
+
+// logRequests wraps the gateway with one access-log line per request:
+// status, method, path, response size, duration, and the request ID the
+// gateway minted (the same ID an S3 error body carries, so a client error
+// report lines up with the server log).
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		log.Printf("%d %s %s (%dB in %s) request-id %s",
+			rec.status, r.Method, r.URL.RequestURI(), rec.bytes,
+			time.Since(start).Round(time.Microsecond), rec.Header().Get("x-amz-request-id"))
+	})
+}
+
+// statusRecorder captures what the handler wrote, for the access log.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	n, err := r.ResponseWriter.Write(p)
+	r.bytes += int64(n)
+	return n, err
 }
 
 func serve(args []string) error {
@@ -107,7 +141,7 @@ func serve(args []string) error {
 		Blobs: blob.NewStore(disk),
 	})
 
-	srv := &http.Server{Addr: *listen, Handler: g}
+	srv := &http.Server{Addr: *listen, Handler: logRequests(g)}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	done := make(chan error, 1)
@@ -122,6 +156,7 @@ func serve(args []string) error {
 		return err
 	case <-stop:
 	}
+	log.Printf("hamster serve: shutting down")
 	// Shutdown order per the gateway contract: HTTP first, loop second —
 	// and the metadata db last, once nothing can post a transaction.
 	if err := srv.Close(); err != nil {
