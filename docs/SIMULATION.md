@@ -106,7 +106,7 @@ This is why [ADR-0012](adr/0012-etcd-raft-consensus-library.md) chose `etcd-io/r
 2. Calls `Step(msg)` for each message the simulated network delivers.
 3. Processes `Ready()` synchronously: persists entries to the simulated disk, hands outgoing messages to the simulated transport, applies committed entries to the metadata store.
 
-Consensus becomes fully deterministic under test with almost zero special-casing — the one exception found in practice is the library's internal election jitter, which draws unseedable entropy; [ADR-0024](adr/0024-deterministic-election-timing.md) moves the election timer into Hamster's code, on the seam. `internal/raftnode` implements this contract, and three-node cluster schedules (elections, leader crashes, partitions, snapshot compaction with lagging-follower catch-up, seed-replay equality) run under the harness.
+Consensus becomes fully deterministic under test with almost zero special-casing — the one exception found in practice is the library's internal election jitter, which draws unseedable entropy; [ADR-0024](adr/0024-deterministic-election-timing.md) moves the election timer into Hamster's code, on the seam. `internal/raftnode` implements this contract, and cluster schedules (elections, leader crashes, partitions, snapshot compaction with lagging-follower catch-up, membership growth with learner joins and voter promotion under the ADR-0017 cap, seed-replay equality) run under the harness.
 
 ### The fault model
 

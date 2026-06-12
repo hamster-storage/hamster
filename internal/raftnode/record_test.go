@@ -1,11 +1,13 @@
 package raftnode
 
 import (
+	"maps"
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
 
 	"github.com/hamster-storage/hamster/internal/meta"
+	"github.com/hamster-storage/hamster/internal/seam"
 )
 
 // Snapshot data must round-trip a store exactly: dump, encode, decode,
@@ -21,7 +23,8 @@ func TestSnapshotDataRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restored, err := decodeSnapshotData(encodeSnapshotData(s.Dump()))
+	members := map[uint64]seam.NodeID{1: "n1", 2: "n2", 7: "node-seven"}
+	restored, restoredMembers, err := decodeSnapshotData(encodeSnapshotData(s.Dump(), members))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +37,9 @@ func TestSnapshotDataRoundTrip(t *testing.T) {
 			t.Fatalf("row %d diverged: %q vs %q", i, got[i].Key, want[i].Key)
 		}
 	}
+	if !maps.Equal(restoredMembers, members) {
+		t.Fatalf("members diverged: %v vs %v", restoredMembers, members)
+	}
 }
 
 // validLog is the boot rule: a rotated file must open with a snapshot
@@ -42,7 +48,7 @@ func TestValidLog(t *testing.T) {
 	bare := encodeRecord(record{hs: raftpb.HardState{Term: 1, Commit: 0, Vote: 1}})
 	withSnap := encodeRecord(record{snap: raftpb.Snapshot{
 		Metadata: raftpb.SnapshotMetadata{Index: 5, Term: 1},
-		Data:     encodeSnapshotData(nil),
+		Data:     encodeSnapshotData(nil, nil),
 	}})
 
 	cases := []struct {
