@@ -16,8 +16,12 @@ type disk struct {
 }
 
 // stagedChange is one un-synced mutation: either new content or a removal.
+// keep is the prefix of data that was already durable when the staging
+// began by appending — bytes a crash cannot take back. WriteFile stages
+// with keep zero: an in-place overwrite puts even the old content at risk.
 type stagedChange struct {
 	data    []byte
+	keep    int
 	removed bool
 }
 
@@ -33,6 +37,26 @@ func (d *disk) WriteFile(name string, data []byte) error {
 		return &fs.PathError{Op: "write", Path: name, Err: fs.ErrInvalid}
 	}
 	d.staged[name] = stagedChange{data: slices.Clone(data)}
+	return nil
+}
+
+func (d *disk) Append(name string, data []byte) error {
+	if !fs.ValidPath(name) {
+		return &fs.PathError{Op: "append", Path: name, Err: fs.ErrInvalid}
+	}
+	st, ok := d.staged[name]
+	switch {
+	case !ok:
+		// First staged change: build on the durable content (absent files
+		// start empty), which a crash cannot take back.
+		durable := d.durable[name]
+		st = stagedChange{data: slices.Clone(durable), keep: len(durable)}
+	case st.removed:
+		// Appending after a staged remove recreates the file from empty.
+		st = stagedChange{}
+	}
+	st.data = append(st.data, data...)
+	d.staged[name] = st
 	return nil
 }
 
@@ -110,8 +134,10 @@ func (d *disk) List() ([]string, error) {
 
 // crash resolves every staged change the way real storage does: maybe the
 // write never reached the platter, maybe it landed partially, maybe it
-// completed. Staged removes are simply lost — the file comes back. Iteration
-// is in sorted name order so PRNG consumption stays deterministic.
+// completed. Staged removes are simply lost — the file comes back. Content
+// below a staged change's keep mark was durable before the change began and
+// survives regardless; only the bytes above it are at the storm's mercy.
+// Iteration is in sorted name order so PRNG consumption stays deterministic.
 func (d *disk) crash(rng *rand.Rand) {
 	for _, name := range slices.Sorted(maps.Keys(d.staged)) {
 		st := d.staged[name]
@@ -119,11 +145,11 @@ func (d *disk) crash(rng *rand.Rand) {
 			continue // the unlink never became durable
 		}
 		if rng.IntN(2) == 0 {
-			continue // the write never became durable
+			continue // the new bytes never became durable
 		}
-		// Torn write: a prefix landed, possibly all of it, replacing
-		// whatever was durable before.
-		d.durable[name] = st.data[:rng.IntN(len(st.data)+1)]
+		// Torn write: a prefix of the new bytes landed, possibly all of
+		// them, replacing whatever was durable above the keep mark.
+		d.durable[name] = st.data[:st.keep+rng.IntN(len(st.data)-st.keep+1)]
 	}
 	clear(d.staged)
 }

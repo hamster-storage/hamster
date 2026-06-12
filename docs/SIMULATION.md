@@ -82,9 +82,13 @@ type MessageHandler interface {
 }
 
 type Disk interface {
-    // Whole files, because objects are immutable blobs. Writes are staged:
-    // durable only after Sync, lost-or-torn at crash otherwise.
+    // Files written once and never edited in place, because objects are
+    // immutable blobs. Writes are staged: durable only after Sync,
+    // lost-or-torn at crash otherwise. Append is the write buffer's form —
+    // it builds a file incrementally with bounded memory, and a crash
+    // never takes back content that was durable before the appends began.
     WriteFile(name string, data []byte) error
+    Append(name string, data []byte) error
     Sync(name string) error
     ReadFile(name string) ([]byte, error)
     Remove(name string) error
@@ -92,7 +96,7 @@ type Disk interface {
 }
 ```
 
-Randomness needs no interface: core code receives a `*math/rand/v2.Rand`, deterministic by construction once the simulator picks the seed. Each interface has two implementations: the simulated one in [`internal/sim`](../internal/sim/) (deterministic, fault-injectable) and the production one in [`internal/sys`](../internal/sys/) (thin, boring, no decisions). The same compiled core runs under both — what the simulator proves is what ships. The shapes will grow with the code (the write buffer will want appending forms on `Disk`), always settled in `internal/seam` first.
+Randomness needs no interface: core code receives a `*math/rand/v2.Rand`, deterministic by construction once the simulator picks the seed. Each interface has two implementations: the simulated one in [`internal/sim`](../internal/sim/) (deterministic, fault-injectable) and the production one in [`internal/sys`](../internal/sys/) (thin, boring, no decisions). The same compiled core runs under both — what the simulator proves is what ships. The shapes grow with the code — `Append` arrived when the write buffer needed it — always settled in `internal/seam` first.
 
 ### Driving Raft
 

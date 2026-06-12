@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/xml"
@@ -129,7 +130,7 @@ func (g *Gateway) copyObject(w http.ResponseWriter, r *http.Request, bucket, key
 		atMS = now.UnixMilli()
 		vid = meta.NewVersionID(now, g.cfg.Rand)
 	})
-	if err := g.cfg.Blobs.Put(vid, data); err != nil {
+	if _, err := g.cfg.Blobs.Put(vid, bytes.NewReader(data)); err != nil {
 		writeError(w, r, errInternal)
 		return
 	}
@@ -212,7 +213,7 @@ func (g *Gateway) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket,
 		writeError(w, r, meta.ErrNoSuchUpload)
 		return
 	}
-	if err := g.cfg.Blobs.Put(dataID, data); err != nil {
+	if _, err := g.cfg.Blobs.Put(dataID, bytes.NewReader(data)); err != nil {
 		writeError(w, r, errInternal)
 		return
 	}

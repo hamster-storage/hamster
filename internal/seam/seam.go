@@ -84,21 +84,30 @@ type MessageHandler interface {
 	HandleMessage(from NodeID, msg []byte)
 }
 
-// Disk is a node's durable storage: a namespace of whole files addressed by
+// Disk is a node's durable storage: a namespace of files addressed by
 // slash-separated relative paths (names must satisfy io/fs.ValidPath).
 //
-// Writes are staged, not durable: data from WriteFile survives a crash only
-// after a successful Sync of the same name. After a crash, an unsynced file
-// may hold its previous content, a prefix of the new data (a torn write), or
-// the complete new data. Removes are staged the same way.
+// Writes are staged, not durable: data from WriteFile or Append survives a
+// crash only after a successful Sync of the same name. After a crash, an
+// unsynced file may hold its previous content, a prefix of the new data (a
+// torn write), or the complete new data. Removes are staged the same way.
 //
-// The shape is whole-file because objects are immutable blobs (see
-// CLAUDE.md): shards are written once and never edited in place. Appending
-// forms can be added when the write buffer needs them.
+// Files are written once and never edited in place, because objects are
+// immutable blobs (see CLAUDE.md). Append exists for the write buffer —
+// building a file incrementally with bounded memory before its one Sync —
+// not for mutating synced files.
 type Disk interface {
 	// WriteFile stages data under name, replacing any staged or durable
 	// content. The caller may reuse data after WriteFile returns.
 	WriteFile(name string, data []byte) error
+
+	// Append stages data added to the end of name's current content —
+	// staged content if any, else durable content, else a new empty file.
+	// Like WriteFile it is durable only after Sync; after a crash, content
+	// that was already durable before the appends survives, and the
+	// appended bytes may be lost entirely or land as a torn prefix. The
+	// caller may reuse data after Append returns.
+	Append(name string, data []byte) error
 
 	// Sync makes all staged changes to name (writes or a remove) durable.
 	// Syncing a name with no staged changes is a no-op.

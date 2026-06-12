@@ -58,4 +58,26 @@ func TestDiskContract(t *testing.T) {
 	if _, err := d.ReadFile("gone"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("removed file still readable: %v", err)
 	}
+
+	// Append: creates a missing file, extends staged and durable content
+	// alike, and respects the name rules — mirroring the simulated disk's
+	// TestAppendBuildsFiles.
+	for _, step := range []error{
+		d.Append("appended", []byte("write ")),
+		d.Append("appended", []byte("buffer")),
+		d.Sync("appended"),
+		d.Append("appended", []byte("ed")),
+		d.Sync("appended"),
+	} {
+		if step != nil {
+			t.Fatal(step)
+		}
+	}
+	got, err = d.ReadFile("appended")
+	if err != nil || !bytes.Equal(got, []byte("write buffered")) {
+		t.Fatalf("ReadFile after appends: %q, %v", got, err)
+	}
+	if err := d.Append("../escape", nil); !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("non-local append name accepted: %v", err)
+	}
 }

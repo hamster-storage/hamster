@@ -66,9 +66,10 @@ func (g *Gateway) createMultipartUpload(w http.ResponseWriter, r *http.Request, 
 }
 
 // uploadPart is S3 UploadPart: the part body follows the PutObject
-// discipline — validated, written durably under a minted data ID, then
-// committed as a part row. Re-uploading a part number displaces the prior
-// part; its blob is reclaimed after the commit.
+// discipline — streamed durably to disk under a minted data ID and
+// validated on the same pass, then committed as a part row. Re-uploading a
+// part number displaces the prior part; its blob is reclaimed after the
+// commit.
 func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string, uid meta.VersionID) {
 	n, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
 	if err != nil || n < 1 || n > meta.MaxPartNumber {
@@ -76,17 +77,10 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 		return
 	}
 	partNumber := uint32(n)
-
-	body, checksum, err := readBody(r, id)
-	if err != nil {
-		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
-			writeAuthError(w, r, err)
-		} else {
-			writeError(w, r, err)
-		}
+	if r.ContentLength > maxObjectSize {
+		writeError(w, r, errEntityTooLarge)
 		return
 	}
-	etag := md5.Sum(body)
 
 	// Check the upload and mint the data ID on the loop, before paying for
 	// the blob write — a part aimed at a nonexistent upload writes nothing.
@@ -105,8 +99,13 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 		return
 	}
 
-	if err := g.cfg.Blobs.Put(dataID, body); err != nil {
-		writeError(w, r, errInternal)
+	size, etag, checksum, err := g.streamBody(r, id, dataID)
+	if err != nil {
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
 		return
 	}
 
@@ -120,8 +119,8 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 			UploadID:         uid,
 			PartNumber:       partNumber,
 			DataID:           dataID,
-			Size:             int64(len(body)),
-			ETag:             etag[:],
+			Size:             size,
+			ETag:             etag,
 			Checksum:         checksum,
 		})
 	})
@@ -133,7 +132,7 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 	if !res.ReplacedDataID.IsZero() {
 		_ = g.cfg.Blobs.Remove(res.ReplacedDataID) // best effort; otherwise an orphan for GC
 	}
-	w.Header().Set("ETag", quoteETag(etag[:]))
+	w.Header().Set("ETag", quoteETag(etag))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -158,7 +157,7 @@ type completeMultipartUploadResult struct {
 // parsed here; the authoritative validation against the stored parts
 // happens inside apply, where no time-of-check gap exists.
 func (g *Gateway) completeMultipartUpload(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string, uid meta.VersionID) {
-	body, _, err := readBody(r, id)
+	body, err := readBody(r, id)
 	if err != nil {
 		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
 			writeAuthError(w, r, err)

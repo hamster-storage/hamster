@@ -256,6 +256,98 @@ func TestCrashKillsTimers(t *testing.T) {
 	}
 }
 
+func TestAppendBuildsFiles(t *testing.T) {
+	_, w := crashWorld(3)
+	disk := (*w).Disk
+
+	// Appending to a file that does not exist creates it.
+	for _, step := range []error{
+		disk.Append("f", []byte("write ")),
+		disk.Append("f", []byte("buffer")),
+	} {
+		if step != nil {
+			t.Fatal(step)
+		}
+	}
+	got, err := disk.ReadFile("f")
+	if err != nil || !bytes.Equal(got, []byte("write buffer")) {
+		t.Fatalf("staged appends: %q, %v", got, err)
+	}
+	if err := disk.Sync("f"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Appending to a durable file extends it.
+	if err := disk.Append("f", []byte("ed")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = disk.ReadFile("f")
+	if err != nil || !bytes.Equal(got, []byte("write buffered")) {
+		t.Fatalf("append to durable: %q, %v", got, err)
+	}
+
+	// Appending after a staged remove recreates the file from empty.
+	if err := disk.Remove("f"); err != nil {
+		t.Fatal(err)
+	}
+	if err := disk.Append("f", []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = disk.ReadFile("f")
+	if err != nil || !bytes.Equal(got, []byte("new")) {
+		t.Fatalf("append after staged remove: %q, %v", got, err)
+	}
+
+	if err := disk.Append("../escape", nil); !errors.Is(err, fs.ErrInvalid) {
+		t.Fatalf("non-local name accepted: %v", err)
+	}
+}
+
+// A crash may lose or tear unsynced appends, but content that was durable
+// before the appends began must survive untouched — that is the contract
+// the write buffer's callers rely on.
+func TestCrashPreservesDurableContentUnderAppends(t *testing.T) {
+	base := []byte("durable base|")
+	appended := []byte("staged tail")
+	var sawLost, sawSurvived bool
+
+	for seed := range uint64(100) {
+		s, w := crashWorld(seed)
+		disk := (*w).Disk
+		for _, step := range []error{
+			disk.WriteFile("f", base),
+			disk.Sync("f"),
+			disk.Append("f", appended),
+		} {
+			if step != nil {
+				t.Fatal(step)
+			}
+		}
+		s.Crash("n1")
+		s.Restart("n1")
+
+		got, err := (*w).Disk.ReadFile("f")
+		if err != nil {
+			t.Fatalf("seed %d: durable file lost under unsynced appends: %v", seed, err)
+		}
+		if !bytes.HasPrefix(got, base) {
+			t.Fatalf("seed %d: crash damaged durable content: %q", seed, got)
+		}
+		tail := got[len(base):]
+		switch {
+		case len(tail) == 0:
+			sawLost = true
+		case !bytes.HasPrefix(appended, tail):
+			t.Fatalf("seed %d: appended tail is %q, neither lost nor a prefix of the append", seed, tail)
+		default:
+			sawSurvived = true
+		}
+	}
+	if !sawLost || !sawSurvived {
+		t.Errorf("crash model is not exploring append outcomes: lost=%v survived=%v over 100 seeds", sawLost, sawSurvived)
+	}
+}
+
 func TestDiskList(t *testing.T) {
 	_, w := crashWorld(5)
 	disk := (*w).Disk

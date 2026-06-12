@@ -44,7 +44,7 @@ type deleteObjectsResult struct {
 }
 
 func (g *Gateway) deleteObjects(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket string) {
-	body, _, err := readBody(r, id)
+	body, err := readBody(r, id)
 	if err != nil {
 		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
 			writeAuthError(w, r, err)
