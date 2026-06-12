@@ -42,6 +42,31 @@ func (d *Disk) WriteFile(name string, data []byte) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
+// Append implements seam.Disk: open with O_APPEND (creating if needed),
+// write, close. Durability still comes from Sync, exactly as for WriteFile.
+func (d *Disk) Append(name string, data []byte) error {
+	path, err := d.path("append", name)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating parent of %q: %w", name, err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening %q for append: %w", name, err)
+	}
+	_, writeErr := f.Write(data)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return fmt.Errorf("appending to %q: %w", name, writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("closing %q after append: %w", name, closeErr)
+	}
+	return nil
+}
+
 // Sync implements seam.Disk. A missing file is not an error: the staged
 // change being made durable may be a removal, in which case only the
 // directory fsyncs matter.

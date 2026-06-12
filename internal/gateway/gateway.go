@@ -12,10 +12,15 @@
 // because work posted to a stopped loop is discarded and its awaiting
 // handler would never wake.
 //
-// v0.1 shape, stated honestly: object bodies are buffered whole in memory
-// (seam.Disk is whole-file until the write buffer lands), and deleting or
-// overwriting an object orphans its blob — garbage collection arrives with
-// the reserved g/ metadata prefix.
+// Upload bodies stream to disk through the write buffer — bounded memory
+// regardless of object size, with the ETag and object checksum computed on
+// the same pass (ADR-0019).
+//
+// v0.1 shape, stated honestly: GET and server-side copy still buffer the
+// object whole in memory — streaming reads arrive with the per-chunk
+// integrity of the framed data stream (docs/DATA-STREAM.md), which is what
+// makes verify-while-serving possible. And a failed request can orphan a
+// blob — garbage collection arrives with the reserved g/ metadata prefix.
 package gateway
 
 import (
@@ -37,12 +42,15 @@ import (
 	"github.com/hamster-storage/hamster/internal/sigv4"
 )
 
-// BlobStore is the gateway's view of the data path: durable whole-object
-// storage addressed by data ID. internal/blob implements it for a single
-// node; the erasure-coded path will implement it for a cluster.
+// BlobStore is the gateway's view of the data path: durable object storage
+// addressed by data ID. internal/blob implements it for a single node; the
+// erasure-coded path will implement it for a cluster.
 type BlobStore interface {
-	// Put stores data under id, durable when it returns.
-	Put(id meta.VersionID, data []byte) error
+	// Put streams data from r under id, durable when it returns, and
+	// reports the byte count stored. On error — r's or the disk's — the
+	// implementation cleans up its own staging (best effort) and returns
+	// r's error wrapped, so the caller can classify it.
+	Put(id meta.VersionID, r io.Reader) (int64, error)
 	// Get returns the data stored under id.
 	Get(id meta.VersionID) ([]byte, error)
 	// Remove deletes the blob under id.
@@ -298,39 +306,103 @@ func checkObjectKey(key string) error {
 	return nil
 }
 
-// readBody reads and validates a request's payload according to its SigV4
-// identity: chunked streams are unwrapped and their per-chunk signatures
-// verified (a tampered chunk surfaces as the reader's error); signed
-// single-shot payloads are checked against the declared SHA-256; unsigned
-// payloads are accepted as sent. A Content-MD5 header, when supplied, is
-// verified against the decoded payload (enforced, not advisory — it is
-// free integrity; it is not *required*, because checksum-era SDKs send
-// x-amz-checksum-* instead). Returns the payload and its SHA-256, which
-// PutObject records as the object checksum.
-func readBody(r *http.Request, id *sigv4.Identity) ([]byte, []byte, error) {
-	var body []byte
-	var err error
+// Payload limits. Object bodies stream to disk through the write buffer
+// and are bounded by S3's single-payload limit (S3-API.md: single PUT and
+// individual parts up to 5 GiB). Control bodies — the XML of DeleteObjects
+// and CompleteMultipartUpload — are read whole and bounded far lower: the
+// largest legitimate one (a 10,000-part complete) is under 1 MiB.
+const (
+	maxObjectSize  = 5 << 30
+	maxControlBody = 4 << 20
+)
+
+// bodyReader unwraps a request's payload reader according to its SigV4
+// identity: chunked streams are decoded with their per-chunk signatures
+// verified as they are read (a tampered chunk surfaces as a read error),
+// other payloads are read as sent.
+func bodyReader(r *http.Request, id *sigv4.Identity) io.Reader {
 	if id.Streaming {
-		body, err = io.ReadAll(id.ChunkedBody(r.Body))
+		return id.ChunkedBody(r.Body)
+	}
+	return r.Body
+}
+
+// streamBody stores a request's payload under dataID — streamed to disk
+// through the write buffer, never held whole in memory — and validates it:
+// signed single-shot payloads against the declared SHA-256, a Content-MD5
+// header (when supplied) against the payload. The MD5 ETag and SHA-256
+// object checksum are computed on the same pass (ADR-0019: no extra read).
+//
+// Validation runs after the bytes are durable, which is safe because only
+// the metadata commit makes data visible: on any failure the blob is
+// removed and the request never had an object. The error comes back ready
+// to classify — sigv4 errors wrapped, S3 errors as themselves.
+func (g *Gateway) streamBody(r *http.Request, id *sigv4.Identity, dataID meta.VersionID) (size int64, etag, checksum []byte, err error) {
+	md5h, sha := md5.New(), sha256.New()
+	src := io.TeeReader(&capReader{r: bodyReader(r, id), remaining: maxObjectSize}, io.MultiWriter(md5h, sha))
+	size, err = g.cfg.Blobs.Put(dataID, src)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	etag, checksum = md5h.Sum(nil), sha.Sum(nil)
+	if !id.Streaming && id.PayloadHash != sigv4.UnsignedPayload && id.PayloadHash != hex.EncodeToString(checksum) {
+		err = errContentSHA256Mismatch
 	} else {
-		body, err = io.ReadAll(r.Body)
+		err = checkContentMD5(r.Header.Get("Content-MD5"), etag)
 	}
 	if err != nil {
-		return nil, nil, err
+		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+		return 0, nil, nil, err
+	}
+	return size, etag, checksum, nil
+}
+
+// capReader fails the read once more than its limit has passed through —
+// the backstop for the 5 GiB payload limit now that bodies stream to disk
+// instead of dying in memory first.
+type capReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.remaining -= int64(n)
+	if c.remaining < 0 {
+		return n, errEntityTooLarge
+	}
+	return n, err
+}
+
+// readBody reads and validates a small control payload (request XML)
+// according to its SigV4 identity: chunked streams are unwrapped with
+// per-chunk signatures verified, signed single-shot payloads are checked
+// against the declared SHA-256, unsigned payloads are accepted as sent. A
+// Content-MD5 header, when supplied, is verified against the decoded
+// payload (enforced, not advisory — it is free integrity; it is not
+// *required*, because checksum-era SDKs send x-amz-checksum-* instead).
+func readBody(r *http.Request, id *sigv4.Identity) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(bodyReader(r, id), maxControlBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxControlBody {
+		return nil, errEntityTooLarge
 	}
 	sum := sha256.Sum256(body)
 	if !id.Streaming && id.PayloadHash != sigv4.UnsignedPayload && id.PayloadHash != hex.EncodeToString(sum[:]) {
-		return nil, nil, errContentSHA256Mismatch
+		return nil, errContentSHA256Mismatch
 	}
-	if err := checkContentMD5(r.Header.Get("Content-MD5"), body); err != nil {
-		return nil, nil, err
+	md5sum := md5.Sum(body)
+	if err := checkContentMD5(r.Header.Get("Content-MD5"), md5sum[:]); err != nil {
+		return nil, err
 	}
-	return body, sum[:], nil
+	return body, nil
 }
 
 // checkContentMD5 verifies a supplied Content-MD5 header (base64 of the
-// raw 16-byte digest) against the payload.
-func checkContentMD5(header string, body []byte) error {
+// raw 16-byte digest) against the payload's computed MD5.
+func checkContentMD5(header string, got []byte) error {
 	if header == "" {
 		return nil
 	}
@@ -338,7 +410,7 @@ func checkContentMD5(header string, body []byte) error {
 	if err != nil || len(want) != md5.Size {
 		return errInvalidDigest
 	}
-	if sum := md5.Sum(body); !bytes.Equal(sum[:], want) {
+	if !bytes.Equal(got, want) {
 		return errBadDigest
 	}
 	return nil

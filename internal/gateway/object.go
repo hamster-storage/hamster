@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bytes"
-	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -15,25 +14,18 @@ import (
 	"github.com/hamster-storage/hamster/internal/sigv4"
 )
 
-// putObject is S3 PutObject: read and validate the payload, write the blob
-// durably under a freshly minted ID, then commit the metadata — the commit
-// is the linearization point, so the data must already be durable
-// (docs/ARCHITECTURE.md).
+// putObject is S3 PutObject: stream the payload durably to disk under a
+// freshly minted ID (validating it on the same pass), then commit the
+// metadata — the commit is the linearization point, so the data must
+// already be durable (docs/ARCHITECTURE.md).
 func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string) {
-	body, checksum, err := readBody(r, id)
-	if err != nil {
-		// A tampered or truncated chunk stream is an authentication
-		// failure, not a bad argument.
-		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
-			writeAuthError(w, r, err)
-		} else {
-			writeError(w, r, err)
-		}
+	if r.ContentLength > maxObjectSize {
+		writeError(w, r, errEntityTooLarge)
 		return
 	}
-	etag := md5.Sum(body)
 
-	// Mint on the loop: the version-ID rng is loop-owned state.
+	// Mint on the loop first — the rng is loop-owned state, and the blob
+	// needs its address before the body can stream to disk.
 	var vid meta.VersionID
 	var atMS int64
 	g.onLoop(func() {
@@ -42,8 +34,15 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		vid = meta.NewVersionID(now, g.cfg.Rand)
 	})
 
-	if err := g.cfg.Blobs.Put(vid, body); err != nil {
-		writeError(w, r, errInternal)
+	size, etag, checksum, err := g.streamBody(r, id, vid)
+	if err != nil {
+		// A tampered or truncated chunk stream is an authentication
+		// failure, not a bad argument.
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
 		return
 	}
 
@@ -58,8 +57,8 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 			Bucket:           bucket,
 			Key:              key,
 			VersionID:        vid,
-			Size:             int64(len(body)),
-			ETag:             etag[:],
+			Size:             size,
+			ETag:             etag,
 			ContentType:      r.Header.Get("Content-Type"),
 			UserMetadata:     userMetadata(r.Header),
 			ObjectChecksum:   checksum,
@@ -74,7 +73,7 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 
-	w.Header().Set("ETag", quoteETag(etag[:]))
+	w.Header().Set("ETag", quoteETag(etag))
 	w.WriteHeader(http.StatusOK)
 }
 

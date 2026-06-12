@@ -45,6 +45,8 @@ var (
 		"The Content-MD5 you specified is not a valid base64 MD5 digest."}
 	errBadDigest = &s3Error{"BadDigest", http.StatusBadRequest,
 		"The Content-MD5 you specified did not match what we received."}
+	errEntityTooLarge = &s3Error{"EntityTooLarge", http.StatusBadRequest,
+		"The payload exceeds the maximum size this operation allows."}
 )
 
 // mapError translates a metadata-layer error into its S3 wire form.
