@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,6 +110,26 @@ func Run(dataDir string) (*Node, error) {
 		loop.Stop()
 		return nil, err
 	}
+	// Membership changes are rare and high-signal: log the roster every
+	// time it shifts — joins, promotions, removals. Loop-owned, so the
+	// last-roster comparison needs no lock.
+	lastRoster := ""
+	onMembership := func(members []raftnode.Member) {
+		roster := make([]string, 0, len(members))
+		for _, m := range members {
+			role := "voter"
+			if m.Learner {
+				role = "learner"
+			}
+			roster = append(roster, fmt.Sprintf("%s=%s", m.Addr, role))
+		}
+		line := strings.Join(roster, " ")
+		if line != lastRoster {
+			lastRoster = line
+			log.Printf("cluster: membership: %s", line)
+		}
+	}
+
 	built := make(chan error, 1)
 	loop.Post(func() {
 		rn, err := raftnode.New(raftnode.Config{
@@ -118,6 +139,7 @@ func Run(dataDir string) (*Node, error) {
 			Rand: mathrand.New(mathrand.NewPCG(
 				binary.LittleEndian.Uint64(seed[0:8]), binary.LittleEndian.Uint64(seed[8:16]))),
 			TickInterval: tickInterval, ElectionTicks: electionTicks,
+			OnMembershipChange: onMembership,
 		})
 		n.raft = rn
 		built <- err

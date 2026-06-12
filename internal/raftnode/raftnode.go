@@ -86,6 +86,13 @@ type Config struct {
 	// node snapshots the store and compacts its log. Zero means the
 	// default.
 	SnapshotEntries uint64
+
+	// OnMembershipChange, when set, is called on the node's loop with the
+	// new member list whenever the applied configuration changes — a
+	// join, a promotion, a removal, a snapshot install, or boot replaying
+	// any of those. The composition root logs it; the simulator leaves it
+	// nil.
+	OnMembershipChange func(members []Member)
 }
 
 const defaultSnapshotEntries = 4096
@@ -304,7 +311,16 @@ func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
 	n.applied = snap.Metadata.Index
 	n.snapIndex = snap.Metadata.Index
 	n.confState = snap.Metadata.ConfState
+	n.notifyMembership()
 	return nil
+}
+
+// notifyMembership reports an applied configuration change to the
+// composition root, if it asked.
+func (n *Node) notifyMembership() {
+	if n.cfg.OnMembershipChange != nil {
+		n.cfg.OnMembershipChange(n.Members())
+	}
 }
 
 // Store is the replica's metadata state, for reads. Loop-owned, like the
@@ -739,6 +755,7 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 		}
 		n.confState = *n.rn.ApplyConfChange(cc)
 		n.confChanged = true
+		n.notifyMembership()
 	case raftpb.EntryNormal:
 		if len(e.Data) == 0 {
 			return // the leader's commit-barrier no-op
