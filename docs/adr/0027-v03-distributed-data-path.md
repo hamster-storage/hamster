@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implemented so far: placement ([`internal/place`](../../internal/place/)), the shard transfer protocol ([`internal/datapath`](../../internal/datapath/)), and the PUT coordinator with the ack rule ([`internal/coord`](../../internal/coord/)) — proven under simulated cluster schedules (crashed receivers, down nodes, floor refusals, mid-PUT coordinator loss). The network GET coordinator and the `hamster serve` wiring are the remaining passes.
+Accepted. Implemented: placement ([`internal/place`](../../internal/place/)), the shard transfer protocol ([`internal/datapath`](../../internal/datapath/)), and the coordinators ([`internal/coord`](../../internal/coord/)) — the PUT with the ack rule, and the GET that prefetches covering shard ranges (`stream.Cover` + `ec.ReadHeader`) and decodes through the pure readers, reconstructing from any k. Proven under simulated cluster schedules: crashed receivers, down nodes, floor refusals, mid-PUT coordinator loss, degraded reads through m crashed holders. Remaining: repair (pass 4) and the `hamster serve` wiring (pass 5).
 
 ## Context
 

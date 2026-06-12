@@ -215,3 +215,30 @@ func readFull(r io.ReaderAt, p []byte, off int64, what string) error {
 	}
 	return nil
 }
+
+// Header is a shard file's self-description (ADR-0026 decision 3),
+// exported for callers that locate shard bytes before they can build a
+// Reader — the network read coordinator decodes headers first to learn
+// the geometry its slice fetches must follow.
+type Header struct {
+	ID            meta.VersionID
+	Index         int
+	Data, Parity  int
+	SliceSize     int64
+	FrameSize     int64
+	PayloadOffset int64 // where the first slice begins
+}
+
+// ReadHeader decodes a shard file's front. A 512-byte prefix is always
+// sufficient (headers are tens of bytes; the length field is validated).
+func ReadHeader(r io.ReaderAt) (Header, error) {
+	h, payload, err := decodeShard(r)
+	if err != nil {
+		return Header{}, err
+	}
+	return Header{
+		ID: h.id, Index: h.index, Data: h.k, Parity: h.m,
+		SliceSize: h.sliceSize, FrameSize: h.frameSize,
+		PayloadOffset: payload,
+	}, nil
+}

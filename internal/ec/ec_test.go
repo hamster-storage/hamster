@@ -379,3 +379,22 @@ func ExampleWriter() {
 	fmt.Printf("%s\n", got)
 	// Output: six shards, any four reassemble me
 }
+
+// TestReadHeader: the exported header view matches what was written —
+// the geometry the network read path plans its fetches from.
+func TestReadHeader(t *testing.T) {
+	payload := bytes.Repeat([]byte{7}, 5000)
+	shards, _ := encode(t, 3, 2, payload)
+	for i, s := range shards {
+		h, err := ReadHeader(bytes.NewReader(s))
+		if err != nil {
+			t.Fatalf("shard %d: %v", i, err)
+		}
+		if h.ID != testID || h.Index != i || h.Data != 3 || h.Parity != 2 || h.SliceSize != sliceSize {
+			t.Fatalf("shard %d header: %+v", i, h)
+		}
+		if h.PayloadOffset <= 0 || h.FrameSize <= 0 {
+			t.Fatalf("shard %d offsets: %+v", i, h)
+		}
+	}
+}
