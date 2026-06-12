@@ -9,10 +9,13 @@
 // randomness, and no I/O; it imports nothing of the seam. It is built to
 // sit behind Raft and inside the simulation harness unchanged.
 //
-// The keyspace lives in an in-memory sorted KV with the same shape BadgerDB
-// will have: encoded keys (settled design, ADR-0014), typed record values
-// (protobuf encoding lands with persistence). A Store must be owned by a
-// single event loop (seam.Loop); it does no locking of its own.
+// The keyspace lives in an in-memory sorted KV: encoded keys (settled
+// design, ADR-0014) mapping to typed records. Durability is the Persister
+// seam (persist.go): each apply commits its encoded row changes (codec.go,
+// ADR-0023) as one atomic transaction — BadgerDB in production, fakes in
+// tests — before the mutation becomes visible, and rolls back if the commit
+// fails. A Store must be owned by a single event loop (seam.Loop); it does
+// no locking of its own.
 package meta
 
 import "errors"
@@ -47,10 +50,13 @@ const (
 
 // Store holds one replica's metadata state.
 type Store struct {
-	kv *memKV
+	kv      *txKV
+	persist Persister
 }
 
-// NewStore returns an empty metadata store.
+// NewStore returns an empty metadata store. Without a Persister it is
+// purely in-memory — what the simulation harness and the reference-model
+// tests run against.
 func NewStore() *Store {
-	return &Store{kv: newMemKV()}
+	return &Store{kv: newTxKV()}
 }

@@ -89,6 +89,12 @@ type VersionEntry struct {
 	// composite MD5 (ADR-0019: hex plus "-N" on the wire), and
 	// ObjectChecksum is empty — integrity is per part.
 	Parts []PartRef
+
+	// unknown holds raw bytes of fields a newer writer added that this
+	// version of the code does not know. The codec preserves them across a
+	// rewrite (ADR-0008: old code never sheds new fields). Same on every
+	// record type below.
+	unknown []byte
 }
 
 // PartRef is one slice of a multipart object's data: the address it was
@@ -97,6 +103,8 @@ type PartRef struct {
 	DataID   VersionID
 	Size     int64
 	Checksum []byte // SHA-256 of the part's bytes
+
+	unknown []byte
 }
 
 // DataIDs returns every data-plane address the entry's bytes live at:
@@ -122,6 +130,7 @@ func (e VersionEntry) clone() VersionEntry {
 	e.ETag = slices.Clone(e.ETag)
 	e.ObjectChecksum = slices.Clone(e.ObjectChecksum)
 	e.UserMetadata = maps.Clone(e.UserMetadata)
+	e.unknown = slices.Clone(e.unknown)
 	if e.ShardChecksums != nil {
 		sc := make([][]byte, len(e.ShardChecksums))
 		for i, s := range e.ShardChecksums {
@@ -172,6 +181,8 @@ type CurrentRecord struct {
 	// PartCount is the multipart part count, zero for whole PUTs: listings
 	// must render the composite ETag with its "-N" suffix (ADR-0019).
 	PartCount uint32
+
+	unknown []byte
 }
 
 func currentRecordFor(e VersionEntry) CurrentRecord {
@@ -192,6 +203,8 @@ type BucketConfig struct {
 	CreatedUnixMS     int64
 	Versioning        VersioningState
 	ObjectLockEnabled bool
+
+	unknown []byte
 }
 
 // UploadRecord is one row under u/ — an in-progress multipart upload. It
@@ -203,6 +216,8 @@ type UploadRecord struct {
 	CreatedUnixMS int64
 	ContentType   string
 	UserMetadata  map[string]string
+
+	unknown []byte
 }
 
 // PartRecord is one uploaded part of an in-progress multipart upload. Its
@@ -217,4 +232,6 @@ type PartRecord struct {
 	ETag           []byte // MD5, matched against CompleteMultipartUpload's part list
 	Checksum       []byte // SHA-256 of the part's bytes
 	UploadedUnixMS int64
+
+	unknown []byte
 }

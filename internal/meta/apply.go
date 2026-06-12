@@ -8,7 +8,8 @@ package meta
 
 // ApplyCreateBucket creates a bucket. Object-lock-enabled buckets start
 // with versioning enabled (S3: lock requires versioning).
-func (s *Store) ApplyCreateBucket(p CreateBucket) error {
+func (s *Store) ApplyCreateBucket(p CreateBucket) (err error) {
+	defer s.txn(&err)()
 	if err := validateBucketName(p.Bucket); err != nil {
 		return err
 	}
@@ -34,7 +35,8 @@ func (s *Store) ApplyCreateBucket(p CreateBucket) error {
 // transaction (METADATA.md). Delete markers count: a bucket with history
 // is not empty. Uploads count too (S3 parity): deleting the bucket from
 // under them would orphan their u/ rows and part data.
-func (s *Store) ApplyDeleteBucket(p DeleteBucket) error {
+func (s *Store) ApplyDeleteBucket(p DeleteBucket) (err error) {
+	defer s.txn(&err)()
 	if _, ok := s.kv.get(bucketRowKey(p.Bucket)); !ok {
 		return ErrNoSuchBucket
 	}
@@ -55,7 +57,8 @@ func (s *Store) ApplyDeleteBucket(p DeleteBucket) error {
 // ApplySetBucketVersioning moves a bucket between Enabled and Suspended.
 // Lock-enabled buckets can never suspend — suspension is the only path by
 // which a later write could displace a version, and lock forbids it.
-func (s *Store) ApplySetBucketVersioning(p SetBucketVersioning) error {
+func (s *Store) ApplySetBucketVersioning(p SetBucketVersioning) (err error) {
+	defer s.txn(&err)()
 	cfg, ok := s.GetBucket(p.Bucket)
 	if !ok {
 		return ErrNoSuchBucket
@@ -74,7 +77,8 @@ func (s *Store) ApplySetBucketVersioning(p SetBucketVersioning) error {
 // ApplyPutObject commits one object version: insert the v/ row, replace
 // the prior null version when versioning is not enabled, upsert the c/
 // row — one transaction.
-func (s *Store) ApplyPutObject(p PutObject) (PutResult, error) {
+func (s *Store) ApplyPutObject(p PutObject) (res PutResult, err error) {
+	defer s.txn(&err)()
 	cfg, ok := s.GetBucket(p.Bucket)
 	if !ok {
 		return PutResult{}, ErrNoSuchBucket
@@ -133,7 +137,8 @@ func (s *Store) ApplyPutObject(p PutObject) (PutResult, error) {
 }
 
 // ApplyDeleteObject is DELETE without a version ID.
-func (s *Store) ApplyDeleteObject(p DeleteObject) (DeleteObjectResult, error) {
+func (s *Store) ApplyDeleteObject(p DeleteObject) (res DeleteObjectResult, err error) {
+	defer s.txn(&err)()
 	cfg, ok := s.GetBucket(p.Bucket)
 	if !ok {
 		return DeleteObjectResult{}, ErrNoSuchBucket
@@ -186,7 +191,8 @@ func (s *Store) ApplyDeleteObject(p DeleteObject) (DeleteObjectResult, error) {
 // destroys a version row, and therefore where the lock check lives: inside
 // deterministic apply, against replicated state, with no time-of-check gap.
 // There is no input that overrides COMPLIANCE retention or a legal hold.
-func (s *Store) ApplyDeleteVersion(p DeleteVersion) (DeleteVersionResult, error) {
+func (s *Store) ApplyDeleteVersion(p DeleteVersion) (res DeleteVersionResult, err error) {
+	defer s.txn(&err)()
 	if _, ok := s.GetBucket(p.Bucket); !ok {
 		return DeleteVersionResult{}, ErrNoSuchBucket
 	}
@@ -219,7 +225,8 @@ func (s *Store) ApplyDeleteVersion(p DeleteVersion) (DeleteVersionResult, error)
 // mutation a committed entry sees besides legal holds, and strengthen-only
 // under COMPLIANCE (METADATA.md). Legal holds are independent of retention
 // and do not block it.
-func (s *Store) ApplyUpdateRetention(p UpdateRetention) error {
+func (s *Store) ApplyUpdateRetention(p UpdateRetention) (err error) {
+	defer s.txn(&err)()
 	entry, err := s.lockTarget(p.Bucket, p.Key, p.VersionID)
 	if err != nil {
 		return err
@@ -258,7 +265,8 @@ func (s *Store) ApplyUpdateRetention(p UpdateRetention) error {
 }
 
 // ApplyUpdateLegalHold sets or clears a version's legal hold.
-func (s *Store) ApplyUpdateLegalHold(p UpdateLegalHold) error {
+func (s *Store) ApplyUpdateLegalHold(p UpdateLegalHold) (err error) {
+	defer s.txn(&err)()
 	entry, err := s.lockTarget(p.Bucket, p.Key, p.VersionID)
 	if err != nil {
 		return err
