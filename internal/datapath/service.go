@@ -18,8 +18,11 @@ var (
 	// chunkSize is the payload of one ShardChunk message.
 	chunkSize = 64 << 10
 	// windowBytes bounds unacknowledged bytes per shard write stream —
-	// the sender's whole buffer, so also its memory bound.
-	windowBytes = 512 << 10
+	// the sender's whole buffer, so also its memory bound. Sized so a
+	// stripe-pacing coordinator (internal/coord) always has headroom for
+	// one slice burst mid-stream and the close burst (final stripe
+	// padding plus the frame trailer) at the end.
+	windowBytes = 1 << 20
 	// rto is the retransmission timeout for writes and the retry interval
 	// for reads and deletes.
 	rto = 500 * time.Millisecond

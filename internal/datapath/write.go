@@ -1,6 +1,7 @@
 package datapath
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/hamster-storage/hamster/internal/meta"
@@ -153,10 +154,27 @@ func (w *WriteStream) handleAck(m writeAckMsg) {
 	}
 }
 
+// Abort fails the stream locally — the coordinator's early exit when the
+// write as a whole cannot succeed. The receiver's staging times out into
+// markerless garbage, which is what staging means. The done callback
+// fires with the abort error, exactly once like every other outcome.
+func (w *WriteStream) Abort() {
+	if !w.finished {
+		w.finish(errors.New("datapath: write aborted"))
+	}
+}
+
 // onTimer retransmits from the acknowledged base after a silent interval,
-// and gives up after maxAttempts of them without progress.
+// and gives up after maxAttempts of them without progress. An idle stream
+// — everything acknowledged, no commit pending — is owed no response and
+// never times out: the caller may be pacing other shards of the same
+// object, and patience here is free.
 func (w *WriteStream) onTimer() {
 	if w.finished {
+		return
+	}
+	if len(w.buf) == 0 && !w.committing {
+		w.rearm()
 		return
 	}
 	w.attempts++
