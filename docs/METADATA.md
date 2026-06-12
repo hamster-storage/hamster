@@ -194,28 +194,63 @@ S3's wart, handled head-on: with versioning suspended, a PUT creates the version
 
 ## Operations as transactions
 
-What goes through the Raft log is a `Proposal` — versioned protobuf like everything else, one S3 mutation each:
+What goes through the Raft log is a `Proposal` — versioned protobuf like everything else, one S3 mutation each. The command set mirrors the implemented apply API in `internal/meta/proposals.go` one to one (this sketch was reconciled to the code while formats are still free to change; the encoding is implemented in `internal/meta/proposal_codec.go` with golden tests pinning the bytes):
 
 ```proto
 message Proposal {
   uint32 format_version = 1;
   int64  proposed_at_unix_ms = 2;  // time is an input, not ambient — see below
   oneof command {
-    CommitObject       commit_object        = 3;
-    CommitDeleteMarker commit_delete_marker = 4;
-    DeleteVersion      delete_version       = 5;
-    UpdateRetention    update_retention     = 6;
-    CreateBucket       create_bucket        = 7;
-    DeleteBucket       delete_bucket        = 8;
-    UpdateLayout       update_layout        = 9;
-    UpdateNode         update_node          = 10;
+    CreateBucket        create_bucket         = 3;
+    DeleteBucket        delete_bucket         = 4;
+    SetBucketVersioning set_bucket_versioning = 5;
+    PutObject           put_object            = 6;
+    DeleteObject        delete_object         = 7;   // no version ID: remove or insert a marker
+    DeleteVersion       delete_version        = 8;   // version ID: destroy one row, lock-checked
+    UpdateRetention     update_retention      = 9;
+    UpdateLegalHold     update_legal_hold     = 10;
     CreateMultipartUpload   create_multipart_upload   = 11;
     UploadPart              upload_part               = 12;
     CompleteMultipartUpload complete_multipart_upload = 13;
     AbortMultipartUpload    abort_multipart_upload    = 14;
+    // 15 update_layout and 16 update_node are reserved: cluster layout
+    // (v0.4) and membership records (v0.2) arrive additively.
   }
 }
 ```
+
+Command fields mirror the Go proposal structs in declaration order; `proposed_at_unix_ms` lives once in the envelope, never inside a command. The two largest, for flavor — the rest follow the same pattern:
+
+```proto
+message PutObject {
+  string bucket       = 1;
+  string key          = 2;
+  bytes  version_id   = 3;   // gateway-minted; becomes data_id verbatim, identity may bump
+  int64  size         = 4;
+  bytes  etag         = 5;
+  string content_type = 6;
+  map<string, string> user_metadata = 7;
+  uint64 partition         = 8;
+  uint32 ec_data_shards    = 9;
+  uint32 ec_parity_shards  = 10;
+  bytes  object_checksum   = 11;
+  repeated bytes shard_checksums = 12;
+  RetentionMode retention_mode       = 13;
+  int64         retain_until_unix_ms = 14;
+  bool          legal_hold           = 15;
+}
+
+message CompleteMultipartUpload {
+  string bucket     = 1;
+  string key        = 2;
+  bytes  upload_id  = 3;
+  bytes  version_id = 4;
+  bytes  etag       = 5;            // the composite MD5, a data-plane fact
+  repeated CompletedPart parts = 6; // CompletedPart: 1 part_number, 2 etag
+}
+```
+
+A decoder that meets an **unknown command** must refuse the proposal: applying half-understood mutations is how replicas diverge. Unknown *fields within* a known command are skipped, proto3-style — additive evolution within a command is legal, but only once every node understands the field, which is the expand-then-contract discipline ([ADR-0008](adr/0008-versioned-formats-rolling-upgrades.md)) that the v0.8 feature gates will enforce mechanically.
 
 | Operation | Transaction at apply |
 |---|---|
