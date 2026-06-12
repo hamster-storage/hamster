@@ -36,3 +36,4 @@ go.work.sum
 /cmd/hamster/hamster
 /cmd/hamster/data/
 /data/
+/n[0-9]/
