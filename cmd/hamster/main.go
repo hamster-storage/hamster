@@ -25,10 +25,19 @@ import (
 	"github.com/hamster-storage/hamster/internal/sys"
 )
 
+// version is stamped by the release build:
+//
+//	go build -ldflags "-X main.version=v0.1.0" ./cmd/hamster
+var version = "dev"
+
 func main() {
 	log.SetFlags(0)
+	if len(os.Args) >= 2 && os.Args[1] == "version" {
+		fmt.Println("hamster", version)
+		return
+	}
 	if len(os.Args) < 2 || os.Args[1] != "serve" {
-		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags]")
+		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags] | hamster version")
 		os.Exit(2)
 	}
 	if err := serve(os.Args[2:]); err != nil {
@@ -104,7 +113,7 @@ func serve(args []string) error {
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()
 
-	log.Printf("hamster serve: S3 API on http://%s (region %s)", *listen, *region)
+	log.Printf("hamster serve: %s — S3 API on http://%s (region %s)", version, *listen, *region)
 	log.Printf("hamster serve: data in %s (%d metadata rows restored)", *dataDir, restored)
 	log.Printf("hamster serve: DEV PREVIEW — single node, v0 formats may change between releases")
 
