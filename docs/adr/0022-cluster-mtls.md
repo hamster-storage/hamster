@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (design only; ships with clustering — see the [roadmap](../ROADMAP.md))
+Accepted, implementation in progress: the inter-node transport (`internal/sys`) is mTLS-only with certificate-bound peer identity, and the CA/node-certificate material exists (`internal/certs`). Join tokens, automatic renewal, and membership-bound revocation arrive with cluster join.
 
 ## Context
 

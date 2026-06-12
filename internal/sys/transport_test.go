@@ -1,0 +1,196 @@
+package sys
+
+import (
+	"bytes"
+	"crypto/tls"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/hamster-storage/hamster/internal/certs"
+	"github.com/hamster-storage/hamster/internal/seam"
+)
+
+type delivery struct {
+	from seam.NodeID
+	msg  []byte
+}
+
+// testNet is a little cluster of transports sharing one CA, with delivery
+// channels per node.
+type testNet struct {
+	ca    *certs.CA
+	cfg   map[seam.NodeID]TransportConfig
+	trans map[seam.NodeID]*Transport
+	inbox map[seam.NodeID]chan delivery
+}
+
+func newTestNet(t *testing.T, ids ...seam.NodeID) *testNet {
+	t.Helper()
+	now := time.Now()
+	ca, err := certs.NewCA("test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &testNet{
+		ca:    ca,
+		cfg:   make(map[seam.NodeID]TransportConfig),
+		trans: make(map[seam.NodeID]*Transport),
+		inbox: make(map[seam.NodeID]chan delivery),
+	}
+	peers := make(map[seam.NodeID]string)
+	for _, id := range ids {
+		cert, err := ca.Issue(string(id), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inbox := make(chan delivery, 64)
+		n.inbox[id] = inbox
+		n.cfg[id] = TransportConfig{
+			NodeID: id, Listen: "127.0.0.1:0", Peers: peers, // shared map, filled below
+			Cert: cert, CA: ca.Pool(),
+			Deliver: func(from seam.NodeID, msg []byte) {
+				inbox <- delivery{from, msg}
+			},
+		}
+	}
+	for _, id := range ids {
+		n.start(t, id)
+	}
+	t.Cleanup(func() {
+		for _, tr := range n.trans {
+			tr.Close()
+		}
+	})
+	return n
+}
+
+// start (re)opens one node's transport. The first start binds :0 and pins
+// the assigned address — restarts rebind it, so the shared peer map never
+// changes once sends begin (the production contract: addresses are
+// static).
+func (n *testNet) start(t *testing.T, id seam.NodeID) {
+	t.Helper()
+	cfg := n.cfg[id]
+	tr, err := NewTransport(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.trans[id] = tr
+	if _, pinned := cfg.Peers[id]; !pinned {
+		cfg.Peers[id] = tr.Addr()
+		cfg.Listen = tr.Addr()
+		n.cfg[id] = cfg
+	}
+}
+
+func (n *testNet) expect(t *testing.T, at seam.NodeID, from seam.NodeID, msg []byte) {
+	t.Helper()
+	select {
+	case d := <-n.inbox[at]:
+		if d.from != from || !bytes.Equal(d.msg, msg) {
+			t.Fatalf("delivery at %s: %q from %s, want %q from %s", at, d.msg, d.from, msg, from)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("no delivery at %s within 10s", at)
+	}
+}
+
+func TestTransportRoundTrip(t *testing.T) {
+	n := newTestNet(t, "n1", "n2")
+
+	n.trans["n1"].Send("n2", []byte("hello from n1"))
+	n.expect(t, "n2", "n1", []byte("hello from n1"))
+
+	n.trans["n2"].Send("n1", []byte("hello back"))
+	n.expect(t, "n1", "n2", []byte("hello back"))
+
+	// A multi-megabyte frame (a snapshot-sized message) arrives intact.
+	big := bytes.Repeat([]byte("snapshot"), 1<<19) // 4 MiB
+	n.trans["n1"].Send("n2", big)
+	n.expect(t, "n2", "n1", big)
+}
+
+// TestTransportAuthenticatesPeers: a process with a certificate from a
+// different CA reaches the port and gets nothing — its messages never
+// surface, and the cluster's own traffic is unaffected.
+func TestTransportAuthenticatesPeers(t *testing.T) {
+	n := newTestNet(t, "n1", "n2")
+
+	rogueCA, err := certs.NewCA("rogue", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rogueCert, err := rogueCA.Issue("n2", time.Now()) // claims to be n2
+	if err != nil {
+		t.Fatal(err)
+	}
+	rogue, err := NewTransport(TransportConfig{
+		NodeID: "n2", Listen: "127.0.0.1:0",
+		Peers: map[seam.NodeID]string{"n1": n.trans["n1"].Addr()},
+		Cert:  rogueCert, CA: rogueCA.Pool(),
+		Deliver: func(seam.NodeID, []byte) {},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rogue.Close()
+
+	rogue.Send("n1", []byte("let me in"))
+	n.trans["n2"].Send("n1", []byte("legitimate"))
+	n.expect(t, "n1", "n2", []byte("legitimate"))
+	select {
+	case d := <-n.inbox["n1"]:
+		t.Fatalf("rogue delivery surfaced: %q from %s", d.msg, d.from)
+	default:
+	}
+}
+
+// TestTransportPlaintextRefused: the constructor enforces ADR-0022.
+func TestTransportPlaintextRefused(t *testing.T) {
+	_, err := NewTransport(TransportConfig{
+		NodeID: "n1", Listen: "127.0.0.1:0",
+		Peers: map[seam.NodeID]string{},
+		Cert:  tls.Certificate{}, CA: nil,
+		Deliver: func(seam.NodeID, []byte) {},
+	})
+	if err == nil {
+		t.Fatal("a transport without mTLS material was constructed")
+	}
+}
+
+// TestTransportPeerOutage: sends to a dead peer return immediately and
+// drop; once the peer is back, traffic flows again.
+func TestTransportPeerOutage(t *testing.T) {
+	n := newTestNet(t, "n1", "n2")
+
+	n.trans["n2"].Close()
+	start := time.Now()
+	for i := range 10 {
+		n.trans["n1"].Send("n2", []byte{byte(i)})
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("Send blocked %v on a dead peer; the contract is never-blocks", took)
+	}
+
+	n.start(t, "n2")
+	// Keep sending until a post-recovery message lands. Outage-era
+	// messages may surface late — the seam contract allows delay — so
+	// drain anything that is not ours.
+	deadline := time.After(15 * time.Second)
+	for i := 0; ; i++ {
+		n.trans["n1"].Send("n2", fmt.Appendf(nil, "recovered-%d", i))
+		select {
+		case d := <-n.inbox["n2"]:
+			if d.from != "n1" {
+				t.Fatalf("delivery from unexpected sender %s", d.from)
+			}
+			if bytes.HasPrefix(d.msg, []byte("recovered-")) {
+				return
+			}
+		case <-deadline:
+			t.Fatal("no delivery after peer recovery")
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
