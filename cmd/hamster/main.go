@@ -1,11 +1,10 @@
 // Command hamster is the Hamster server binary.
 //
 // The only command so far is serve: a single-node S3 endpoint over the v0.1
-// gateway. It is a development preview with a sharp edge, stated up front:
-// object data is durable on disk, but metadata lives in memory until the
-// BadgerDB layer lands — restarting the process forgets every bucket and
-// key. Useful for exercising the S3 surface with real tools; not useful for
-// keeping anything.
+// gateway. Object data lives as blobs under <data-dir>/blobs, metadata in
+// BadgerDB under <data-dir>/meta (ADR-0005) — both survive a restart. Still
+// a development preview: single node, no erasure coding, v0 formats may
+// change between releases (ROADMAP.md).
 package main
 
 import (
@@ -18,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 
 	"github.com/hamster-storage/hamster/internal/blob"
 	"github.com/hamster-storage/hamster/internal/gateway"
@@ -53,10 +53,23 @@ func serve(args []string) error {
 		return fmt.Errorf("set HAMSTER_ACCESS_KEY_ID and HAMSTER_SECRET_ACCESS_KEY")
 	}
 
-	disk, err := sys.NewDisk(*dataDir)
+	disk, err := sys.NewDisk(filepath.Join(*dataDir, "blobs"))
 	if err != nil {
 		return err
 	}
+	mdb, err := sys.OpenMetaDB(filepath.Join(*dataDir, "meta"))
+	if err != nil {
+		return err
+	}
+	store := meta.NewStore()
+	restored := 0
+	if err := mdb.Load(func(k string, v []byte) error {
+		restored++
+		return store.Restore(k, v)
+	}); err != nil {
+		return err
+	}
+	store.SetPersister(mdb)
 	loop := sys.NewLoop()
 
 	// The composition root is where ambient entropy is allowed: it seeds
@@ -78,7 +91,7 @@ func serve(args []string) error {
 			}
 			return "", false
 		},
-		Store: meta.NewStore(),
+		Store: store,
 		Loop:  loop,
 		Clock: sys.Clock{},
 		Rand:  rng,
@@ -92,17 +105,19 @@ func serve(args []string) error {
 	go func() { done <- srv.ListenAndServe() }()
 
 	log.Printf("hamster serve: S3 API on http://%s (region %s)", *listen, *region)
-	log.Printf("hamster serve: DEV PREVIEW — metadata is in-memory; a restart forgets all buckets and keys")
+	log.Printf("hamster serve: data in %s (%d metadata rows restored)", *dataDir, restored)
+	log.Printf("hamster serve: DEV PREVIEW — single node, v0 formats may change between releases")
 
 	select {
 	case err := <-done:
 		return err
 	case <-stop:
 	}
-	// Shutdown order per the gateway contract: HTTP first, loop second.
+	// Shutdown order per the gateway contract: HTTP first, loop second —
+	// and the metadata db last, once nothing can post a transaction.
 	if err := srv.Close(); err != nil {
 		return err
 	}
 	loop.Stop()
-	return nil
+	return mdb.Close()
 }

@@ -2,7 +2,7 @@
 
 This document designs the metadata layer: the protobuf records and the BadgerDB keyspace that hold everything Hamster knows about its objects. It is the concrete companion to [ADR-0005](adr/0005-metadata-badgerdb-raft.md) (where metadata lives), [ADR-0006](adr/0006-versioning-and-object-lock.md) (what versioning must support), [ADR-0008](adr/0008-versioned-formats-rolling-upgrades.md) (how formats evolve), and [ADR-0014](adr/0014-metadata-keyspace-design.md) (the keyspace decisions made here).
 
-> **Status: design document, partially implemented.** The model lives in [`internal/meta`](../internal/meta/): the keyspace encoding, deterministic apply, and version-ID rules below are now code, tested against an independent reference model. Records are Go structs mirroring the protobuf sketches; the `.proto` files and wire/disk encodings land with persistence and the Raft log.
+> **Status: design document, substantially implemented.** The model lives in [`internal/meta`](../internal/meta/): the keyspace encoding, deterministic apply, and version-ID rules below are now code, tested against an independent reference model. The record encodings are real too — hand-written protobuf wire codecs ([ADR-0023](adr/0023-handwritten-protowire-codecs.md)) with golden conformance tests, persisted to BadgerDB through `meta.Persister` (one apply, one atomic durable transaction; the single-node degenerate case of principle 3 until Raft arrives in v0.2). The message sketches below are the schema document; field numbers in code match them exactly.
 
 ## Principles
 
@@ -259,5 +259,5 @@ PUT writes shards *before* the metadata commit, so a crash mid-PUT leaves orphan
 ## Open questions
 
 - ~~ETag semantics~~ — resolved by [ADR-0019](adr/0019-md5-etags.md): ETags are MD5 (compatibility), integrity rides the internal checksums; the `etag` field stores the MD5 or multipart composite.
-- ~~The exact key-encoding bytes~~ — settled in `internal/meta/keys.go`, with round-trip and ordering tests. Final proto field layout still lands with the persistence encoding, with format conformance tests from day one.
+- ~~The exact key-encoding bytes~~ — settled in `internal/meta/keys.go`, with round-trip and ordering tests. ~~Final proto field layout~~ — settled in `internal/meta/codec.go` ([ADR-0023](adr/0023-handwritten-protowire-codecs.md)): golden tests pin the exact bytes, the randomized workload proves byte-identical restart equivalence, and unknown fields survive rewrites by older code.
 - Whether `shard_checksums` should also be mirrored into shard file headers on disk (probably yes, for offline inspection) — a data-plane format question, not a metadata one.

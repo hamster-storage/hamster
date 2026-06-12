@@ -2,6 +2,7 @@ package meta
 
 import (
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -72,6 +73,8 @@ func runWorkload(t *testing.T, seed uint64, ops int) *workloadStats {
 	t.Helper()
 	rng := rand.New(rand.NewPCG(seed, 0))
 	s := NewStore()
+	persisted := newFakePersister()
+	s.SetPersister(persisted)
 	m := newModel()
 	stats := &workloadStats{}
 
@@ -341,6 +344,15 @@ func runWorkload(t *testing.T, seed uint64, ops int) *workloadStats {
 		}
 	}
 	m.check(t, s)
+
+	// Restart equivalence, against the whole randomized op space: a store
+	// rebuilt from the persisted rows must match the model and be
+	// byte-identical to the one that wrote them.
+	restored := restoreFrom(t, persisted)
+	m.check(t, restored)
+	if !maps.Equal(dumpRows(s), dumpRows(restored)) {
+		t.Fatal("restored store differs from the live store after the workload")
+	}
 	return stats
 }
 

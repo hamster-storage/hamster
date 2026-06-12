@@ -94,7 +94,8 @@ type AbortResult struct {
 }
 
 // ApplyCreateMultipartUpload starts a multipart upload.
-func (s *Store) ApplyCreateMultipartUpload(p CreateMultipartUpload) error {
+func (s *Store) ApplyCreateMultipartUpload(p CreateMultipartUpload) (err error) {
+	defer s.txn(&err)()
 	if _, ok := s.GetBucket(p.Bucket); !ok {
 		return ErrNoSuchBucket
 	}
@@ -117,7 +118,8 @@ func (s *Store) ApplyCreateMultipartUpload(p CreateMultipartUpload) error {
 
 // ApplyUploadPart commits one part row, replacing any prior upload of the
 // same part number.
-func (s *Store) ApplyUploadPart(p UploadPart) (UploadPartResult, error) {
+func (s *Store) ApplyUploadPart(p UploadPart) (res UploadPartResult, err error) {
+	defer s.txn(&err)()
 	if _, ok := s.GetBucket(p.Bucket); !ok {
 		return UploadPartResult{}, ErrNoSuchBucket
 	}
@@ -131,7 +133,6 @@ func (s *Store) ApplyUploadPart(p UploadPart) (UploadPartResult, error) {
 		return UploadPartResult{}, ErrNoSuchUpload
 	}
 	row := partRowKey(p.Bucket, p.Key, p.UploadID, p.PartNumber)
-	var res UploadPartResult
 	if prior, ok := s.kv.get(row); ok {
 		res.ReplacedDataID = prior.(PartRecord).DataID
 	}
@@ -149,7 +150,8 @@ func (s *Store) ApplyUploadPart(p UploadPart) (UploadPartResult, error) {
 
 // ApplyCompleteMultipartUpload validates the part list, commits the
 // assembled object version, and deletes the upload state — one transaction.
-func (s *Store) ApplyCompleteMultipartUpload(p CompleteMultipartUpload) (CompleteResult, error) {
+func (s *Store) ApplyCompleteMultipartUpload(p CompleteMultipartUpload) (res CompleteResult, err error) {
+	defer s.txn(&err)()
 	cfg, ok := s.GetBucket(p.Bucket)
 	if !ok {
 		return CompleteResult{}, ErrNoSuchBucket
@@ -235,7 +237,7 @@ func (s *Store) ApplyCompleteMultipartUpload(p CompleteMultipartUpload) (Complet
 	s.kv.set(versionRowKey(p.Bucket, p.Key, vid), entry)
 	s.kv.set(currentRowKey(p.Bucket, p.Key), currentRecordFor(entry))
 
-	res := CompleteResult{VersionID: vid}
+	res = CompleteResult{VersionID: vid}
 	s.kv.delete(uploadRow)
 	for _, pr := range storedParts {
 		if !used[pr.PartNumber] {
@@ -247,7 +249,8 @@ func (s *Store) ApplyCompleteMultipartUpload(p CompleteMultipartUpload) (Complet
 }
 
 // ApplyAbortMultipartUpload discards an upload and its part rows.
-func (s *Store) ApplyAbortMultipartUpload(p AbortMultipartUpload) (AbortResult, error) {
+func (s *Store) ApplyAbortMultipartUpload(p AbortMultipartUpload) (res AbortResult, err error) {
+	defer s.txn(&err)()
 	if _, ok := s.GetBucket(p.Bucket); !ok {
 		return AbortResult{}, ErrNoSuchBucket
 	}
@@ -258,7 +261,6 @@ func (s *Store) ApplyAbortMultipartUpload(p AbortMultipartUpload) (AbortResult, 
 	if _, ok := s.kv.get(uploadRow); !ok {
 		return AbortResult{}, ErrNoSuchUpload
 	}
-	var res AbortResult
 	var rows []string
 	s.kv.scan(uploadRow, func(k string, v any) bool {
 		if !hasPrefix(k, uploadRow) {
