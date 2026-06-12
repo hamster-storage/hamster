@@ -29,14 +29,22 @@ Hamster aims for the missing middle:
 - **Safe to upgrade.** Versioned on disk and on wire formats with a backwards compatible upgrade path and zero downtime rolling upgrades, validated by end to end upgrade tests.
 - **Trustworthy.** Durability and consistency are exercised under a deterministic simulation harness that injects partitions, disk failures, and reordering, so correctness is tested rather than hoped for.
 
-## Features (target for v1)
+## Features
 
-- Core S3 API: buckets, objects, multipart upload, presigned URLs, prefix listing
-- Erasure coded durability with self healing repair
-- Object versioning
-- Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes)
-- Partitioned placement with online rebalancing
-- A clean, friendly web console
+High level and honest: a check mark means shipped and tested, not promised. Versions beyond that are the [roadmap](docs/ROADMAP.md)'s plan and may shift as the code pushes back.
+
+| Feature | Status | Version |
+|---|---|---|
+| Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with `aws`, `rclone`, `restic`, `s3cmd`) | ✅ | v0.1 |
+| Durable single-node store, streaming uploads | ✅ | v0.1 |
+| Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | 🚧 in progress | v0.2 |
+| Erasure-coded durability with self-healing repair | planned | v0.3 |
+| Partitioned placement and online rebalancing | planned | v0.4 |
+| Object versioning | planned | v0.5 |
+| Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned | v0.6 |
+| Encryption at rest (SSE-S3) | planned | v0.7 |
+| Zero-downtime rolling upgrades | planned | v0.8+ |
+| Web console | planned | v1.0 |
 
 ## Quick start
 
