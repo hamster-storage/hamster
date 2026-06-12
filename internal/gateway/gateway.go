@@ -13,9 +13,9 @@
 // handler would never wake.
 //
 // v0.1 shape, stated honestly: object bodies are buffered whole in memory
-// (seam.Disk is whole-file until the write buffer lands), addressing is
-// path-style only, and deleting or overwriting an object orphans its blob —
-// garbage collection arrives with the reserved g/ metadata prefix.
+// (seam.Disk is whole-file until the write buffer lands), and deleting or
+// overwriting an object orphans its blob — garbage collection arrives with
+// the reserved g/ metadata prefix.
 package gateway
 
 import (
@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -48,10 +49,16 @@ type BlobStore interface {
 	Remove(id meta.VersionID) error
 }
 
-// Config carries the gateway's dependencies. All fields are required.
+// Config carries the gateway's dependencies. All fields are required except
+// Domain.
 type Config struct {
 	// Region is the SigV4 scope region and the GetBucketLocation answer.
 	Region string
+	// Domain is the base domain for virtual-hosted addressing: a request
+	// whose Host is <bucket>.<Domain> addresses that bucket, and its URL
+	// path is the object key. Empty disables virtual-hosted addressing;
+	// path-style always works either way.
+	Domain string
 	// Lookup resolves access key IDs to secrets.
 	Lookup sigv4.CredentialLookup
 
@@ -77,6 +84,7 @@ type Gateway struct {
 
 // New returns a Gateway over cfg.
 func New(cfg Config) *Gateway {
+	cfg.Domain = strings.ToLower(cfg.Domain)
 	return &Gateway{
 		cfg:      cfg,
 		verifier: &sigv4.Verifier{Region: cfg.Region, Lookup: cfg.Lookup},
@@ -91,6 +99,27 @@ func (g *Gateway) onLoop(fn func()) {
 		fn()
 	})
 	<-done
+}
+
+// virtualHostBucket extracts the bucket from a virtual-hosted Host header.
+// The match is the configured domain as a strict suffix; anything else — the
+// bare domain, an IP, an unrelated name — falls through to path-style.
+// Bucket names may contain dots, so everything before the domain belongs to
+// the bucket (my.logs.s3.example.com → my.logs). SigV4 is unaffected: the
+// Host header is signed as sent and the canonical path is the path as sent,
+// whichever style the client chose.
+func (g *Gateway) virtualHostBucket(host string) (string, bool) {
+	if g.cfg.Domain == "" {
+		return "", false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	bucket, found := strings.CutSuffix(strings.ToLower(host), "."+g.cfg.Domain)
+	if !found || bucket == "" {
+		return "", false
+	}
+	return bucket, true
 }
 
 // splitPath splits a path-style request into bucket and key. Either or both
@@ -112,6 +141,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bucket, key := splitPath(r.URL.Path)
+	if vb, ok := g.virtualHostBucket(r.Host); ok {
+		bucket, key = vb, strings.TrimPrefix(r.URL.Path, "/")
+	}
 	switch {
 	case bucket == "":
 		g.serveService(w, r)
