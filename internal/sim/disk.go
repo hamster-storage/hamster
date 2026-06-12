@@ -93,6 +93,28 @@ func (d *disk) ReadFile(name string) ([]byte, error) {
 	return nil, &fs.PathError{Op: "read", Path: name, Err: fs.ErrNotExist}
 }
 
+func (d *disk) ReadFileAt(name string, offset int64, length int) ([]byte, error) {
+	if !fs.ValidPath(name) || offset < 0 || length < 0 {
+		return nil, &fs.PathError{Op: "readat", Path: name, Err: fs.ErrInvalid}
+	}
+	var content []byte
+	if st, ok := d.staged[name]; ok {
+		if st.removed {
+			return nil, &fs.PathError{Op: "readat", Path: name, Err: fs.ErrNotExist}
+		}
+		content = st.data
+	} else if data, ok := d.durable[name]; ok {
+		content = data
+	} else {
+		return nil, &fs.PathError{Op: "readat", Path: name, Err: fs.ErrNotExist}
+	}
+	if offset >= int64(len(content)) {
+		return []byte{}, nil
+	}
+	end := min(offset+int64(length), int64(len(content)))
+	return slices.Clone(content[offset:end]), nil
+}
+
 func (d *disk) Remove(name string) error {
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrInvalid}

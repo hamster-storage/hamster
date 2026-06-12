@@ -91,6 +91,7 @@ type Disk interface {
     Append(name string, data []byte) error
     Sync(name string) error
     ReadFile(name string) ([]byte, error)
+    ReadFileAt(name string, offset int64, length int) ([]byte, error)
     Remove(name string) error
     List() ([]string, error)
 }

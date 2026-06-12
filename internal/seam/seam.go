@@ -118,6 +118,15 @@ type Disk interface {
 	// file does not exist.
 	ReadFile(name string) ([]byte, error)
 
+	// ReadFileAt returns up to length bytes of name's current content
+	// starting at offset, so large files (shards) can be served without
+	// buffering them whole. Reads past or near the end return fewer bytes
+	// than asked, possibly none — short reads are not an error. A missing
+	// file returns an error satisfying errors.Is(err, fs.ErrNotExist);
+	// a zero-length read on an existing file succeeds, which makes it the
+	// existence probe.
+	ReadFileAt(name string, offset int64, length int) ([]byte, error)
+
 	// Remove stages deletion of name. The deletion is durable only after
 	// Sync(name). Removing a file that does not exist returns an error
 	// satisfying errors.Is(err, fs.ErrNotExist).
