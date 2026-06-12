@@ -2,7 +2,7 @@
 
 This document designs the byte format that sits between the S3 gateway and erasure coding: how object data is chunked, optionally compressed, optionally encrypted, and framed before it is sharded. Companion ADRs: [ADR-0021](adr/0021-envelope-encryption-at-rest.md) (encryption at rest) and [ADR-0013](adr/0013-klauspost-reedsolomon.md) (erasure coding).
 
-> **Status: design document.** Nothing here is implemented. The v0.1 blob store writes raw object bytes; the framed stream must land **before v0.3 freezes the shard layout**, because retrofitting a frame under existing shards would be a format migration this design exists to avoid.
+> **Status: framing implemented** ([`internal/stream`](../internal/stream/)) — chunking, the header/trailer format below, per-chunk CRC-32C, and random access, shipped as identity frames (both transform flags refused until their code exists). It landed **before v0.3 freezes the shard layout**, because retrofitting a frame under existing shards would be a format migration this design exists to avoid. The transforms themselves are still design: compression is unscheduled, encryption is v0.7 ([ADR-0021](adr/0021-envelope-encryption-at-rest.md)).
 
 ## Why one format carries both transforms
 
@@ -44,7 +44,8 @@ chunks:
 
 trailer:
   chunk_lengths    n varints stored length of each chunk
-  trailer_size     4 bytes   length of the trailer, so it can be found from the end
+  chunk_crcs       n × 4 bytes CRC-32C of each stored chunk
+  trailer_size     4 bytes   length of the trailer (excluding this field), so it can be found from the end
 ```
 
 - With no compression, chunk offsets are computable and the trailer is degenerate; it is kept anyway — one parser, no special case.
@@ -60,14 +61,15 @@ Three layers, each with a distinct job (see [ADR-0019](adr/0019-md5-etags.md)):
 | ETag (MD5) | plaintext | S3 client compatibility, never integrity |
 | `ObjectChecksum` (SHA-256, in `VersionEntry`) | plaintext | end-to-end read verification after decrypt/decompress |
 | Shard checksums (in `VersionEntry`) | ciphertext frame | repair and scrub without keys |
-| GCM auth tags (in the frame) | each encrypted chunk | per-chunk authenticity, Range reads included |
+| Chunk CRC-32C (in the trailer) | each stored chunk | per-chunk integrity on every read, Range reads included |
+| GCM auth tags (in the frame) | each encrypted chunk | per-chunk authenticity |
 
-A full GET verifies `ObjectChecksum`; a Range GET relies on the per-chunk GCM tags (encrypted objects) or per-chunk verification via the frame (a per-chunk plaintext checksum for unencrypted objects is an open question below).
+A full GET verifies `ObjectChecksum`; a Range GET verifies the CRC of every chunk it touches (and, on encrypted objects, their GCM tags) — a corrupted chunk fails the read loudly rather than serving garbage.
 
 ## Open questions
 
-- Chunk size: 1 MiB is the placeholder; measure against EC stripe sizes before v0.3 — the frame chunk and the EC stripe do not have to coincide, but pathological interactions should be ruled out.
+- Chunk size: 1 MiB shipped as the default, and every frame records its own, so retuning is free for new writes — still worth measuring against EC stripe sizes during the v0.3 data-plane work to rule out pathological interactions.
 - Compression codec: `klauspost/compress` offers zstd (better ratio) and s2 (faster); pick one default, record per-object, both decodable forever.
-- Unencrypted Range integrity: add a small per-chunk CRC to the trailer, or accept that only full GETs verify on unencrypted objects?
+- ~~Unencrypted Range integrity~~ — settled: every stored chunk carries a CRC-32C in the trailer, verified on every read; costs 4 bytes per chunk.
 - SSE-C (client-supplied keys): the frame and DEK machinery support it naturally — the wrap key comes from the request instead of the cluster KEK — but it is not scheduled.
 - Whether multipart parts are framed independently (each part is already encoded independently per [S3-API.md](S3-API.md)) — almost certainly yes, the part boundary is a natural frame boundary.
