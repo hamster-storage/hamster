@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted, implemented (`internal/ec` — the stripe codec of [ADR-0026](0026-stripe-and-shard-layout.md) drives it)
 
 ## Context
 

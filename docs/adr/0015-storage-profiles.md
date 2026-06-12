@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (amended: the profile policy was originally explicit-only; design review made `auto` the default — see Alternatives)
+Accepted (amended: the profile policy was originally explicit-only; design review made `auto` the default — see Alternatives). The profile set, the auto ladder, and the small-object parameter rule are implemented (`internal/ec`); wiring the policy into `ClusterConfig` and the membership commands lands with the cluster data path.
 
 ## Context
 

@@ -75,6 +75,9 @@ func TestRoundTrip(t *testing.T) {
 				cuts = append(cuts, c)
 			}
 			f := frame(t, payload, chunk, cuts...)
+			if want := FrameSize(int64(size), chunk); want != int64(len(f)) {
+				t.Fatalf("size %d chunk %d: FrameSize predicts %d, frame is %d bytes", size, chunk, want, len(f))
+			}
 			got, err := readAll(f)
 			if err != nil {
 				t.Fatalf("size %d chunk %d: %v", size, chunk, err)

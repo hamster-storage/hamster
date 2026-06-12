@@ -115,6 +115,34 @@ func parseHeader(b []byte) (header, error) {
 	return h, nil
 }
 
+// FrameSize is the exact framed size of a plaintextSize-byte object at
+// chunkSize, computable before any byte streams: identity frames are
+// fully determined by their dimensions. The erasure-coded write path
+// needs it up front, because every shard's header states the frame size.
+// (A compressed frame's size is not knowable in advance; that is the
+// compression transform's problem to solve when it arrives.)
+func FrameSize(plaintextSize int64, chunkSize int) int64 {
+	size := int64(len(appendHeader(make([]byte, 0, maxHeaderLen), int64(chunkSize), plaintextSize)))
+	size += plaintextSize
+	n := chunkCount(plaintextSize, int64(chunkSize))
+	if n > 0 {
+		last := plaintextSize - (n-1)*int64(chunkSize)
+		size += (n - 1) * int64(uvarintLen(uint64(chunkSize)))
+		size += int64(uvarintLen(uint64(last)))
+	}
+	return size + 4*n + 4
+}
+
+// uvarintLen is the encoded size of v as a uvarint.
+func uvarintLen(v uint64) int {
+	n := 1
+	for v >= 0x80 {
+		v >>= 7
+		n++
+	}
+	return n
+}
+
 // chunkCount is how many chunks a plaintext of size bytes splits into.
 func chunkCount(size, chunkSize int64) int64 {
 	if size == 0 {
