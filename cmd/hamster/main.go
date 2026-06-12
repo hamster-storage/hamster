@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/blob"
@@ -38,6 +39,37 @@ import (
 //	go build -ldflags "-X main.version=v0.1.0" ./cmd/hamster
 var version = "dev"
 
+// fullVersion is what banners and `hamster version` print: the stamped
+// release version as-is, or — for a plain `go build` — the commit Go
+// embedded in the binary (git tags are not part of Go's VCS stamping, so
+// a dev build can name its commit but not the latest tag).
+func fullVersion() string {
+	if version != "dev" {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+	var revision, modified string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if revision == "" {
+		return version
+	}
+	v := "dev (" + revision[:min(7, len(revision))]
+	if modified == "true" {
+		v += ", modified"
+	}
+	return v + ")"
+}
+
 func main() {
 	log.SetFlags(0)
 	if len(os.Args) < 2 {
@@ -47,7 +79,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "version":
-		fmt.Println("hamster", version)
+		fmt.Println("hamster", fullVersion())
 	case "serve":
 		err = serve(os.Args[2:])
 	case "cluster":
@@ -162,7 +194,7 @@ func serve(args []string) error {
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()
 
-	log.Printf("hamster serve: %s — S3 API on http://%s (region %s)", version, *listen, *region)
+	log.Printf("hamster serve: %s — S3 API on http://%s (region %s)", fullVersion(), *listen, *region)
 	log.Printf("hamster serve: data in %s (%d metadata rows restored)", *dataDir, restored)
 	log.Printf("hamster serve: DEV PREVIEW — single node, v0 formats may change between releases")
 
