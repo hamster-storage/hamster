@@ -2,6 +2,7 @@ package sys
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -106,6 +107,32 @@ func (d *Disk) ReadFile(name string) ([]byte, error) {
 		return nil, err
 	}
 	return os.ReadFile(path)
+}
+
+// ReadFileAt implements seam.Disk: a positioned read via os.File.ReadAt,
+// short (not an error) at end of file.
+func (d *Disk) ReadFileAt(name string, offset int64, length int) ([]byte, error) {
+	path, err := d.path("readat", name)
+	if err != nil {
+		return nil, err
+	}
+	if offset < 0 || length < 0 {
+		return nil, &fs.PathError{Op: "readat", Path: name, Err: fs.ErrInvalid}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, length)
+	n, err := f.ReadAt(buf, offset)
+	closeErr := f.Close()
+	if err != nil && err != io.EOF {
+		return nil, fmt.Errorf("reading %q at %d: %w", name, offset, err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("closing %q after read: %w", name, closeErr)
+	}
+	return buf[:n], nil
 }
 
 // Remove implements seam.Disk.
