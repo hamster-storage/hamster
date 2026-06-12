@@ -2,6 +2,8 @@
 
 **S3 compatible object storage in a single binary. Stuff it in, pull it out later.**
 
+<img width="1254" height="1254" alt="ChatGPT Image Jun 12, 2026, 08_53_43 AM" src="https://github.com/user-attachments/assets/484abaa6-561b-42d7-8bb8-e51e73886c3c" />
+
 Hamster is a self hosted, S3 compatible object store built around one idea: object storage should be simple to run and safe with your data, without forcing you into a heavyweight distributed system or a restrictive license.
 
 > **Status: early development (v0). Not production ready.**
