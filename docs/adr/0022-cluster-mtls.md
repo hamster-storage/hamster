@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, implementation in progress: the inter-node transport (`internal/sys`) is mTLS-only with certificate-bound peer identity, and the CA/node-certificate material exists (`internal/certs`). Join tokens, automatic renewal, and membership-bound revocation arrive with cluster join.
+Accepted, implementation in progress: the inter-node transport (`internal/sys`) is mTLS-only with certificate-bound peer identity, the CA/node-certificate material exists (`internal/certs`), and join is implemented (`internal/cluster`, `hamster cluster init/token/join/run/status`): tokens are single-use with a TTL and pin the CA certificate's hash, so a joiner authenticates the cluster before trusting anything — then receives its certificate, Raft ID, and the address book over the token-authenticated TLS exchange. Automatic renewal and membership-bound revocation are still to come.
 
 ## Context
 
@@ -17,7 +17,7 @@ The constraints are the usual ones: pure Go, no external services, operable by o
 Mechanics:
 
 1. **`cluster init` mints a cluster-internal CA** (Ed25519, long-lived). The CA key is part of the cluster's identity, stored alongside the first node's data — operators who prefer to hold issuance elsewhere can supply their own CA material instead.
-2. **Nodes join with a join token** (issued by `hamster admin`, short-lived, single-use) and receive a node certificate bound to their node ID. Certificates renew automatically well before expiry; renewal is a local exchange with the metadata leader, not an operator chore.
+2. **Nodes join with a join token** (issued by `hamster cluster token` on a node holding the CA key, short-lived, single-use) and receive a node certificate bound to their node ID. Certificates renew automatically well before expiry; renewal is a local exchange with the metadata leader, not an operator chore.
 3. **Both ends verify**: client certificates are required, peer node identity is matched against cluster membership, and a removed node's certificate stops working when its membership does.
 4. **Everything is stdlib `crypto/tls` + `crypto/x509`.** No new dependencies.
 5. **TLS lives in the `sys` transport adapter, below the seam.** The simulator continues to exchange plain bytes deterministically — it tests distributed logic, not OpenSSL's job. The e2e suite ([ADR-0009](0009-deterministic-simulation-testing.md)) runs real binaries over real mTLS loopback connections and validates the certificate machinery: join, renewal, revocation by membership removal.

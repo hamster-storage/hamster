@@ -11,6 +11,7 @@ package certs
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -69,6 +70,84 @@ func NewCA(cluster string, now time.Time) (*CA, error) {
 
 // CertPEM is the CA certificate, PEM-encoded — what every node trusts.
 func (ca *CA) CertPEM() []byte { return ca.certPEM }
+
+// KeyPEM is the CA private key, PEM-encoded (PKCS#8) — the issuance
+// secret, stored only where issuance happens (ADR-0022).
+func (ca *CA) KeyPEM() ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(ca.key)
+	if err != nil {
+		return nil, fmt.Errorf("certs: marshaling CA key: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
+}
+
+// Hash is the SHA-256 of the CA certificate (DER) — what a join token
+// pins, so a joining node can authenticate the cluster before it trusts
+// anything else.
+func (ca *CA) Hash() [32]byte { return sha256.Sum256(ca.cert.Raw) }
+
+// LoadCA rebuilds a CA from its PEM-encoded certificate and key.
+func LoadCA(certPEM, keyPEM []byte) (*CA, error) {
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		return nil, fmt.Errorf("certs: no PEM block in CA certificate")
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("certs: parsing CA certificate: %w", err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, fmt.Errorf("certs: no PEM block in CA key")
+	}
+	keyAny, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("certs: parsing CA key: %w", err)
+	}
+	key, ok := keyAny.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("certs: CA key is %T, want Ed25519", keyAny)
+	}
+	return &CA{
+		cert:    cert,
+		key:     key,
+		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certBlock.Bytes}),
+	}, nil
+}
+
+// LoadCertDER extracts the DER bytes of the first certificate in a PEM
+// block — for building chains and hashes from stored PEM.
+func LoadCertDER(certPEM []byte) ([]byte, error) {
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("certs: no certificate PEM block")
+	}
+	return block.Bytes, nil
+}
+
+// PoolFromPEM builds a cert pool from a PEM-encoded CA certificate — the
+// trust store on nodes that hold the CA certificate but not its key.
+func PoolFromPEM(certPEM []byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		return nil, fmt.Errorf("certs: no usable certificate in CA PEM")
+	}
+	return pool, nil
+}
+
+// CertPEMs encodes an issued certificate and its key as PEM, the inverse
+// of tls.X509KeyPair.
+func CertPEMs(cert tls.Certificate) (certPEM, keyPEM []byte, err error) {
+	if len(cert.Certificate) == 0 {
+		return nil, nil, fmt.Errorf("certs: empty certificate")
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("certs: marshaling node key: %w", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
+}
 
 // Pool returns a cert pool holding only this CA.
 func (ca *CA) Pool() *x509.CertPool {
