@@ -43,6 +43,10 @@ func TestGoldenWire(t *testing.T) {
 			"08013a1608091210da7a0102030405060708090a0b0c0d0e1803"},
 		{"deleteAck", encodeDeleteAck(deleteAckMsg{reqID: 9}),
 			"080142020809"},
+		{"verify", encodeVerify(verifyMsg{reqID: 11, key: shardKey{testID, 3}}),
+			"08014a16080b1210da7a0102030405060708090a0b0c0d0e1803"},
+		{"verifyAck", encodeVerifyAck(verifyAckMsg{reqID: 11, committed: true, checksum: []byte{0xCC, 0xDD}, length: 7777}),
+			"0801520b080b10011a02ccdd20e13c"},
 	}
 	for _, c := range cases {
 		if got := hex.EncodeToString(c.got); got != strings.ReplaceAll(c.want, " ", "") {

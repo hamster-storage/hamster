@@ -139,3 +139,20 @@ func (s *Store) nullVersion(bucket, key string) (VersionEntry, bool) {
 }
 
 func hasPrefix(s, prefix string) bool { return strings.HasPrefix(s, prefix) }
+
+// ScanVersions visits every version entry in a bucket, in keyspace order,
+// until fn returns false. This is repair's and scrub's view of the world:
+// unlike ListObjects (the derived current index), it sees every version —
+// non-current versions and keys whose current is a delete marker still
+// hold shards that must stay healthy. Entries share no storage with the
+// caller (cloned, like every read).
+func (s *Store) ScanVersions(bucket string, fn func(key string, e VersionEntry) bool) {
+	prefix := bucketVersionsScanPrefix(bucket)
+	s.kv.scan(prefix, func(k string, v any) bool {
+		if !hasPrefix(k, prefix) {
+			return false
+		}
+		key, _ := keyAndVersionFromVersionRow(k, bucket)
+		return fn(key, v.(VersionEntry).clone())
+	})
+}

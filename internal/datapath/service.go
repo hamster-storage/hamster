@@ -48,11 +48,12 @@ type Config struct {
 type Service struct {
 	cfg Config
 
-	staging map[shardKey]*staging     // server: in-flight incoming writes
-	writes  map[writeKey]*WriteStream // client: outgoing writes
-	reads   map[uint64]*fetch         // client: outgoing reads
-	deletes map[uint64]*pendingDelete // client: outgoing deletes
-	nextReq uint64
+	staging  map[shardKey]*staging     // server: in-flight incoming writes
+	writes   map[writeKey]*WriteStream // client: outgoing writes
+	reads    map[uint64]*fetch         // client: outgoing reads
+	deletes  map[uint64]*pendingDelete // client: outgoing deletes
+	verifies map[uint64]*pendingVerify // client: outgoing verifies
+	nextReq  uint64
 }
 
 type writeKey struct {
@@ -73,11 +74,12 @@ type staging struct {
 // New returns a Service over cfg.
 func New(cfg Config) *Service {
 	return &Service{
-		cfg:     cfg,
-		staging: make(map[shardKey]*staging),
-		writes:  make(map[writeKey]*WriteStream),
-		reads:   make(map[uint64]*fetch),
-		deletes: make(map[uint64]*pendingDelete),
+		cfg:      cfg,
+		staging:  make(map[shardKey]*staging),
+		writes:   make(map[writeKey]*WriteStream),
+		reads:    make(map[uint64]*fetch),
+		deletes:  make(map[uint64]*pendingDelete),
+		verifies: make(map[uint64]*pendingVerify),
 	}
 }
 
@@ -139,8 +141,43 @@ func (s *Service) HandleData(from seam.NodeID, payload []byte) error {
 		if d := s.deletes[m.reqID]; d != nil {
 			d.finish(m.errMsg)
 		}
+	case msgVerify:
+		m, err := decodeVerify(body)
+		if err != nil {
+			return err
+		}
+		s.handleVerify(from, m)
+	case msgVerifyAck:
+		m, err := decodeVerifyAck(body)
+		if err != nil {
+			return err
+		}
+		if v := s.verifies[m.reqID]; v != nil {
+			v.finish(m)
+		}
 	}
 	return nil
+}
+
+// handleVerify is scrub's server half: hash the committed shard file and
+// report. Uncommitted is a clean "not here" — staging and markerless
+// garbage are nobody's shards. (The hash runs on the loop; in production
+// this moves to the data plane with a completion event, like all bulk
+// byte work — sized work, no protocol change.)
+func (s *Service) handleVerify(from seam.NodeID, m verifyMsg) {
+	if !s.committed(m.key) {
+		s.send(from, encodeVerifyAck(verifyAckMsg{reqID: m.reqID}))
+		return
+	}
+	data, err := s.cfg.Disk.ReadFile(ShardFileName(m.key.id, m.key.index))
+	if err != nil {
+		s.send(from, encodeVerifyAck(verifyAckMsg{reqID: m.reqID, errMsg: err.Error()}))
+		return
+	}
+	sum := sha256.Sum256(data)
+	s.send(from, encodeVerifyAck(verifyAckMsg{
+		reqID: m.reqID, committed: true, checksum: sum[:], length: uint64(len(data)),
+	}))
 }
 
 // send wraps and sends one data-channel message.

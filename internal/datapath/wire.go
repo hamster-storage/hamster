@@ -27,6 +27,9 @@ import (
 //	  6 read_result ShardReadResult: 1 req_id, 2 data, 3 error
 //	  7 delete     ShardDelete:    1 req_id, 2 data_id, 3 index
 //	  8 delete_ack ShardDeleteAck: 1 req_id, 2 error
+//	  9 verify     ShardVerify:    1 req_id, 2 data_id, 3 index
+//	  10 verify_result ShardVerifyResult: 1 req_id, 2 committed,
+//	                               3 checksum, 4 length, 5 error
 //
 // The stream ID names one sender incarnation of one transfer; acks echo
 // it, and the sender ignores acks from any other incarnation — so a
@@ -59,6 +62,8 @@ const (
 	msgReadResult = 6
 	msgDelete     = 7
 	msgDeleteAck  = 8
+	msgVerify     = 9
+	msgVerifyAck  = 10
 )
 
 type chunkMsg struct {
@@ -104,6 +109,19 @@ type deleteMsg struct {
 type deleteAckMsg struct {
 	reqID  uint64
 	errMsg string
+}
+
+type verifyMsg struct {
+	reqID uint64
+	key   shardKey
+}
+
+type verifyAckMsg struct {
+	reqID     uint64
+	committed bool
+	checksum  []byte
+	length    uint64
+	errMsg    string
 }
 
 func encodeMessage(num protowire.Number, cmd []byte) []byte {
@@ -177,6 +195,24 @@ func encodeDeleteAck(m deleteAckMsg) []byte {
 	return encodeMessage(msgDeleteAck, c)
 }
 
+func encodeVerify(m verifyMsg) []byte {
+	var c []byte
+	c = putUvarint(c, 1, m.reqID)
+	c = putBytes(c, 2, m.key.id[:])
+	c = putUvarint(c, 3, uint64(m.key.index))
+	return encodeMessage(msgVerify, c)
+}
+
+func encodeVerifyAck(m verifyAckMsg) []byte {
+	var c []byte
+	c = putUvarint(c, 1, m.reqID)
+	c = putBool(c, 2, m.committed)
+	c = putBytes(c, 3, m.checksum)
+	c = putUvarint(c, 4, m.length)
+	c = putString(c, 5, m.errMsg)
+	return encodeMessage(msgVerifyAck, c)
+}
+
 // decodeMessage splits a data-channel payload into its command number and
 // command bytes, validating the version.
 func decodeMessage(b []byte) (cmd protowire.Number, body []byte, err error) {
@@ -190,7 +226,7 @@ func decodeMessage(b []byte) (cmd protowire.Number, body []byte, err error) {
 		switch {
 		case num == 1:
 			version, n = consumeUvarint(b, typ)
-		case num >= msgChunk && num <= msgDeleteAck:
+		case num >= msgChunk && num <= msgVerifyAck:
 			if cmd != 0 {
 				return 0, nil, fmt.Errorf("datapath: message carries two commands")
 			}
@@ -374,6 +410,46 @@ func decodeDeleteAck(b []byte) (m deleteAckMsg, err error) {
 		case 1:
 			m.reqID, n = consumeUvarint(b, typ)
 		case 2:
+			var s []byte
+			s, n = consumeBytes(b, typ)
+			m.errMsg = string(s)
+		}
+		return n
+	})
+	return m, err
+}
+
+func decodeVerify(b []byte) (m verifyMsg, err error) {
+	err = fieldScan(b, func(num protowire.Number, typ protowire.Type, b []byte) (n int) {
+		switch num {
+		case 1:
+			m.reqID, n = consumeUvarint(b, typ)
+		case 2:
+			n = consumeID(b, typ, &m.key.id)
+		case 3:
+			var v uint64
+			v, n = consumeUvarint(b, typ)
+			m.key.index = uint32(v)
+		}
+		return n
+	})
+	return m, err
+}
+
+func decodeVerifyAck(b []byte) (m verifyAckMsg, err error) {
+	err = fieldScan(b, func(num protowire.Number, typ protowire.Type, b []byte) (n int) {
+		switch num {
+		case 1:
+			m.reqID, n = consumeUvarint(b, typ)
+		case 2:
+			var v uint64
+			v, n = consumeUvarint(b, typ)
+			m.committed = v != 0
+		case 3:
+			m.checksum, n = consumeBytes(b, typ)
+		case 4:
+			m.length, n = consumeUvarint(b, typ)
+		case 5:
 			var s []byte
 			s, n = consumeBytes(b, typ)
 			m.errMsg = string(s)

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implemented: placement ([`internal/place`](../../internal/place/)), the shard transfer protocol ([`internal/datapath`](../../internal/datapath/)), and the coordinators ([`internal/coord`](../../internal/coord/)) — the PUT with the ack rule, and the GET that prefetches covering shard ranges (`stream.Cover` + `ec.ReadHeader`) and decodes through the pure readers, reconstructing from any k. Proven under simulated cluster schedules: crashed receivers, down nodes, floor refusals, mid-PUT coordinator loss, degraded reads through m crashed holders. Remaining: repair (pass 4) and the `hamster serve` wiring (pass 5).
+Accepted. Implemented: placement ([`internal/place`](../../internal/place/)), the shard transfer protocol ([`internal/datapath`](../../internal/datapath/)), and the coordinators ([`internal/coord`](../../internal/coord/)) — the PUT with the ack rule, and the GET that prefetches covering shard ranges (`stream.Cover` + `ec.ReadHeader`) and decodes through the pure readers, reconstructing from any k. Proven under simulated cluster schedules: crashed receivers, down nodes, floor refusals, mid-PUT coordinator loss, degraded reads through m crashed holders. The repair sweep (pass 4) is implemented in the same package: scrub-verify of every shard against replicated checksums plus rebuild from any k verified survivors, with its own schedules (emptied node, two-shard bitrot, beyond-tolerance, crash mid-sweep). Remaining: the `hamster serve` wiring (pass 5).
 
 ## Context
 

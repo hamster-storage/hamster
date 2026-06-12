@@ -125,3 +125,70 @@ func (d *pendingDelete) onTimer() {
 func (d *pendingDelete) rearm() {
 	d.timer = d.s.cfg.Clock.AfterFunc(rto, d.onTimer)
 }
+
+// VerifyResult is what a shard holder reports about one shard: whether a
+// committed shard exists, and if so its whole-file SHA-256 and length —
+// compared by the caller against replicated metadata, never trusted on
+// its own (a shard cannot vouch for itself; the holder just does the
+// hashing close to the bytes).
+type VerifyResult struct {
+	Committed bool
+	Checksum  []byte
+	Length    int64
+}
+
+// pendingVerify is one outstanding shard verify, same retry shape.
+type pendingVerify struct {
+	s     *Service
+	to    seam.NodeID
+	reqID uint64
+	msg   []byte
+
+	timer    seam.Timer
+	attempts int
+	done     func(VerifyResult, error)
+}
+
+// Verify asks a node to hash its committed copy of shard (id, index).
+// done fires exactly once on the loop. Committed=false with a nil error
+// means the node answered and holds nothing — scrub's "missing".
+func (s *Service) Verify(to seam.NodeID, id meta.VersionID, index uint32, done func(VerifyResult, error)) {
+	s.nextReq++
+	v := &pendingVerify{
+		s: s, to: to, reqID: s.nextReq, done: done,
+		msg: encodeVerify(verifyMsg{reqID: s.nextReq, key: shardKey{id, index}}),
+	}
+	s.verifies[v.reqID] = v
+	s.send(to, v.msg)
+	v.rearm()
+}
+
+func (v *pendingVerify) finish(m verifyAckMsg) {
+	delete(v.s.verifies, v.reqID)
+	if v.timer != nil {
+		v.timer.Stop()
+	}
+	if m.errMsg != "" {
+		v.done(VerifyResult{}, fmt.Errorf("datapath: verifying on %s: %s", v.to, m.errMsg))
+		return
+	}
+	v.done(VerifyResult{Committed: m.committed, Checksum: m.checksum, Length: int64(m.length)}, nil)
+}
+
+func (v *pendingVerify) onTimer() {
+	if _, live := v.s.verifies[v.reqID]; !live {
+		return
+	}
+	v.attempts++
+	if v.attempts >= maxAttempts {
+		delete(v.s.verifies, v.reqID)
+		v.done(VerifyResult{}, fmt.Errorf("datapath: verifying on %s: no response after %d attempts", v.to, v.attempts))
+		return
+	}
+	v.s.send(v.to, v.msg)
+	v.rearm()
+}
+
+func (v *pendingVerify) rearm() {
+	v.timer = v.s.cfg.Clock.AfterFunc(rto, v.onTimer)
+}
