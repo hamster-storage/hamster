@@ -38,7 +38,7 @@ Hamster aims for the missing middle:
 
 ## Quick start
 
-Grab a binary from the [releases page](https://github.com/hamster-storage/hamster/releases) (or `go build ./cmd/hamster` with Go installed — no cgo, no build tricks), then:
+Grab a binary from the [releases page](https://github.com/hamster-storage/hamster/releases) (or `go build ./cmd/hamster` with Go installed — no cgo, no build tricks), then start the server. The `HAMSTER_*` variables define the credentials it will accept:
 
 ```sh
 export HAMSTER_ACCESS_KEY_ID=hamster
@@ -46,10 +46,11 @@ export HAMSTER_SECRET_ACCESS_KEY=keep-this-one-secret
 hamster serve -data-dir ./data
 ```
 
-That is a standard S3 endpoint on `127.0.0.1:9000`, so any S3 client works as is:
+That is a standard S3 endpoint on `127.0.0.1:9000`, so any S3 client works as is. The client sends its own credentials — the standard `AWS_*` variables, not the `HAMSTER_*` ones — set to the same values:
 
 ```sh
-export AWS_ACCESS_KEY_ID=hamster AWS_SECRET_ACCESS_KEY=keep-this-one-secret
+export AWS_ACCESS_KEY_ID=hamster
+export AWS_SECRET_ACCESS_KEY=keep-this-one-secret
 aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://stash
 aws --endpoint-url http://127.0.0.1:9000 s3 cp video.mp4 s3://stash/
 ```
