@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"strings"
 	"testing"
 	"time"
 
@@ -639,5 +640,226 @@ func TestGetUnderFaultyNetwork(t *testing.T) {
 	got, err := c.get("gusty", 0, -1)
 	if err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("faulty-net get: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+}
+
+// sweep drives one repair sweep through the leader's coordinator.
+func (c *cluster) sweep() coord.RepairReport {
+	c.t.Helper()
+	id := c.leader()
+	var rep coord.RepairReport
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.RepairSweep(func(r coord.RepairReport, err error) {
+			if err != nil {
+				c.t.Errorf("sweep: %v", err)
+			}
+			rep, done = r, true
+		})
+	})
+	for range 20000 {
+		c.s.Run(tick)
+		if done {
+			return rep
+		}
+	}
+	c.t.Fatal("sweep never finished")
+	return rep
+}
+
+// corruptShard flips one payload byte of a committed shard file in place,
+// leaving its commit marker — silent bitrot, as a disk would serve it.
+func (c *cluster) corruptShard(key string, holderIdx int) seam.NodeID {
+	c.t.Helper()
+	e, ok := c.entry(key)
+	if !ok {
+		c.t.Fatalf("corruptShard: no entry for %s", key)
+	}
+	width := int(e.ECDataShards + e.ECParityShards)
+	holders, err := place.Nodes(e.Partition, c.members, width)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	nid := holders[holderIdx]
+	disk := c.worlds[nid].Disk
+	name := datapath.ShardFileName(e.DataID, uint32(holderIdx))
+	data, err := disk.ReadFile(name)
+	if err != nil {
+		c.t.Fatalf("corruptShard: %v", err)
+	}
+	data[len(data)-1] ^= 0xFF // a payload byte: headers stay plausible
+	if err := disk.WriteFile(name, data); err != nil {
+		c.t.Fatal(err)
+	}
+	if err := disk.Sync(name); err != nil {
+		c.t.Fatal(err)
+	}
+	return nid
+}
+
+// emptyNodeShards removes every shard file (and marker) a node holds —
+// the disk-swap scenario: same node, same identity, no data.
+func (c *cluster) emptyNodeShards(nid seam.NodeID) int {
+	c.t.Helper()
+	disk := c.worlds[nid].Disk
+	names, err := disk.List()
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	removed := 0
+	for _, n := range names {
+		if !strings.HasPrefix(n, "shards/") {
+			continue
+		}
+		if err := disk.Remove(n); err == nil {
+			_ = disk.Sync(n)
+		}
+		if !strings.HasSuffix(n, ".ok") {
+			removed++
+		}
+	}
+	return removed
+}
+
+// TestRepairRebuildsEmptiedNode: a node comes back with no data (the
+// disk-swap scenario) and a sweep restores every shard it should hold —
+// then a second sweep finds nothing to do, and the bytes still decode.
+func TestRepairRebuildsEmptiedNode(t *testing.T) {
+	c := newCluster(t, 31, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	bodies := map[string][]byte{
+		"big":   randomBody(31, 2<<20),
+		"small": randomBody(32, 50<<10), // 1+2: full copies
+		"other": randomBody(33, 700<<10),
+	}
+	for k, b := range bodies {
+		if _, err := c.put(k, b); err != nil {
+			t.Fatalf("put %s: %v", k, err)
+		}
+	}
+
+	lost := c.emptyNodeShards("n4")
+	rep := c.sweep()
+	if rep.RebuiltShards != lost {
+		t.Errorf("rebuilt %d shards, want %d (the emptied node's)", rep.RebuiltShards, lost)
+	}
+	if len(rep.Unrepairable) != 0 || len(rep.Failed) != 0 {
+		t.Errorf("sweep report: %+v", rep)
+	}
+
+	rep = c.sweep()
+	if rep.RebuiltShards != 0 || rep.Healthy != rep.Objects {
+		t.Errorf("second sweep not clean: %+v", rep)
+	}
+	for k, b := range bodies {
+		if got, err := c.get(k, 0, -1); err != nil || !bytes.Equal(got, b) {
+			t.Fatalf("%s after repair: equal=%v err=%v", k, bytes.Equal(got, b), err)
+		}
+	}
+}
+
+// TestRepairHealsBitrot: silent rot on two different shards of one object
+// on two different nodes — found by scrub with no read anywhere near it,
+// rebuilt from the four clean shards, verified end to end.
+func TestRepairHealsBitrot(t *testing.T) {
+	c := newCluster(t, 34, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	body := randomBody(34, 2<<20)
+	if _, err := c.put("rotting", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	c.corruptShard("rotting", 1)
+	c.corruptShard("rotting", 4)
+
+	rep := c.sweep()
+	if rep.RebuiltShards != 2 || len(rep.Unrepairable) != 0 || len(rep.Failed) != 0 {
+		t.Fatalf("sweep: %+v", rep)
+	}
+	if rep = c.sweep(); rep.Healthy != rep.Objects {
+		t.Fatalf("post-heal sweep not clean: %+v", rep)
+	}
+	if got, err := c.get("rotting", 0, -1); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("after heal: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+}
+
+// TestRepairReportsBeyondTolerance: three bad shards of six is past what
+// k=4 survivors can rebuild. The sweep says so, touches nothing, and the
+// next sweep says the same — no laundering, no destruction.
+func TestRepairReportsBeyondTolerance(t *testing.T) {
+	c := newCluster(t, 35, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	if _, err := c.put("doomed", randomBody(35, 1<<20)); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	c.corruptShard("doomed", 0)
+	c.corruptShard("doomed", 2)
+	c.corruptShard("doomed", 5)
+
+	rep := c.sweep()
+	if rep.RebuiltShards != 0 || len(rep.Unrepairable) != 1 {
+		t.Fatalf("sweep: %+v", rep)
+	}
+	if _, err := c.get("doomed", 0, -1); err == nil {
+		t.Fatal("get of an unrepairable object returned data")
+	}
+}
+
+// TestRepairCrashMidSweep: the repairing node dies mid-sweep; whatever it
+// half-did is markerless garbage or already-committed truth, and a fresh
+// sweep from the new leader converges.
+func TestRepairCrashMidSweep(t *testing.T) {
+	c := newCluster(t, 36, sim.NetConfig{MinLatency: 2 * time.Millisecond, MaxLatency: 5 * time.Millisecond}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	body := randomBody(36, 2<<20)
+	if _, err := c.put("phoenix", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	c.corruptShard("phoenix", 1)
+	c.corruptShard("phoenix", 3)
+
+	lead := c.leader()
+	c.worlds[lead].Loop.Post(func() {
+		c.nodes[lead].co.RepairSweep(func(coord.RepairReport, error) {
+			t.Error("sweep finished on a node that crashed mid-sweep")
+		})
+	})
+	c.s.Run(8 * time.Millisecond) // verifies in flight, rebuild not committed
+	c.crash(lead)
+	c.s.Run(time.Second)
+	c.s.Restart(lead)
+	c.down[lead] = false
+
+	rep := c.sweep()
+	if rep.RebuiltShards != 2 || len(rep.Failed) != 0 || len(rep.Unrepairable) != 0 {
+		t.Fatalf("post-crash sweep: %+v", rep)
+	}
+	if got, err := c.get("phoenix", 0, -1); err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("after crash+repair: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+}
+
+// TestRepairDeterminism: a faulted repair run replays seed-exact.
+func TestRepairDeterminism(t *testing.T) {
+	run := func() coord.RepairReport {
+		c := newCluster(t, 37, sim.NetConfig{
+			MinLatency: time.Millisecond, MaxLatency: 10 * time.Millisecond,
+			DropProb: 0.03, DuplicateProb: 0.03,
+		}, 6, profile(t, "4+2"))
+		c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+		if _, err := c.put("replayed", randomBody(37, 1<<20)); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		c.corruptShard("replayed", 2)
+		return c.sweep()
+	}
+	r1, r2 := run(), run()
+	if r1.RebuiltShards != r2.RebuiltShards || r1.Healthy != r2.Healthy || len(r1.Failed) != len(r2.Failed) {
+		t.Fatalf("same seed, different sweeps: %+v vs %+v", r1, r2)
+	}
+	if r1.RebuiltShards != 1 {
+		t.Fatalf("expected one rebuilt shard: %+v", r1)
 	}
 }
