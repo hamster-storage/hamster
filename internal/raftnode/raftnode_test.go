@@ -182,21 +182,24 @@ func (c *cluster) logFiles(id uint64) []string {
 }
 
 // leader runs the sim until exactly one live node reports itself leader
-// and a quorum agrees on it, then returns its ID.
+// and a quorum of live nodes agrees on it, then returns its ID.
 func (c *cluster) leader() uint64 {
 	for range 4000 {
 		c.s.Run(tick)
 		votes := make(map[uint64]int)
+		live := 0
 		for id, n := range c.nodes {
 			if c.down[id] {
 				continue
 			}
+			live++
 			if lead, _ := n.Leader(); lead != 0 {
 				votes[lead]++
 			}
 		}
+		needed := min(2, live)
 		for lead, count := range votes {
-			if count >= 2 && !c.down[lead] {
+			if count >= needed && !c.down[lead] {
 				if _, isLeader := c.nodes[lead].Leader(); isLeader {
 					return lead
 				}
@@ -679,6 +682,93 @@ func TestRemoveVoterRefillsFromLearners(t *testing.T) {
 
 	c.propose(mkPut("bkt", "after", 11, 42))
 	model["bkt"]["after"] = 11
+	c.converged(model)
+}
+
+// TestForceNewClusterRecovers: two of three voters die forever — no
+// quorum, no progress, the dark scenario. ForceNewCluster on the
+// survivor's disk rewrites it into a single-voter cluster that keeps all
+// committed data, leads alone, accepts writes, and grows again by join.
+func TestForceNewClusterRecovers(t *testing.T) {
+	c := newCluster(t, 37, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	}).start()
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+	for i := range 5 {
+		key := fmt.Sprintf("k/%d", i)
+		c.propose(mkPut("bkt", key, int64(100+i), byte(i+1)))
+		model["bkt"][key] = int64(100 + i)
+	}
+	c.converged(model)
+
+	// The disaster: nodes 2 and 3 die forever. Node 1 alone is not a
+	// quorum and the cluster makes no progress.
+	c.crash(2)
+	c.crash(3)
+	c.crash(1) // recovery is offline: the survivor is stopped too
+
+	sum, err := raftnode.ForceNewCluster(c.worlds[1].Disk, 1, "n1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sum.Removed) != 2 {
+		t.Fatalf("recovery removed %v, want the two dead members", sum.Removed)
+	}
+
+	c.restart(1)
+	if lead := c.leader(); lead != 1 {
+		t.Fatalf("leader %d after recovery, want the survivor", lead)
+	}
+	ms := c.nodes[1].Members()
+	if len(ms) != 1 || ms[0].ID != 1 || ms[0].Learner {
+		t.Fatalf("membership after recovery: %v, want node 1 as sole voter", ms)
+	}
+	c.converged(model) // every committed write survived
+
+	// The recovered cluster accepts writes and grows again.
+	c.propose(mkPut("bkt", "after", 7, 99))
+	model["bkt"]["after"] = 7
+	c.ids[4] = "n4"
+	c.s.AddNode("n4", c.boot(4, true))
+	c.waitMembers(2, 2)
+	c.converged(model)
+}
+
+// TestForceNewClusterKeepsLocalTail: the survivor holds entries past its
+// commit point — proposals an isolated leader persisted but never heard
+// acknowledged. Recovery keeps them (ADR-0025: the dead majority may have
+// committed them, and local truth is the only truth left).
+func TestForceNewClusterKeepsLocalTail(t *testing.T) {
+	c := newCluster(t, 41, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 5 * time.Millisecond,
+	}).start()
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+
+	// Isolate the leader, give it a proposal it can persist but never
+	// commit, then kill everything.
+	old := c.leader()
+	for id := uint64(1); id <= 3; id++ {
+		if id != old {
+			c.s.Partition(c.ids[old], c.ids[id])
+			c.s.Partition(c.ids[id], c.ids[old])
+		}
+	}
+	c.nodes[old].Propose(mkPut("bkt", "tail", 55, 77), func(any, error) {})
+	for range 50 {
+		c.s.Run(tick)
+	}
+	for id := uint64(1); id <= 3; id++ {
+		c.crash(id)
+	}
+
+	if _, err := raftnode.ForceNewCluster(c.worlds[old].Disk, old, c.ids[old], ""); err != nil {
+		t.Fatal(err)
+	}
+	c.restart(old)
+	c.leader()
+	model["bkt"]["tail"] = 55
 	c.converged(model)
 }
 

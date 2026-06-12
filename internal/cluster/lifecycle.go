@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/certs"
+	"github.com/hamster-storage/hamster/internal/raftnode"
+	"github.com/hamster-storage/hamster/internal/seam"
+	"github.com/hamster-storage/hamster/internal/sys"
 )
 
 // Init creates a new cluster: the CA, the founding node's certificate and
@@ -131,6 +134,57 @@ func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr string) error {
 		ClusterAddr: clusterAddr, JoinAddr: joinAddr,
 		Join: true, Members: members,
 	})
+}
+
+// Recover rewrites a stopped node into a new single-voter cluster — the
+// disaster exit (ADR-0025) for a cluster whose quorum is permanently
+// lost. Destructive and irreversible: the other members' data directories
+// hold a competing history afterward and must never run again. The
+// caller (the CLI) is responsible for making the operator say so
+// explicitly.
+func Recover(dataDir string) (raftnode.RecoverySummary, error) {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return raftnode.RecoverySummary{}, err
+	}
+	// Recovery is offline: a bound transport port means the node is up.
+	probe, err := net.Listen("tcp", cfg.ClusterAddr)
+	if err != nil {
+		return raftnode.RecoverySummary{}, fmt.Errorf("cluster: this node appears to be running (%s is bound); stop it first", cfg.ClusterAddr)
+	}
+	probe.Close()
+
+	disk, err := sys.NewDisk(dataDir)
+	if err != nil {
+		return raftnode.RecoverySummary{}, err
+	}
+	sum, err := raftnode.ForceNewCluster(disk, cfg.RaftID, seam.NodeID(cfg.NodeID), cfg.ClusterAddr)
+	if err != nil {
+		return raftnode.RecoverySummary{}, err
+	}
+
+	// The node's own identity record follows: sole member, founder
+	// semantics, and an ID counter past everything this cluster has ever
+	// handed out — a removed member's ID must never be reissued.
+	next := max(cfg.NextRaftID, cfg.RaftID+1)
+	for _, m := range sum.Removed {
+		next = max(next, m.ID+1)
+	}
+	cfg.Members = []Member{{RaftID: cfg.RaftID, NodeID: cfg.NodeID, Dial: cfg.ClusterAddr}}
+	cfg.Join = false
+	cfg.NextRaftID = next
+	if err := saveConfig(dir, cfg); err != nil {
+		return raftnode.RecoverySummary{}, err
+	}
+	return sum, nil
+}
+
+// CanIssue reports whether this node holds the CA key — whether a
+// recovered cluster can grow again by join.
+func CanIssue(dataDir string) bool {
+	_, err := os.Stat(filepath.Join(Dir(dataDir), "ca.key"))
+	return err == nil
 }
 
 // Status queries a running node's join/status listener with this node's
