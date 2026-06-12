@@ -33,6 +33,7 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0023](0023-handwritten-protowire-codecs.md) | Hand-written protowire codecs for metadata records, deterministic, unknown-preserving |
 | [0024](0024-deterministic-election-timing.md) | Hamster owns Raft election timing: external, seeded, simulator-schedulable |
 | [0025](0025-force-new-cluster-recovery.md) | `cluster recover` is an offline force-new-cluster, and the local log wins |
+| [0026](0026-stripe-and-shard-layout.md) | Stripe and shard layout: contiguous 256 KiB slices, self-describing shard files |
 
 ## Template
 

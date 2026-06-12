@@ -2,7 +2,7 @@
 
 This document designs the durability parameters: which `k+m` configurations Hamster offers, how the cluster chooses one, what acknowledgment promises, how repair keeps reality matching the promise, and how all of it lands on real hardware — one box with three disks, or three servers with five disks each. It builds on [ADR-0003](adr/0003-erasure-coding-over-replication.md) (EC over replication), [ADR-0013](adr/0013-klauspost-reedsolomon.md) (the library), [ADR-0015](adr/0015-storage-profiles.md) (profiles and the policy), and [ADR-0016](adr/0016-failure-domain-hierarchy.md) (hosts and zones). The metadata side — where parameters are recorded — is in [METADATA.md](METADATA.md). The bytes the encoder splits are the framed object stream of [DATA-STREAM.md](DATA-STREAM.md) — chunked, optionally compressed, optionally encrypted before sharding, which is why repair and rebalance never touch plaintext or keys.
 
-> **Status: design document.** Nothing here is built. Numbers like thresholds and the exact profile set are defaults to start from, not commitments.
+> **Status: the engine is built** ([`internal/ec`](../internal/ec/)) — the profile set, the auto ladder, the small-object rule, the stripe codec and shard file format ([ADR-0026](adr/0026-stripe-and-shard-layout.md)), and checksum-verified shard reconstruction, all proven against every survivable loss pattern. Distribution is not: placement across nodes, the write-ack rule on a real cluster, the repair *system* (queue, throttling, status), and the profile policy wiring are still design. Numbers like thresholds remain defaults to start from, not commitments.
 
 ## Profiles, not free parameters
 
@@ -97,7 +97,7 @@ For workloads genuinely dominated by small objects, the fix that earns EC econom
 
 ## Large objects: stripes
 
-Objects are encoded in fixed-size **stripes** so a multi-gigabyte PUT streams through the write buffer with bounded memory — encode a stripe, write its shards, move on — and a ranged GET decodes only the stripes the range touches. Stripe size and the shard on-disk format (headers, mirrored checksums) are data-plane format work, designed with the v0.3 code; the metadata schema is already agnostic, recording per-object checksums and parameters either way.
+Objects are encoded in fixed-size **stripes** so a multi-gigabyte PUT streams through the write buffer with bounded memory — encode a stripe, write its shards, move on — and a ranged GET decodes only the stripes the range touches. The stripe layout and the self-describing shard file format are decided and built: [ADR-0026](adr/0026-stripe-and-shard-layout.md) (contiguous 256 KiB slices per shard, zero-padded final stripe, versioned protobuf shard headers). The metadata schema was already agnostic, recording per-object checksums and parameters either way.
 
 ## Deploying on real hardware
 
@@ -147,5 +147,5 @@ Each step is operator-commanded, announced as it happens, and additive in every 
 - Small-object packing (post-v1): aggregate many small objects into containers that are erasure coded as units, so small-object-heavy workloads get real `k+m` economics instead of the replication multiplier. Nothing in the metadata schema forbids it — a packed location is just another shape of data-plane address on a `VersionEntry` — but it brings compaction (deletes leave holes in packs), read indirection, and interactions with versioning and object lock that each need their own design. Only worth building for workloads *dominated* by small objects; mixed workloads already approach nominal overhead because large objects dominate capacity.
 - The re-encode task's detailed design (crash-safety proof, throttling policy, the scoped exception to record immutability) — its own ADR alongside the v0.4 work.
 - Whether profiles ever become per-bucket (S3 storage classes shaped) — nothing in the metadata schema forbids it (parameters are per-object already), but v0 is one active profile, cluster-wide, on purpose.
-- Stripe size and shard file format — v0.3 data-plane work.
+- ~~Stripe size and shard file format~~ — settled in [ADR-0026](adr/0026-stripe-and-shard-layout.md): contiguous 256 KiB slices, self-describing shard files, slice size recorded per shard so retuning stays free.
 - Deeper failure-domain hierarchies (disk < host < rack < AZ as four levels) if real deployments want them — additive on the two-level design.
