@@ -3,6 +3,7 @@ package raftnode_test
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,22 +26,29 @@ const (
 )
 
 // cluster wires three raftnode.Nodes into a Sim and remembers the current
-// node objects across restarts.
+// node objects (and their worlds) across restarts.
 type cluster struct {
-	t     *testing.T
-	s     *sim.Sim
-	nodes map[uint64]*raftnode.Node
-	ids   map[uint64]seam.NodeID
-	down  map[uint64]bool
+	t           *testing.T
+	s           *sim.Sim
+	nodes       map[uint64]*raftnode.Node
+	worlds      map[uint64]*sim.World
+	ids         map[uint64]seam.NodeID
+	down        map[uint64]bool
+	snapEntries uint64 // 0: package default (snapshots effectively off in tests)
 }
 
 func newCluster(t *testing.T, seed uint64, net sim.NetConfig) *cluster {
 	c := &cluster{
 		t: t, s: sim.New(seed, net),
-		nodes: make(map[uint64]*raftnode.Node),
-		ids:   map[uint64]seam.NodeID{1: "n1", 2: "n2", 3: "n3"},
-		down:  make(map[uint64]bool),
+		nodes:  make(map[uint64]*raftnode.Node),
+		worlds: make(map[uint64]*sim.World),
+		ids:    map[uint64]seam.NodeID{1: "n1", 2: "n2", 3: "n3"},
+		down:   make(map[uint64]bool),
 	}
+	return c
+}
+
+func (c *cluster) start() *cluster {
 	for id := uint64(1); id <= 3; id++ {
 		c.s.AddNode(c.ids[id], c.boot(id))
 	}
@@ -53,13 +61,31 @@ func (c *cluster) boot(id uint64) sim.BootFunc {
 			ID: id, Peers: c.ids,
 			Clock: w.Clock, Transport: w.Transport, Disk: w.Disk, Rand: w.Rand,
 			TickInterval: tick, ElectionTicks: electionTicks,
+			SnapshotEntries: c.snapEntries,
 		})
 		if err != nil {
 			c.t.Fatalf("boot node %d: %v", id, err)
 		}
 		c.nodes[id] = n
+		c.worlds[id] = w
 		return n
 	}
+}
+
+// logFiles lists a node's raft log files — how the tests observe rotation.
+func (c *cluster) logFiles(id uint64) []string {
+	c.t.Helper()
+	names, err := c.worlds[id].Disk.List()
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	var logs []string
+	for _, name := range names {
+		if strings.HasPrefix(name, "raft/log.") {
+			logs = append(logs, name)
+		}
+	}
+	return logs
 }
 
 // leader runs the sim until exactly one live node reports itself leader
@@ -207,7 +233,7 @@ func TestClusterReplicatesAndSurvivesLeaderCrash(t *testing.T) {
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
 			c := newCluster(t, seed, sim.NetConfig{
 				MinLatency: time.Millisecond, MaxLatency: 8 * time.Millisecond,
-			})
+			}).start()
 			model := map[string]map[string]int64{"bkt": {}}
 
 			c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
@@ -238,7 +264,7 @@ func TestClusterReplicatesAndSurvivesLeaderCrash(t *testing.T) {
 func TestClusterPartitionedLeaderCannotAck(t *testing.T) {
 	c := newCluster(t, 42, sim.NetConfig{
 		MinLatency: time.Millisecond, MaxLatency: 5 * time.Millisecond,
-	})
+	}).start()
 	model := map[string]map[string]int64{"bkt": {}}
 	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
 
@@ -295,7 +321,7 @@ func TestClusterSeedDeterminism(t *testing.T) {
 		c := newCluster(t, 7, sim.NetConfig{
 			MinLatency: time.Millisecond, MaxLatency: 12 * time.Millisecond,
 			DropProb: 0.02, DuplicateProb: 0.02,
-		})
+		}).start()
 		c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
 		first := c.leader()
 		c.crash(first)
@@ -314,5 +340,92 @@ func TestClusterSeedDeterminism(t *testing.T) {
 	lead2, list2 := run()
 	if lead1 != lead2 || fmt.Sprint(list1) != fmt.Sprint(list2) {
 		t.Fatalf("same seed, different history: leader %d vs %d, %v vs %v", lead1, lead2, list1, list2)
+	}
+}
+
+// TestSnapshotCompactsAndRecovers: with an aggressive snapshot threshold,
+// enough writes must rotate every node's log (one file, opening with a
+// snapshot), and a full-cluster cold restart must recover the complete
+// state from snapshot plus tail.
+func TestSnapshotCompactsAndRecovers(t *testing.T) {
+	c := newCluster(t, 11, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	})
+	c.snapEntries = 8
+	c.start()
+
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+	for i := range 30 {
+		key := fmt.Sprintf("k/%02d", i)
+		c.propose(mkPut("bkt", key, int64(1000+i), byte(i+1)))
+		model["bkt"][key] = int64(1000 + i)
+	}
+	c.converged(model)
+
+	for id := uint64(1); id <= 3; id++ {
+		logs := c.logFiles(id)
+		if len(logs) != 1 || logs[0] == "raft/log.1" {
+			t.Fatalf("node %d: logs %v, want exactly one rotated file", id, logs)
+		}
+	}
+
+	// Cold restart of the whole cluster: every replica reboots from its
+	// snapshot and committed tail.
+	for id := uint64(1); id <= 3; id++ {
+		c.crash(id)
+	}
+	c.s.Run(time.Second)
+	for id := uint64(1); id <= 3; id++ {
+		c.restart(id)
+	}
+	c.converged(model)
+
+	// And the recovered cluster still accepts writes.
+	c.propose(mkPut("bkt", "after", 42, 99))
+	model["bkt"]["after"] = 42
+	c.converged(model)
+}
+
+// TestLaggingFollowerCatchesUpViaSnapshot: a follower sleeps through
+// enough writes that the leader compacts past its log — the only road back
+// is a streamed snapshot (MsgSnap), installed as a log rotation.
+func TestLaggingFollowerCatchesUpViaSnapshot(t *testing.T) {
+	c := newCluster(t, 23, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	})
+	c.snapEntries = 8
+	c.start()
+
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+
+	lead := c.leader()
+	var follower uint64
+	for id := uint64(1); id <= 3; id++ {
+		if id != lead {
+			follower = id
+			break
+		}
+	}
+	c.crash(follower)
+
+	for i := range 40 {
+		key := fmt.Sprintf("k/%02d", i)
+		c.propose(mkPut("bkt", key, int64(1000+i), byte(i+1)))
+		model["bkt"][key] = int64(1000 + i)
+	}
+
+	c.restart(follower)
+	c.converged(model)
+
+	// The follower's recovery had to come through a streamed snapshot —
+	// the leader compacted far past its log — installed as a rotation.
+	if got := c.nodes[follower].SnapshotsReceived(); got == 0 {
+		t.Fatal("follower converged without receiving a snapshot — the leader never compacted past it?")
+	}
+	logs := c.logFiles(follower)
+	if len(logs) != 1 || logs[0] == "raft/log.1" {
+		t.Fatalf("follower logs %v, want a single rotated file from the snapshot install", logs)
 	}
 }

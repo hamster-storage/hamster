@@ -41,6 +41,19 @@ func (s *Store) Restore(key string, value []byte) error {
 	return nil
 }
 
+// Dump exports the store's entire state as encoded rows, sorted by key —
+// deterministic: the same state dumps to the same bytes on every replica.
+// This is the snapshot a Raft node ships to a lagging peer and writes when
+// compacting its log; Restore is its inverse.
+func (s *Store) Dump() []Row {
+	var rows []Row
+	s.kv.scan("", func(k string, v any) bool {
+		rows = append(rows, Row{Key: k, Value: marshalRecord(v)})
+		return true
+	})
+	return rows
+}
+
 // txn begins recording an apply's mutations and returns the function its
 // deferred caller runs at exit: rollback on error, persist on success —
 // and rollback again if persisting fails, surfacing the failure through
