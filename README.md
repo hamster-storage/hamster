@@ -38,15 +38,23 @@ Hamster aims for the missing middle:
 
 ## Quick start
 
-Not available yet. The first v0 release will ship a single binary. The intended experience looks roughly like:
+Grab a binary from the [releases page](https://github.com/hamster-storage/hamster/releases) (or `go build ./cmd/hamster` with Go installed — no cgo, no build tricks), then:
 
 ```sh
-# illustrative, not yet working
-hamster node init --data ./data        # start a node
-hamster cluster join <addr>            # join it into a cluster
+export HAMSTER_ACCESS_KEY_ID=hamster
+export HAMSTER_SECRET_ACCESS_KEY=keep-this-one-secret
+hamster serve -data-dir ./data
 ```
 
-Hamster will expose a standard S3 endpoint, so any S3 client can point at it.
+That is a standard S3 endpoint on `127.0.0.1:9000`, so any S3 client works as is:
+
+```sh
+export AWS_ACCESS_KEY_ID=hamster AWS_SECRET_ACCESS_KEY=keep-this-one-secret
+aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://stash
+aws --endpoint-url http://127.0.0.1:9000 s3 cp video.mp4 s3://stash/
+```
+
+rclone, restic, and s3cmd work too — a [compatibility suite](test/compat/) runs all four against every change. The v0.1 server is a single durable node (this is the dev preview: real workloads should wait for clustering and erasure coding); `hamster cluster` commands arrive with v0.2.
 
 ## Roadmap
 
@@ -60,3 +68,9 @@ Early, but contributions are welcome. Hamster is Apache 2.0 licensed, and contri
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+## Release history
+
+High level only — details live in each [release](https://github.com/hamster-storage/hamster/releases). On disk and on wire formats may change between v0 releases.
+
+- **v0.1** (June 2026) — The single-node store. Core S3 API: objects, listings, multipart uploads, server-side copies, batch deletes, presigned URLs; full SigV4 authentication including `aws-chunked` streaming; path-style and virtual-hosted addressing; MD5 ETags, exactly like S3. Uploads stream through the write buffer (a 1 GiB PUT needs ~12 MB of server memory). Durable single-node storage: BadgerDB metadata, versioned protobuf formats with golden-pinned encodings. Verified by a third-party client compatibility suite (`aws` CLI, rclone, restic, s3cmd) and a deterministic simulation harness that crash-tests the store against a reference model. Dev preview — single node, not production ready.
