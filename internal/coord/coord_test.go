@@ -524,3 +524,120 @@ func TestDeterminism(t *testing.T) {
 		t.Fatalf("same seed, different run: %v/%d vs %v/%d", res1.VersionID, res1.Durable, res2.VersionID, res2.Durable)
 	}
 }
+
+// get drives one network GET through the leader's coordinator.
+func (c *cluster) get(key string, off, length int64) ([]byte, error) {
+	c.t.Helper()
+	id := c.leader()
+	var out []byte
+	var gerr error
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.Get(bucket, key, off, length, func(b []byte, e error) {
+			out, gerr, done = b, e, true
+		})
+	})
+	for range 5000 {
+		c.s.Run(tick)
+		if done {
+			return out, gerr
+		}
+	}
+	c.t.Fatal("get never finished")
+	return nil, nil
+}
+
+// TestGetOverNetwork: the full read path — header fetches, covering slice
+// fetches, CRC-verified decode — across sizes, whole objects and ranges.
+func TestGetOverNetwork(t *testing.T) {
+	c := newCluster(t, 21, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	for i, size := range []int{0, 1, 100 << 10, 3<<20 + 777} {
+		key := fmt.Sprintf("net-%d", size)
+		body := randomBody(uint64(20+i), size)
+		if _, err := c.put(key, body); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		got, err := c.get(key, 0, -1)
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("%s whole: equal=%v err=%v", key, bytes.Equal(got, body), err)
+		}
+		if size > 4096 {
+			got, err := c.get(key, 2500, 4000)
+			if err != nil || !bytes.Equal(got, body[2500:6500]) {
+				t.Fatalf("%s range: equal=%v err=%v", key, bytes.Equal(got, body[2500:6500]), err)
+			}
+			// A range crossing the final stripe boundary.
+			tail := int64(size) - 1000
+			got, err = c.get(key, tail, 5000) // clamped to the object end
+			if err != nil || !bytes.Equal(got, body[tail:]) {
+				t.Fatalf("%s tail: equal=%v err=%v", key, bytes.Equal(got, body[tail:]), err)
+			}
+		}
+	}
+	if _, err := c.get("never-put", 0, -1); err == nil {
+		t.Fatal("get of a missing key succeeded")
+	}
+}
+
+// TestGetDegradedOverNetwork: GETs reconstruct through m crashed holders
+// and refuse cleanly past tolerance — over the real fetch path, where a
+// down node is silence and timeouts, not a nil in a slice.
+func TestGetDegradedOverNetwork(t *testing.T) {
+	c := newCluster(t, 22, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	body := randomBody(22, 2<<20)
+	if _, err := c.put("recon", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	e, _ := c.entry("recon")
+	holders, err := place.Nodes(e.Partition, c.members, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := 0
+	for _, h := range holders {
+		if h != "n1" && h != "n2" && crashed < 2 {
+			c.crash(h)
+			crashed++
+		}
+	}
+	got, err := c.get("recon", 0, -1)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("degraded whole get: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+	got, err = c.get("recon", 1<<20, 4096)
+	if err != nil || !bytes.Equal(got, body[1<<20:1<<20+4096]) {
+		t.Fatalf("degraded range get: err=%v", err)
+	}
+
+	for _, h := range holders {
+		if h != "n1" && h != "n2" && !c.down[h] {
+			c.crash(h)
+			break
+		}
+	}
+	if _, err := c.get("recon", 0, -1); !errors.Is(err, coord.ErrUnreadable) {
+		t.Fatalf("get past tolerance: err=%v, want ErrUnreadable", err)
+	}
+}
+
+// TestGetUnderFaultyNetwork: drops and duplicates between the coordinator
+// and the shard holders; the fetch retries ride it out.
+func TestGetUnderFaultyNetwork(t *testing.T) {
+	c := newCluster(t, 23, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 15 * time.Millisecond,
+		DropProb: 0.03, DuplicateProb: 0.03,
+	}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	body := randomBody(23, 1<<20+7)
+	if _, err := c.put("gusty", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	got, err := c.get("gusty", 0, -1)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("faulty-net get: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+}

@@ -133,6 +133,54 @@ func FrameSize(plaintextSize int64, chunkSize int) int64 {
 	return size + 4*n + 4
 }
 
+// A Range is a byte range within a frame: [Off, Off+Len).
+type Range struct {
+	Off, Len int64
+}
+
+// Cover reports which frame byte ranges a Reader touches to serve the
+// plaintext range [off, off+length): the header, the covering chunks, and
+// the trailer. Like FrameSize, it is identity-frame arithmetic — a
+// network read coordinator prefetches exactly these ranges and the Reader
+// finds every byte it asks for. Ranges are sorted, non-overlapping, and
+// merged when adjacent; an empty or out-of-bounds request still returns
+// the header and trailer, which the Reader always reads.
+func Cover(plaintextSize int64, chunkSize int, off, length int64) []Range {
+	headerLen := int64(len(appendHeader(make([]byte, 0, maxHeaderLen), int64(chunkSize), plaintextSize)))
+	frameSize := FrameSize(plaintextSize, chunkSize)
+	trailerStart := headerLen + plaintextSize // identity: stored == plaintext
+	// The reader's header read is up to maxHeaderLen, not the exact
+	// header; cover what it reads, not what is strictly there.
+	headRead := min(int64(maxHeaderLen), frameSize)
+
+	// Clamp to the plaintext; a degenerate request covers no body bytes.
+	if off < 0 {
+		off = 0
+	}
+	end := min(off+length, plaintextSize)
+
+	out := []Range{{Off: 0, Len: headRead}}
+	if off < end {
+		first := off / int64(chunkSize)
+		last := (end - 1) / int64(chunkSize)
+		bodyStart := headerLen + first*int64(chunkSize)
+		bodyEnd := min(headerLen+(last+1)*int64(chunkSize), trailerStart)
+		out = appendRange(out, Range{Off: bodyStart, Len: bodyEnd - bodyStart})
+	}
+	return appendRange(out, Range{Off: trailerStart, Len: frameSize - trailerStart})
+}
+
+// appendRange appends r, merging it into the previous range when they
+// touch or overlap.
+func appendRange(rs []Range, r Range) []Range {
+	prev := &rs[len(rs)-1]
+	if r.Off <= prev.Off+prev.Len {
+		prev.Len = max(prev.Len, r.Off+r.Len-prev.Off)
+		return rs
+	}
+	return append(rs, r)
+}
+
 // uvarintLen is the encoded size of v as a uvarint.
 func uvarintLen(v uint64) int {
 	n := 1

@@ -259,3 +259,59 @@ func ExampleWriter() {
 	fmt.Printf("%s\n", p)
 	// Output: world
 }
+
+// gappedReaderAt serves only the declared ranges and fails any read
+// outside them — how TestCover proves Cover's claim.
+type gappedReaderAt struct {
+	t      *testing.T
+	frame  []byte
+	ranges []Range
+}
+
+func (g *gappedReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	end := off + int64(len(p))
+	for _, r := range g.ranges {
+		if off >= r.Off && end <= r.Off+r.Len {
+			return copy(p, g.frame[off:end]), nil
+		}
+	}
+	g.t.Errorf("read [%d, %d) outside the covered ranges %v", off, end, g.ranges)
+	return 0, fmt.Errorf("not covered")
+}
+
+// TestCover: a Reader given only the ranges Cover names can serve the
+// requested plaintext — the contract the network read path stands on.
+func TestCover(t *testing.T) {
+	const chunk = 256
+	for _, size := range []int{0, 1, chunk - 1, chunk, chunk + 1, 5*chunk + 17} {
+		rng := rand.New(rand.NewPCG(uint64(size), 0xC0))
+		data := make([]byte, size)
+		for i := range data {
+			data[i] = byte(rng.UintN(256))
+		}
+		f := frame(t, data, chunk)
+
+		reads := [][2]int64{{0, int64(size)}, {0, 0}, {int64(size), 10}}
+		for range 20 {
+			off := rng.Int64N(int64(size) + 1)
+			reads = append(reads, [2]int64{off, rng.Int64N(int64(size) - off + 1)})
+		}
+		for _, rd := range reads {
+			off, n := rd[0], rd[1]
+			cov := Cover(int64(size), chunk, off, n)
+			r, err := NewReader(&gappedReaderAt{t: t, frame: f, ranges: cov}, int64(len(f)))
+			if err != nil {
+				t.Fatalf("size %d read [%d,%d): NewReader: %v", size, off, off+n, err)
+			}
+			got := make([]byte, n)
+			if n > 0 && off+n <= int64(size) {
+				if _, err := r.ReadAt(got, off); err != nil {
+					t.Fatalf("size %d read [%d,%d): %v", size, off, off+n, err)
+				}
+				if !bytes.Equal(got, data[off:off+n]) {
+					t.Fatalf("size %d read [%d,%d): wrong bytes", size, off, off+n)
+				}
+			}
+		}
+	}
+}
