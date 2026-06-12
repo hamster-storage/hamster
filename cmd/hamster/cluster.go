@@ -130,7 +130,7 @@ func clusterRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("hamster cluster node: %s — transport %s, join/status %s", version, n.Addr(), n.JoinAddr())
+	log.Printf("hamster cluster node: %s — transport %s, join/status %s", fullVersion(), n.Addr(), n.JoinAddr())
 	log.Printf("hamster cluster node: DEV PREVIEW — metadata plane only; S3 serving stays single-node until the data path replicates (v0.3)")
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
