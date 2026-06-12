@@ -82,7 +82,7 @@ func (c *cluster) addNode(id uint64) {
 	c.s.AddNode(addr, c.boot(id, true))
 	for range 50 {
 		lead := c.leader()
-		if err := c.nodes[lead].AddNode(id, addr); err != nil {
+		if err := c.nodes[lead].AddNode(id, addr, ""); err != nil {
 			continue
 		}
 		for range 400 {
@@ -561,6 +561,30 @@ func TestJoinReplicatesAndPromotes(t *testing.T) {
 			c.propose(mkPut("bkt", "post", 7, 99))
 			model["bkt"]["post"] = 7
 			c.restart(lead)
+			c.converged(model)
+		})
+	}
+}
+
+// TestJoinerRequestsOwnAdmission: nobody calls AddNode — the joining node
+// asks the cluster itself (admit messages to every peer; the leader
+// answers), which is how the CLI join flow works. The joiner must end up a
+// member, caught up, and promoted.
+func TestJoinerRequestsOwnAdmission(t *testing.T) {
+	for _, seed := range []uint64{5, 6} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			c := newCluster(t, seed, sim.NetConfig{
+				MinLatency: time.Millisecond, MaxLatency: 8 * time.Millisecond,
+				DropProb: 0.02,
+			}).start()
+			model := map[string]map[string]int64{"bkt": {}}
+			c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+			c.propose(mkPut("bkt", "k", 5, 1))
+			model["bkt"]["k"] = 5
+
+			c.ids[4] = "n4"
+			c.s.AddNode("n4", c.boot(4, true))
+			c.waitMembers(4, 4)
 			c.converged(model)
 		})
 	}
