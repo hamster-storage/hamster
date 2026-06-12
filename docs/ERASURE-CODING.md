@@ -91,6 +91,10 @@ Hamster handles this without a second storage path: objects below a size thresho
 
 No special cases anywhere downstream: placement, repair, the metadata record, and the simulation harness all see ordinary `k+m` parameters that happen to have `k=1`. The starting threshold is **128 KiB**, recorded implicitly by each object's own parameters, so tuning the threshold later changes new writes only and confuses nothing.
 
+**The capacity honesty.** A small object pays the replication multiplier — `m+1` full copies, so 3.0× under `4+2`, not the profile's nominal 1.5× — and a workload made *entirely* of small objects pays it across the board. State that plainly rather than letting the table above read as a whole-cluster promise. It is still the cheaper option: erasure-coding a 4 KiB object into six ~1 KiB shards burns a full 4 KiB filesystem block per shard (24 KiB of real disk — *worse* than three copies) while tripling the operation count, so below the threshold the nominal EC overhead is fiction and replication wins on both capacity and speed. The overhead column is a claim about objects large enough for EC to mean something; in mixed workloads, large objects dominate capacity and the blended overhead approaches nominal.
+
+For workloads genuinely dominated by small objects, the fix that earns EC economics is **packing** — aggregating many small objects into containers that are themselves erasure coded. That is a deliberate post-v1 candidate, not a v0 feature: see the open question below.
+
 ## Large objects: stripes
 
 Objects are encoded in fixed-size **stripes** so a multi-gigabyte PUT streams through the write buffer with bounded memory — encode a stripe, write its shards, move on — and a ranged GET decodes only the stripes the range touches. Stripe size and the shard on-disk format (headers, mirrored checksums) are data-plane format work, designed with the v0.3 code; the metadata schema is already agnostic, recording per-object checksums and parameters either way.
@@ -140,6 +144,7 @@ Each step is operator-commanded, announced as it happens, and additive in every 
 ## Open questions
 
 - The small-object threshold (128 KiB to start) — settle with v0.3 benchmarks; per-object parameters mean changing it is free.
+- Small-object packing (post-v1): aggregate many small objects into containers that are erasure coded as units, so small-object-heavy workloads get real `k+m` economics instead of the replication multiplier. Nothing in the metadata schema forbids it — a packed location is just another shape of data-plane address on a `VersionEntry` — but it brings compaction (deletes leave holes in packs), read indirection, and interactions with versioning and object lock that each need their own design. Only worth building for workloads *dominated* by small objects; mixed workloads already approach nominal overhead because large objects dominate capacity.
 - The re-encode task's detailed design (crash-safety proof, throttling policy, the scoped exception to record immutability) — its own ADR alongside the v0.4 work.
 - Whether profiles ever become per-bucket (S3 storage classes shaped) — nothing in the metadata schema forbids it (parameters are per-object already), but v0 is one active profile, cluster-wide, on purpose.
 - Stripe size and shard file format — v0.3 data-plane work.
