@@ -21,6 +21,7 @@
 package raftnode
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -48,11 +49,20 @@ var ErrNotLeader = errors.New("raftnode: not the leader")
 
 // Config assembles a Node. All fields are required unless noted.
 type Config struct {
-	// ID is this node's Raft ID; Peers maps every cluster member's Raft ID
-	// to its transport address, this node included. v0.2's first cut is a
-	// static cluster — membership changes arrive with cluster join.
+	// ID is this node's Raft ID; Peers seeds the address book: Raft ID →
+	// transport address. On a fresh bootstrap it is the founding voter set,
+	// this node included (capped at five — ADR-0017). On a joining or
+	// restarting node it only needs enough addresses to reach the cluster;
+	// the rest arrive with the log and snapshots, which carry every
+	// member's address.
 	ID    uint64
 	Peers map[uint64]seam.NodeID
+
+	// Join marks a node started to join an existing cluster: a fresh disk
+	// does not bootstrap a new cluster, it waits to be admitted — the
+	// leader's AddNode brings the log to it. Ignored when the disk already
+	// holds state (a restart is a restart).
+	Join bool
 
 	Clock     seam.Clock
 	Transport seam.Transport
@@ -73,6 +83,17 @@ type Config struct {
 
 const defaultSnapshotEntries = 4096
 
+// maxVoters is the ADR-0017 cap: five voting members, everyone else a
+// learner. Quorum cost stays constant no matter how large the cluster
+// grows.
+const maxVoters = 5
+
+// promoteLag is how many entries a learner may trail the leader's log by
+// and still count as caught up for promotion. Tight enough that a promoted
+// voter joins quorum immediately; loose enough that a steadily writing
+// cluster can still promote.
+const promoteLag = 16
+
 // Node is one Raft-replicated metadata replica.
 type Node struct {
 	cfg     Config
@@ -85,8 +106,12 @@ type Node struct {
 	applied   uint64
 	snapIndex uint64
 	confState raftpb.ConfState
+	peers     map[uint64]seam.NodeID        // the address book: seeded by Config.Peers, maintained by conf changes and snapshots
 	waiters   map[uint64][]func(any, error) // log index → callbacks for this node's proposals
 	proposing []func(any, error)            // accepted by Propose, not yet paired to an index
+
+	confCooldown int  // ticks before the next membership proposal; paces promotion retries
+	confChanged  bool // a conf change applied since the last snapshot; forces the next one
 
 	lastHeard     time.Time     // last leader contact (or own leadership)
 	electionAfter time.Duration // silence budget before campaigning; re-drawn per campaign
@@ -105,9 +130,11 @@ func New(cfg Config) (*Node, error) {
 	n := &Node{
 		cfg:     cfg,
 		storage: raft.NewMemoryStorage(),
+		peers:   make(map[uint64]seam.NodeID),
 		waiters: make(map[uint64][]func(any, error)),
 		store:   meta.NewStore(),
 	}
+	maps.Copy(n.peers, cfg.Peers)
 
 	fresh, err := n.recover()
 	if err != nil {
@@ -138,11 +165,14 @@ func New(cfg Config) (*Node, error) {
 	}
 	n.rn = rn
 
-	if fresh {
+	if fresh && !cfg.Join {
 		// A fresh cluster. Sorted: map order must not shape the log.
+		if len(cfg.Peers) > maxVoters {
+			return nil, fmt.Errorf("raftnode: bootstrapping %d voters exceeds the cap of %d (ADR-0017); bootstrap small and grow with join", len(cfg.Peers), maxVoters)
+		}
 		peers := make([]raft.Peer, 0, len(cfg.Peers))
 		for _, id := range slices.Sorted(maps.Keys(cfg.Peers)) {
-			peers = append(peers, raft.Peer{ID: id})
+			peers = append(peers, raft.Peer{ID: id, Context: encodeMember(id, cfg.Peers[id])})
 		}
 		if err := rn.Bootstrap(peers); err != nil {
 			return nil, fmt.Errorf("raftnode: bootstrap: %w", err)
@@ -219,8 +249,13 @@ func validLog(records [][]byte, oldest bool) bool {
 	return err == nil && !raft.IsEmptySnap(rec.snap)
 }
 
-// replay feeds a log file's records through storage and the store: exactly
-// the path a live node takes, minus the network.
+// replay loads a log file's records into raft storage: snapshot, entries,
+// hard state. It deliberately applies nothing — boot leaves Applied at the
+// snapshot index, so raft redelivers the committed tail through the first
+// Ready and applyEntry rebuilds the store and the configuration on the
+// same path a live node uses. (Applying here and declaring the prefix
+// Applied would skip the conf-change entries raft never re-reads: a node
+// restarting before its first snapshot would come back memberless.)
 func (n *Node) replay(records [][]byte) error {
 	for i, raw := range records {
 		rec, err := decodeRecord(raw)
@@ -241,13 +276,13 @@ func (n *Node) replay(records [][]byte) error {
 			}
 		}
 	}
-	return n.applyCommitted()
+	return nil
 }
 
 // restoreSnapshot resets storage and store to a snapshot — the shared core
 // of boot replay and MsgSnap installation.
 func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
-	store, err := decodeSnapshotData(snap.Data)
+	store, members, err := decodeSnapshotData(snap.Data)
 	if err != nil {
 		return fmt.Errorf("snapshot data: %w", err)
 	}
@@ -255,46 +290,10 @@ func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
 		return fmt.Errorf("apply snapshot: %w", err)
 	}
 	n.store = store
+	maps.Copy(n.peers, members)
 	n.applied = snap.Metadata.Index
 	n.snapIndex = snap.Metadata.Index
 	n.confState = snap.Metadata.ConfState
-	return nil
-}
-
-// applyCommitted replays the already-committed log tail into the store at
-// boot. Deterministic apply makes the rebuilt replica bit-identical.
-func (n *Node) applyCommitted() error {
-	hs, cs, err := n.storage.InitialState()
-	if err != nil {
-		return err
-	}
-	if len(cs.Voters) > 0 {
-		n.confState = cs
-	}
-	last, err := n.storage.LastIndex()
-	if err != nil {
-		return err
-	}
-	commit := min(hs.Commit, last)
-	if commit <= n.applied {
-		return nil
-	}
-	ents, err := n.storage.Entries(n.applied+1, commit+1, math.MaxUint64)
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if e.Type == raftpb.EntryNormal && len(e.Data) > 0 {
-			p, err := meta.DecodeProposal(e.Data)
-			if err != nil {
-				return fmt.Errorf("raftnode: replay entry %d: %w", e.Index, err)
-			}
-			// Deterministic validation refusals replay too: they are
-			// outcomes, not failures.
-			_, _ = n.store.Apply(p)
-		}
-		n.applied = e.Index
-	}
 	return nil
 }
 
@@ -333,6 +332,92 @@ func (n *Node) Propose(p any, done func(any, error)) {
 	n.processReady()
 }
 
+// Member is one cluster member as a replica knows it: Raft ID, transport
+// address, and role.
+type Member struct {
+	ID      uint64
+	Addr    seam.NodeID
+	Learner bool
+}
+
+// Members lists the cluster membership this replica has applied, sorted by
+// ID. Like any replicated state it can trail the leader's.
+func (n *Node) Members() []Member {
+	var ms []Member
+	for _, id := range n.confState.Voters {
+		ms = append(ms, Member{ID: id, Addr: n.peers[id]})
+	}
+	for _, id := range n.confState.Learners {
+		ms = append(ms, Member{ID: id, Addr: n.peers[id], Learner: true})
+	}
+	slices.SortFunc(ms, func(a, b Member) int { return cmp.Compare(a.ID, b.ID) })
+	return ms
+}
+
+// AddNode proposes admitting a node at the given transport address,
+// leader-only. Every node is admitted as a learner — it has a whole log to
+// catch up on before its vote could help anyone — and promotion to voter
+// is automatic (ADR-0017) once it is caught up, while the voter count is
+// under the cap. The change is asynchronous and raft drops a membership
+// change proposed while another is uncommitted, so callers confirm through
+// Members and retry; admission is idempotent.
+func (n *Node) AddNode(id uint64, addr seam.NodeID) error {
+	return n.proposeConfChange(raftpb.ConfChange{
+		Type: raftpb.ConfChangeAddLearnerNode, NodeID: id,
+		Context: encodeMember(id, addr),
+	})
+}
+
+// RemoveNode proposes removing a member, leader-only, with the same
+// asynchronous confirm-and-retry contract as AddNode. Removing a voter
+// opens a vacancy that promotion refills from the learners.
+func (n *Node) RemoveNode(id uint64) error {
+	return n.proposeConfChange(raftpb.ConfChange{
+		Type: raftpb.ConfChangeRemoveNode, NodeID: id,
+	})
+}
+
+func (n *Node) proposeConfChange(cc raftpb.ConfChange) error {
+	if _, leader := n.Leader(); !leader {
+		return ErrNotLeader
+	}
+	if err := n.rn.ProposeConfChange(cc); err != nil {
+		return fmt.Errorf("raftnode: conf change: %w", err)
+	}
+	n.confCooldown = n.cfg.ElectionTicks
+	n.processReady()
+	return nil
+}
+
+// maybePromote fills voter vacancies: while the cluster has fewer than
+// five voters (ADR-0017), the lowest-ID learner whose log has caught up to
+// the leader's is promoted through an ordinary conf change. One change at
+// a time, paced by confCooldown — raft drops a change proposed while
+// another is uncommitted, and pacing plus idempotence makes the retry
+// harmless. Zone-aware selection arrives with the cluster layout (v0.4);
+// replacing a voter that stays down awaits the health machinery.
+func (n *Node) maybePromote() {
+	if n.confCooldown > 0 || len(n.confState.Voters) >= maxVoters || len(n.confState.Learners) == 0 {
+		return
+	}
+	last, err := n.storage.LastIndex()
+	if err != nil {
+		panic(fmt.Sprintf("raftnode %d: last index: %v", n.cfg.ID, err))
+	}
+	progress := n.rn.Status().Progress
+	for _, id := range slices.Sorted(slices.Values(n.confState.Learners)) {
+		pr, ok := progress[id]
+		if !ok || pr.Match == 0 || pr.Match+promoteLag < last {
+			continue
+		}
+		_ = n.proposeConfChange(raftpb.ConfChange{
+			Type: raftpb.ConfChangeAddNode, NodeID: id,
+			Context: encodeMember(id, n.peers[id]),
+		})
+		return
+	}
+}
+
 // HandleMessage implements seam.MessageHandler: one Raft message off the
 // wire.
 func (n *Node) HandleMessage(from seam.NodeID, msg []byte) {
@@ -355,10 +440,14 @@ func (n *Node) HandleMessage(from seam.NodeID, msg []byte) {
 func (n *Node) onTick() {
 	n.cfg.Clock.AfterFunc(n.cfg.TickInterval, n.onTick)
 	n.rn.Tick()
+	if n.confCooldown > 0 {
+		n.confCooldown--
+	}
 
 	now := n.cfg.Clock.Now()
 	if _, leader := n.Leader(); leader {
 		n.lastHeard = now
+		n.maybePromote()
 	} else if now.Sub(n.lastHeard) >= n.electionAfter {
 		// Silence outlasted the randomized timeout: campaign. PreVote
 		// makes a wrong guess a probe, not a disruption.
@@ -422,7 +511,7 @@ func (n *Node) processReady() {
 		// complete the moment Send returns (the transport owns delivery),
 		// so report it sent: raft resumes normal replication probing.
 		for _, m := range rd.Messages {
-			to, ok := n.cfg.Peers[m.To]
+			to, ok := n.peers[m.To]
 			if !ok {
 				continue
 			}
@@ -462,12 +551,20 @@ func (n *Node) currentHardState(rdHS raftpb.HardState) raftpb.HardState {
 
 // maybeSnapshot compacts once enough entries have applied since the last
 // snapshot: dump the store, hand raft the snapshot at the applied index,
-// drop the log prefix, rotate the WAL.
+// drop the log prefix, rotate the WAL. A membership change forces it
+// regardless of the threshold: raft refuses to install a snapshot whose
+// ConfState omits the recipient, so a stored snapshot from before a join
+// could never catch that member up — every member must appear in the
+// snapshot the leader would stream.
 func (n *Node) maybeSnapshot() {
-	if n.applied-n.snapIndex < n.cfg.SnapshotEntries {
+	if !n.confChanged && n.applied-n.snapIndex < n.cfg.SnapshotEntries {
 		return
 	}
-	snap, err := n.storage.CreateSnapshot(n.applied, &n.confState, encodeSnapshotData(n.store.Dump()))
+	if n.applied <= n.snapIndex {
+		return // nothing newer than the standing snapshot
+	}
+	n.confChanged = false
+	snap, err := n.storage.CreateSnapshot(n.applied, &n.confState, encodeSnapshotData(n.store.Dump(), n.peers))
 	if err != nil {
 		panic(fmt.Sprintf("raftnode %d: create snapshot: %v", n.cfg.ID, err))
 	}
@@ -557,7 +654,23 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 		if err := cc.Unmarshal(e.Data); err != nil {
 			panic(fmt.Sprintf("raftnode %d: conf change at %d: %v", n.cfg.ID, e.Index, err))
 		}
+		// The address book changes with the configuration, identically on
+		// every replica: an admission's context carries the address, a
+		// removal drops it.
+		switch cc.Type {
+		case raftpb.ConfChangeAddNode, raftpb.ConfChangeAddLearnerNode:
+			if len(cc.Context) > 0 {
+				id, addr, err := decodeMember(cc.Context)
+				if err != nil || id != cc.NodeID {
+					panic(fmt.Sprintf("raftnode %d: conf change at %d: member context for %d: %v", n.cfg.ID, e.Index, cc.NodeID, err))
+				}
+				n.peers[id] = addr
+			}
+		case raftpb.ConfChangeRemoveNode:
+			delete(n.peers, cc.NodeID)
+		}
 		n.confState = *n.rn.ApplyConfChange(cc)
+		n.confChanged = true
 	case raftpb.EntryNormal:
 		if len(e.Data) == 0 {
 			return // the leader's commit-barrier no-op

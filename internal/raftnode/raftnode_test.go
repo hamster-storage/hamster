@@ -50,15 +50,15 @@ func newCluster(t *testing.T, seed uint64, net sim.NetConfig) *cluster {
 
 func (c *cluster) start() *cluster {
 	for id := uint64(1); id <= 3; id++ {
-		c.s.AddNode(c.ids[id], c.boot(id))
+		c.s.AddNode(c.ids[id], c.boot(id, false))
 	}
 	return c
 }
 
-func (c *cluster) boot(id uint64) sim.BootFunc {
+func (c *cluster) boot(id uint64, join bool) sim.BootFunc {
 	return func(w *sim.World) seam.MessageHandler {
 		n, err := raftnode.New(raftnode.Config{
-			ID: id, Peers: c.ids,
+			ID: id, Peers: c.ids, Join: join,
 			Clock: w.Clock, Transport: w.Transport, Disk: w.Disk, Rand: w.Rand,
 			TickInterval: tick, ElectionTicks: electionTicks,
 			SnapshotEntries: c.snapEntries,
@@ -70,6 +70,83 @@ func (c *cluster) boot(id uint64) sim.BootFunc {
 		c.worlds[id] = w
 		return n
 	}
+}
+
+// addNode boots a fresh node with an empty disk in join mode and admits it
+// through the leader, retrying through dropped conf changes and leadership
+// churn. It returns once the leader's applied membership includes the node.
+func (c *cluster) addNode(id uint64) {
+	c.t.Helper()
+	addr := seam.NodeID(fmt.Sprintf("n%d", id))
+	c.ids[id] = addr
+	c.s.AddNode(addr, c.boot(id, true))
+	for range 50 {
+		lead := c.leader()
+		if err := c.nodes[lead].AddNode(id, addr); err != nil {
+			continue
+		}
+		for range 400 {
+			c.s.Run(tick)
+			if hasMember(c.nodes[lead].Members(), id) {
+				return
+			}
+		}
+	}
+	c.t.Fatalf("node %d was never admitted", id)
+}
+
+// removeNode removes a member through the leader, with the same retry
+// contract as addNode, then crashes the removed process.
+func (c *cluster) removeNode(id uint64) {
+	c.t.Helper()
+	for range 50 {
+		lead := c.leader()
+		if err := c.nodes[lead].RemoveNode(id); err != nil {
+			continue
+		}
+		for range 400 {
+			c.s.Run(tick)
+			if !hasMember(c.nodes[lead].Members(), id) {
+				c.crash(id)
+				return
+			}
+		}
+	}
+	c.t.Fatalf("node %d was never removed", id)
+}
+
+// waitMembers runs until some live replica's applied membership has the
+// wanted shape: wantTotal members, of which wantVoters vote.
+func (c *cluster) waitMembers(wantVoters, wantTotal int) {
+	c.t.Helper()
+	for range 4000 {
+		c.s.Run(tick)
+		for id, n := range c.nodes {
+			if c.down[id] {
+				continue
+			}
+			ms := n.Members()
+			voters := 0
+			for _, m := range ms {
+				if !m.Learner {
+					voters++
+				}
+			}
+			if len(ms) == wantTotal && voters == wantVoters {
+				return
+			}
+		}
+	}
+	c.t.Fatalf("membership never reached %d voters of %d members", wantVoters, wantTotal)
+}
+
+func hasMember(ms []raftnode.Member, id uint64) bool {
+	for _, m := range ms {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // logFiles lists a node's raft log files — how the tests observe rotation.
@@ -428,4 +505,165 @@ func TestLaggingFollowerCatchesUpViaSnapshot(t *testing.T) {
 	if len(logs) != 1 || logs[0] == "raft/log.1" {
 		t.Fatalf("follower logs %v, want a single rotated file from the snapshot install", logs)
 	}
+}
+
+// TestColdRestartBeforeSnapshot: a full-cluster cold restart while the
+// cluster's only configuration record is the bootstrap conf-change entries
+// — no snapshot has happened yet, so boot must re-feed those entries to
+// raft or every node comes back memberless and no leader can ever emerge.
+func TestColdRestartBeforeSnapshot(t *testing.T) {
+	c := newCluster(t, 31, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	}).start()
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+	c.propose(mkPut("bkt", "k", 7, 1))
+	model["bkt"]["k"] = 7
+
+	for id := uint64(1); id <= 3; id++ {
+		c.crash(id)
+	}
+	c.s.Run(time.Second)
+	for id := uint64(1); id <= 3; id++ {
+		c.restart(id)
+	}
+	c.converged(model)
+
+	c.propose(mkPut("bkt", "after", 9, 2))
+	model["bkt"]["after"] = 9
+	c.converged(model)
+}
+
+// TestJoinReplicatesAndPromotes: a fourth node joins a running cluster as
+// a learner, replicates the existing history, is promoted to voter once
+// caught up (four members — everyone votes under the ADR-0017 cap), and
+// the grown cluster survives losing its leader.
+func TestJoinReplicatesAndPromotes(t *testing.T) {
+	for _, seed := range []uint64{1, 2, 3} {
+		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
+			c := newCluster(t, seed, sim.NetConfig{
+				MinLatency: time.Millisecond, MaxLatency: 8 * time.Millisecond,
+			}).start()
+			model := map[string]map[string]int64{"bkt": {}}
+			c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+			for i := range 5 {
+				key := fmt.Sprintf("pre/%d", i)
+				c.propose(mkPut("bkt", key, int64(100+i), byte(i+1)))
+				model["bkt"][key] = int64(100 + i)
+			}
+
+			c.addNode(4)
+			c.waitMembers(4, 4) // caught up → promoted; everyone votes at four
+			c.converged(model)
+
+			lead := c.leader()
+			c.crash(lead)
+			c.propose(mkPut("bkt", "post", 7, 99))
+			model["bkt"]["post"] = 7
+			c.restart(lead)
+			c.converged(model)
+		})
+	}
+}
+
+// TestVoterCapAndLearners: grown to seven nodes, the cluster holds exactly
+// five voters (ADR-0017) — the rest replicate as learners and serve reads
+// identically, which converged() checks through the public API.
+func TestVoterCapAndLearners(t *testing.T) {
+	c := newCluster(t, 17, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	}).start()
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+	for i := range 5 {
+		key := fmt.Sprintf("k/%d", i)
+		c.propose(mkPut("bkt", key, int64(100+i), byte(i+1)))
+		model["bkt"][key] = int64(100 + i)
+	}
+
+	for id := uint64(4); id <= 7; id++ {
+		c.addNode(id)
+	}
+	c.waitMembers(5, 7)
+	c.converged(model)
+
+	// Growth never overshoots: no replica ever applies a sixth voter.
+	for id, n := range c.nodes {
+		voters := 0
+		for _, m := range n.Members() {
+			if !m.Learner {
+				voters++
+			}
+		}
+		if voters > 5 {
+			t.Fatalf("node %d applied %d voters; the cap is five", id, voters)
+		}
+	}
+}
+
+// TestRemoveVoterRefillsFromLearners: removing a voter opens a vacancy
+// that promotion fills from the learners, and the removed node's address
+// drops from the book.
+func TestRemoveVoterRefillsFromLearners(t *testing.T) {
+	c := newCluster(t, 19, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	}).start()
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+
+	for id := uint64(4); id <= 6; id++ {
+		c.addNode(id)
+	}
+	c.waitMembers(5, 6) // five voters, one learner
+
+	// Remove a voter that is not the leader.
+	lead := c.leader()
+	var victim uint64
+	for _, m := range c.nodes[lead].Members() {
+		if !m.Learner && m.ID != lead {
+			victim = m.ID
+			break
+		}
+	}
+	c.removeNode(victim)
+	c.waitMembers(5, 5) // the learner was promoted into the vacancy
+
+	c.propose(mkPut("bkt", "after", 11, 42))
+	model["bkt"]["after"] = 11
+	c.converged(model)
+}
+
+// TestJoinerCatchesUpViaSnapshotAndRestarts: a node joins a cluster whose
+// leader has compacted its log — catch-up must arrive as a streamed
+// snapshot carrying the rows and the address book — then crashes and
+// restarts back into the cluster from its own disk.
+func TestJoinerCatchesUpViaSnapshotAndRestarts(t *testing.T) {
+	c := newCluster(t, 29, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	})
+	c.snapEntries = 8
+	c.start()
+
+	model := map[string]map[string]int64{"bkt": {}}
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+	for i := range 40 {
+		key := fmt.Sprintf("k/%02d", i)
+		c.propose(mkPut("bkt", key, int64(1000+i), byte(i+1)))
+		model["bkt"][key] = int64(1000 + i)
+	}
+
+	c.addNode(4)
+	c.converged(model)
+	if got := c.nodes[4].SnapshotsReceived(); got == 0 {
+		t.Fatal("joiner converged without a streamed snapshot — the leader never compacted?")
+	}
+
+	c.crash(4)
+	for i := range 5 {
+		key := fmt.Sprintf("late/%d", i)
+		c.propose(mkPut("bkt", key, int64(2000+i), byte(i+50)))
+		model["bkt"][key] = int64(2000 + i)
+	}
+	c.restart(4)
+	c.converged(model)
 }

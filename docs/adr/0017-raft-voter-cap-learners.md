@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted, implementation in progress: the consensus layer (`internal/raftnode`) implements learner admission, the five-voter cap, and automatic promotion of a caught-up learner when a voter seat is vacant — simulation-tested through join, growth-to-seven, and remove-voter schedules. Two pieces wait on later machinery: zone-aware voter selection needs the cluster layout (v0.4), and replacing a voter that *stays down* (as opposed to one that is removed) needs the health/failure-detection work — until then a dead voter holds its seat until an operator removes it.
 
 ## Context
 
