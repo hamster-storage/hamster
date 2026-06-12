@@ -49,6 +49,7 @@ func newEnv(t *testing.T) *env {
 	}
 	g := gateway.New(gateway.Config{
 		Region: testRegion,
+		Domain: "s3.test",
 		Lookup: func(akid string) (string, bool) {
 			if akid == testAKID {
 				return testSecret, true

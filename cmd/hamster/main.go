@@ -41,6 +41,7 @@ func serve(args []string) error {
 	listen := fs.String("listen", "127.0.0.1:9000", "address to serve the S3 API on")
 	dataDir := fs.String("data-dir", "", "directory for object data (required)")
 	region := fs.String("region", "us-east-1", "SigV4 region string")
+	domain := fs.String("domain", "", "base domain for virtual-hosted bucket addressing, e.g. s3.example.com (empty: path-style only)")
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -70,6 +71,7 @@ func serve(args []string) error {
 
 	g := gateway.New(gateway.Config{
 		Region: *region,
+		Domain: *domain,
 		Lookup: func(akid string) (string, bool) {
 			if akid == accessKey {
 				return secretKey, true
