@@ -2,7 +2,21 @@
 
 ## Status
 
-Accepted
+Accepted. Implemented in v0.4 pass 2. Every node carries an auto-detected
+`host` and an operator `-zone` (defaulting to the host), captured at
+`cluster init`/`join`, recorded by the issuer, and replicated into the stored
+cluster layout ([ADR-0028](0028-stored-cluster-layout.md)) as labeled members.
+Placement ([`internal/place`](../../internal/place/)) spreads shards by a
+deterministic greedy selection over the rendezvous ranking: each shard lands
+on the least-loaded zone, then host, then highest-ranked node — node-distinct
+by construction (the hard floor, unchanged), prefix-stable (narrow widths a
+prefix of wide ones), and collapsing to the bare rendezvous ranking on a
+single-host/single-zone cluster. `cluster status` reports the host/zone of
+each member and the achieved topology, stating plainly when a level is
+trivial. Proven by golden-pinned and property tests of the spread, a
+real-cluster test of the label flow through join into the layout and status,
+and the existing single-host e2e (which exercises the collapse). Capacity
+weighting — balancing *within* the spread — remains a later v0.4 pass.
 
 ## Context
 

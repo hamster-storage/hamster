@@ -156,10 +156,17 @@ message ClusterLayout {          // s/layout, ADR-0028
   uint32 format_version  = 1;
   uint64 version         = 2;   // monotonic generation; compare-and-set on install
   uint32 partition_count = 3;   // the cluster constant (ADR-0004), until ClusterConfig lands
-  repeated string members = 4;  // ordered node IDs; placement ranks over this set (ADR-0027)
+  repeated string members = 4;  // legacy unlabeled IDs (v0.4 pass 1); decode fallback
+  repeated NodeEntry nodes = 5; // labeled member set placement spreads over (ADR-0016)
   // Rebalance (later v0.4 passes) adds the explicit per-partition assignments,
   // the previous assignments, and a transition state for mid-migration
   // dual-read that ADR-0004 describes — additive fields from here.
+}
+
+message NodeEntry {              // ADR-0016
+  string id   = 1;
+  string host = 2;              // machine identity, auto-detected
+  string zone = 3;              // failure domain above the host, defaults to host
 }
 
 message ClusterConfig {

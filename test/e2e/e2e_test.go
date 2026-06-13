@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -140,9 +141,14 @@ type statusRow struct {
 
 func parseStatus(out string) []statusRow {
 	var rows []statusRow
-	for _, line := range strings.Split(out, "\n")[1:] { // skip the header
+	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
+			continue
+		}
+		// A member row begins with a numeric RAFT-ID; this skips the header
+		// and the failure-domain topology summary lines (ADR-0016).
+		if _, err := strconv.Atoi(fields[0]); err != nil {
 			continue
 		}
 		rows = append(rows, statusRow{

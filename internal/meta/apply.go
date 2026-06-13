@@ -327,7 +327,7 @@ func (s *Store) ApplySetClusterLayout(p SetClusterLayout) (err error) {
 	if p.Version != want {
 		return ErrStaleLayout
 	}
-	if p.PartitionCount == 0 || len(p.Members) == 0 {
+	if p.PartitionCount == 0 || (len(p.Members) == 0 && len(p.Nodes) == 0) {
 		return ErrInvalidLayout
 	}
 	s.kv.set(clusterLayoutKey, ClusterLayout{
@@ -335,6 +335,7 @@ func (s *Store) ApplySetClusterLayout(p SetClusterLayout) (err error) {
 		Version:        p.Version,
 		PartitionCount: p.PartitionCount,
 		Members:        append([]string(nil), p.Members...),
+		Nodes:          append([]LayoutNode(nil), p.Nodes...),
 	})
 	return nil
 }

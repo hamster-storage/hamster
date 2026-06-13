@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -189,11 +188,12 @@ func Run(dataDir string) (*Node, error) {
 				if !ok {
 					return place.Layout{}, false
 				}
-				ms := make([]seam.NodeID, len(cl.Members))
-				for i, m := range cl.Members {
-					ms[i] = seam.NodeID(m)
+				eff := cl.EffectiveNodes()
+				nodes := make([]place.Node, len(eff))
+				for i, e := range eff {
+					nodes[i] = place.Node{ID: seam.NodeID(e.ID), Host: e.Host, Zone: e.Zone}
 				}
-				return place.Layout{Version: cl.Version, PartitionCount: cl.PartitionCount, Members: ms}, true
+				return place.Layout{Version: cl.Version, PartitionCount: cl.PartitionCount, Members: nodes}, true
 			},
 		})
 		built <- err
@@ -254,17 +254,29 @@ func (n *Node) Stop() {
 func (n *Node) Addr() string     { return n.transport.Addr() }
 func (n *Node) JoinAddr() string { return n.joinLn.Addr().String() }
 
-// members snapshots membership and leadership from the loop.
+// members snapshots membership and leadership from the loop, labeling each
+// member with its failure-domain host/zone from the replicated layout (so
+// `cluster status` reports the same labels placement uses).
 func (n *Node) members() []Member {
 	done := make(chan []Member, 1)
 	n.loop.Post(func() {
 		lead, _ := n.raft.Leader()
+		labels := map[string]meta.LayoutNode{}
+		if cl, ok := n.raft.Store().ClusterLayout(); ok {
+			for _, e := range cl.EffectiveNodes() {
+				labels[e.ID] = e
+			}
+		}
 		var ms []Member
 		for _, m := range n.raft.Members() {
-			ms = append(ms, Member{
+			mem := Member{
 				RaftID: m.ID, NodeID: string(m.Addr), Dial: m.Dial,
 				Learner: m.Learner, Leader: m.ID == lead,
-			})
+			}
+			if lbl, ok := labels[string(m.Addr)]; ok {
+				mem.Host, mem.Zone = lbl.Host, lbl.Zone
+			}
+			ms = append(ms, mem)
 		}
 		done <- ms
 	})
@@ -298,27 +310,48 @@ func (n *Node) syncPeers() {
 	}
 }
 
-// reconcileLayout advances the stored cluster layout (ADR-0028) toward the
-// current Raft membership. Runs on the loop. Every node may call it freely:
-// Propose is leader-gated and the apply is a compare-and-set on the layout
-// version, so a non-leader or a stale generation is an ignored outcome, and
-// a layout already matching membership proposes nothing. Members are sorted
-// so the proposal is byte-identical whichever leader composes it — placement
-// ranks by hash, so the order in the record never affects where shards land.
+// reconcileLayout advances the stored cluster layout (ADR-0028, ADR-0016)
+// toward the current Raft membership, labeling each member with its
+// failure-domain host/zone from the issuer's registry. Runs on the loop.
+// Every node may call it freely: Propose is leader-gated and the apply is a
+// compare-and-set on the layout version, so a non-leader or a stale
+// generation is an ignored outcome, and a layout already matching membership
+// proposes nothing.
+//
+// The completeness guard is the safety rule: if this node does not know a
+// member's labels — only the issuer accumulates the full registry — it
+// proposes nothing rather than compose a layout with default labels, because
+// a layout whose labels degraded would move placement and mislocate existing
+// shards. The issuer (the init node, which leads while joins happen) has the
+// full registry; other leaders simply hold the last good layout. Nodes are
+// sorted so the proposal is byte-identical whichever leader composes it —
+// placement ranks by hash, so the record order never affects placement.
 func (n *Node) reconcileLayout() {
 	if n.raft == nil {
 		return
 	}
-	desired := make([]string, 0, 8)
+	n.issueMu.Lock()
+	labels := make(map[string]meta.LayoutNode, len(n.cfg.NodeLabels))
+	for _, m := range n.cfg.NodeLabels {
+		labels[m.NodeID] = meta.LayoutNode{ID: m.NodeID, Host: m.Host, Zone: m.Zone}
+	}
+	n.issueMu.Unlock()
+
+	var desired []meta.LayoutNode
 	for _, m := range n.raft.Members() {
-		desired = append(desired, string(m.Addr))
+		lbl, known := labels[string(m.Addr)]
+		if !known {
+			return // labels incomplete — hold the existing layout (see above)
+		}
+		desired = append(desired, lbl)
 	}
 	if len(desired) == 0 {
 		return
 	}
-	sort.Strings(desired)
+	slices.SortFunc(desired, func(a, b meta.LayoutNode) int { return strings.Compare(a.ID, b.ID) })
+
 	cur, ok := n.raft.Store().ClusterLayout()
-	if ok && slices.Equal(cur.Members, desired) {
+	if ok && slices.Equal(cur.EffectiveNodes(), desired) {
 		return // already current
 	}
 	next := uint64(1)
@@ -331,8 +364,20 @@ func (n *Node) reconcileLayout() {
 		ProposedAtUnixMS: n.clock.Now().UnixMilli(),
 		Version:          next,
 		PartitionCount:   pc,
-		Members:          desired,
+		Nodes:            desired,
 	}, func(any, error) {}) // stale / not-leader outcomes are benign
+}
+
+// upsertLabel records a member's labels by node ID, replacing any prior entry
+// so a re-join with changed labels takes effect.
+func upsertLabel(labels []Member, m Member) []Member {
+	for i := range labels {
+		if labels[i].NodeID == m.NodeID {
+			labels[i] = m
+			return labels
+		}
+	}
+	return append(labels, m)
 }
 
 func (n *Node) acceptLoop() {
@@ -421,9 +466,20 @@ func (n *Node) handleJoin(payload []byte) joinOutcome {
 	}
 
 	// Allocate the Raft ID durably before handing it out: a crash between
-	// the two must waste an ID, never reuse one.
+	// the two must waste an ID, never reuse one. Record the joiner's
+	// failure-domain labels in the same durable write (ADR-0016): the issuer
+	// is the one place every member's host/zone is known, and the layout
+	// reconcile reads this registry to compose a labeled layout.
 	raftID := n.cfg.NextRaftID
 	n.cfg.NextRaftID++
+	host, zone := req.Host, req.Zone
+	if host == "" {
+		host = req.NodeID
+	}
+	if zone == "" {
+		zone = host
+	}
+	n.cfg.NodeLabels = upsertLabel(n.cfg.NodeLabels, Member{NodeID: req.NodeID, Host: host, Zone: zone})
 	if err := saveConfig(n.dir, n.cfg); err != nil {
 		return refuse("recording the new member: %v", err)
 	}

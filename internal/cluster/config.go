@@ -26,10 +26,17 @@ import (
 //	  bool join = 7;             // this node joined; it never bootstraps
 //	  repeated Member members = 8;  // the address book as of init/join
 //	  uint64 next_raft_id = 9;   // issuance counter; init node only
+//	  string host = 10;          // this node's machine identity (ADR-0016)
+//	  string zone = 11;          // this node's failure-domain label
+//	  repeated Member node_labels = 12;  // issuer's host/zone registry, by node ID
 //	}
 const configVersion = 1
 
-// NodeConfig is a node's durable cluster identity.
+// NodeConfig is a node's durable cluster identity. Host and Zone are this
+// node's own failure-domain labels (ADR-0016). NodeLabels is the issuer's
+// growing registry of every member's labels (node ID → host/zone), recorded
+// as nodes join — the source the layout reconcile reads to compose a labeled
+// layout. Only the issuer (the init node, in v0.2/v0.3) accumulates it.
 type NodeConfig struct {
 	Cluster     string
 	NodeID      string
@@ -39,6 +46,9 @@ type NodeConfig struct {
 	Join        bool
 	Members     []Member
 	NextRaftID  uint64
+	Host        string
+	Zone        string
+	NodeLabels  []Member
 }
 
 // Dir is the cluster directory under a data directory.
@@ -63,7 +73,13 @@ func encodeConfig(c NodeConfig) []byte {
 	for _, m := range c.Members {
 		b = putBytes(b, 8, encodeMemberMsg(m))
 	}
-	return putUint(b, 9, c.NextRaftID)
+	b = putUint(b, 9, c.NextRaftID)
+	b = putString(b, 10, c.Host)
+	b = putString(b, 11, c.Zone)
+	for _, m := range c.NodeLabels {
+		b = putBytes(b, 12, encodeMemberMsg(m))
+	}
+	return b
 }
 
 func decodeConfig(buf []byte) (NodeConfig, error) {
@@ -90,6 +106,16 @@ func decodeConfig(buf []byte) (NodeConfig, error) {
 			c.Members = append(c.Members, m)
 		case 9:
 			c.NextRaftID = f.u
+		case 10:
+			c.Host = string(f.b)
+		case 11:
+			c.Zone = string(f.b)
+		case 12:
+			m, err := decodeMemberMsg(f.b)
+			if err != nil {
+				return err
+			}
+			c.NodeLabels = append(c.NodeLabels, m)
 		}
 		return nil
 	})

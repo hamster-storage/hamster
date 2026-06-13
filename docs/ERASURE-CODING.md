@@ -120,7 +120,7 @@ Many nodes per machine is also why Raft membership does not mean Raft *voting*: 
 With several nodes per machine, "never two shards on one node" is no longer enough — placement could stack an object's shards on one server's disks, and a server loss would exceed the budget. So nodes carry two labels ([ADR-0016](adr/0016-failure-domain-hierarchy.md)):
 
 - **`host`** — detected automatically (machine identity); the five processes on one OVH box share it with zero configuration.
-- **`zone`** — an operator label for the domain above the machine, defaulting to the host. Set it to whatever a correlated failure means in your world: an AWS availability zone (`--zone us-east-1a` — note AZs, like `us-east-1a`/`1b`/`1c`, not regions like `us-east-1`), a rack, a room.
+- **`zone`** — an operator label for the domain above the machine, defaulting to the host. Set it with `-zone` at `cluster init`/`join`, to whatever a correlated failure means in your world: an AWS availability zone (`-zone us-east-1a` — note AZs, like `us-east-1a`/`1b`/`1c`, not regions like `us-east-1`), a rack, a room.
 
 The hard invariant stays node-level — never two shards of one object on the same node, always enforceable. Above it, placement *spreads*: shards distributed as evenly as possible across zones, then hosts, then nodes, and `cluster status` reports the achieved tolerance at each level. Three servers × five disks at `4+2` places two shards per server: any whole server can die (exactly `m=2` shards per object) with everything readable, and any two disks anywhere can die in a healthy cluster. A single-box deployment has one host and one zone — fine, and *stated* in status rather than hidden.
 

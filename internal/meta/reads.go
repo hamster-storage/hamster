@@ -42,6 +42,7 @@ func (s *Store) ClusterLayout() (ClusterLayout, bool) {
 	}
 	l := v.(ClusterLayout)
 	l.Members = slices.Clone(l.Members)
+	l.Nodes = slices.Clone(l.Nodes)
 	return l, true
 }
 

@@ -236,6 +236,17 @@ type PartRecord struct {
 	unknown []byte
 }
 
+// LayoutNode is one member of a ClusterLayout with its failure-domain
+// labels (ADR-0016): the node ID, its host (machine identity — processes on
+// one box share it), and its zone (the domain above the machine, an AZ or a
+// rack, defaulting to the host). Placement spreads shards across zones, then
+// hosts, then nodes. Strings, so meta stays free of the seam.
+type LayoutNode struct {
+	ID   string
+	Host string
+	Zone string
+}
+
 // ClusterLayout is the singleton row under s/layout — the replicated,
 // versioned placement basis (ADR-0004, ADR-0028). It names the ordered
 // member set that the placement function ranks over, so every node and
@@ -248,13 +259,34 @@ type PartRecord struct {
 // changes a compare-and-set and gives a future rebalance (v0.4) the old→new
 // pair it needs to track a migration. PartitionCount is the cluster
 // constant (ADR-0004: fixed at creation, never resized) carried so the
-// record is self-contained. Members are raw node-ID strings so this package
-// imports nothing of the seam; the cluster layer maps them to seam.NodeID.
+// record is self-contained.
+//
+// Nodes (field 5, ADR-0016) is the labeled member set placement spreads
+// over. Members (field 4) is the original unlabeled form from v0.4 pass 1,
+// kept for decode of older data; EffectiveNodes resolves whichever is
+// present. New writers populate Nodes.
 type ClusterLayout struct {
 	FormatVersion  uint32
 	Version        uint64
 	PartitionCount uint32
 	Members        []string
+	Nodes          []LayoutNode
 
 	unknown []byte
+}
+
+// EffectiveNodes returns the layout's labeled member set: Nodes when present
+// (current writers), else the legacy Members IDs with host and zone
+// defaulted to the ID — so a pass-1 layout (or any unlabeled one) reads as a
+// cluster where every node is its own host and zone, which spreads exactly
+// as the bare rendezvous ranking did.
+func (l ClusterLayout) EffectiveNodes() []LayoutNode {
+	if len(l.Nodes) > 0 {
+		return l.Nodes
+	}
+	out := make([]LayoutNode, len(l.Members))
+	for i, id := range l.Members {
+		out[i] = LayoutNode{ID: id, Host: id, Zone: id}
+	}
+	return out
 }
