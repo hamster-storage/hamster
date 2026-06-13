@@ -37,7 +37,7 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 |---|---|---|
 | [v0.1](https://github.com/hamster-storage/hamster/releases/tag/v0.1.0) | <ul><li>Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with <code>aws</code>, <code>rclone</code>, <code>restic</code>, <code>s3cmd</code>)</li><li>Durable single-node store with streaming uploads</li></ul> | ✅ |
 | [v0.2](https://github.com/hamster-storage/hamster/releases/tag/v0.2.0) | Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | ✅ |
-| v0.3 | Erasure-coded durability with self-healing repair | planned |
+| [v0.3](https://github.com/hamster-storage/hamster/releases/tag/v0.3.0) | Erasure-coded durability with self-healing repair, the S3 endpoint served from the cluster | ✅ |
 | v0.4 | Partitioned placement and online rebalancing | planned |
 | v0.5 | Object versioning | planned |
 | v0.6 | Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned |
@@ -66,32 +66,45 @@ aws --endpoint-url http://127.0.0.1:9000 s3 cp video.mp4 s3://stash/
 
 ## Clients
 
-`aws s3`, `rclone`, `restic`, and `s3cmd` work too — a [compatibility suite](test/compat/) runs all four against every change. The S3 server is a single durable node for now (this is the dev preview: real workloads should wait for erasure coding); it joins the cluster below when the data path can replicate (v0.3).
+`aws s3`, `rclone`, `restic`, and `s3cmd` work too — a [compatibility suite](test/compat/) runs all four against every change. `hamster serve` is a single durable node, the simplest way in; the [cluster below](#cluster-preview) now serves the same S3 API with objects erasure-coded across its nodes (v0.3). Still a dev preview either way — don't trust real data to it yet.
 
 ## Cluster preview
 
-v0.2 ships the metadata cluster: Raft-replicated state, mutual TLS between nodes with zero TLS configuration, and single-use join tokens. It runs alongside `hamster serve` as a preview — the S3 endpoint plugs into it in v0.3, when erasure coding gives objects a replicated home too.
+The cluster is Raft-replicated metadata (v0.2) plus an erasure-coded data path (v0.3): mutual TLS between nodes with zero TLS configuration, single-use join tokens, and — with `-s3` — the full S3 API on every node, objects spread `k+m` across the cluster and reconstructed from any `k`. Writes commit on the Raft leader for now (a non-leader answers `503` and clients retry); multipart and server-side copy join this path in a later release.
 
-Three terminals:
+Three terminals, all sharing the credentials the S3 API will accept:
 
 ```sh
-# terminal 1 — found the cluster
+# in every terminal — the keys each node's S3 endpoint accepts (-s3 requires them)
+export HAMSTER_ACCESS_KEY_ID=hamster HAMSTER_SECRET_ACCESS_KEY=keep-this-one-secret
+
+# terminal 1 — found the cluster, serve S3 on :9000
 hamster cluster init -data-dir ./n1 -node n1 \
   -listen-cluster 127.0.0.1:7946 -listen-join 127.0.0.1:7947
-hamster cluster run -data-dir ./n1
+hamster cluster run -data-dir ./n1 -s3 127.0.0.1:9000
 
-# terminal 2 — mint a single-use token and join in one command
+# terminal 2 — mint a single-use token and join in one command, serve S3 on :9001
 TOKEN=$(hamster cluster token -data-dir ./n1)
 hamster cluster run -data-dir ./n2 -node n2 \
-  -listen-cluster 127.0.0.1:7956 -listen-join 127.0.0.1:7957 -token "$TOKEN"
+  -listen-cluster 127.0.0.1:7956 -listen-join 127.0.0.1:7957 -token "$TOKEN" -s3 127.0.0.1:9001
 
-# terminal 3 — same again
+# terminal 3 — same again, serve S3 on :9002
 TOKEN=$(hamster cluster token -data-dir ./n1)
 hamster cluster run -data-dir ./n3 -node n3 \
-  -listen-cluster 127.0.0.1:7966 -listen-join 127.0.0.1:7967 -token "$TOKEN"
+  -listen-cluster 127.0.0.1:7966 -listen-join 127.0.0.1:7967 -token "$TOKEN" -s3 127.0.0.1:9002
 ```
 
-Then watch it: `hamster cluster status -data-dir ./n1` shows every member and who leads. Kill the leader and ask again — the survivors elect a new one; restart it and it rejoins from its own disk. Nodes join as learners and are promoted to voters automatically (capped at five voters no matter how large the cluster grows). If a majority of voters is ever permanently lost, `hamster cluster recover` rebuilds a cluster from a survivor — read its warning first.
+Watch it: `hamster cluster status -data-dir ./n1` shows every member and who leads. Nodes join as learners and are promoted to voters automatically (capped at five voters no matter how large the cluster grows). If a majority of voters is ever permanently lost, `hamster cluster recover` rebuilds a cluster from a survivor — read its warning first.
+
+Now it stores objects, not just metadata. Point any S3 client at a node and the data is erasure-coded across all three:
+
+```sh
+export AWS_ACCESS_KEY_ID=hamster AWS_SECRET_ACCESS_KEY=keep-this-one-secret
+aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://vault
+aws --endpoint-url http://127.0.0.1:9000 s3 cp video.mp4 s3://vault/
+```
+
+Kill a node and the object still reads — reconstructed from the survivors. Writes commit on the leader's node in v0.3, so if one answers `503 SlowDown`, retry against another.
 
 ## Roadmap
 
@@ -110,5 +123,6 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 High level only — details live in each [release](https://github.com/hamster-storage/hamster/releases). On disk and on wire formats may change between v0 releases.
 
+- **v0.3** (June 2026) — Erasure coding and self-healing repair. Objects are erasure-coded into `k+m` self-describing shards spread across distinct nodes and reconstructed from any `k`; only the small metadata commit ever touches the Raft log. `hamster cluster run -s3` serves the full S3 API from the cluster, with the write-ack rule enforced mechanically (all `k+m` durable on the healthy path, a hard floor of `k+1`, `SlowDown` below it). A repair sweep scrubs every shard against its replicated checksum and rebuilds missing or bit-rotted shards from any `k` verified survivors, without anyone reading the object first. The whole data path runs under the deterministic simulation harness, and a six-node e2e kills nodes mid-workload over real sockets. Leader-only writes; multipart and server-side copy land on this path later.
 - **v0.2** (June 2026) — Clustering foundations. The Raft-replicated metadata plane as a runnable preview: `hamster cluster` (init, token, join, run, status, recover), mutual TLS between nodes with no plaintext mode and zero TLS configuration, single-use CA-pinned join tokens, automatic learner-to-voter promotion under a five-voter cap, crash-safe log compaction with streamed snapshot catch-up, and disaster recovery from a surviving node. Deterministic election timing makes the whole consensus layer simulation-testable, and an e2e suite drives the real binary through the full lifecycle. S3 serving stays single-node until the data path replicates (v0.3).
 - **v0.1** (June 2026) — The single-node store. Core S3 API: objects, listings, multipart uploads, server-side copies, batch deletes, presigned URLs; full SigV4 authentication including `aws-chunked` streaming; path-style and virtual-hosted addressing; MD5 ETags, exactly like S3. Uploads stream through the write buffer (a 1 GiB PUT needs ~12 MB of server memory). Durable single-node storage: BadgerDB metadata, versioned protobuf formats with golden-pinned encodings. Verified by a third-party client compatibility suite (`aws` CLI, rclone, restic, s3cmd) and a deterministic simulation harness that crash-tests the store against a reference model. Dev preview — single node, not production ready.
