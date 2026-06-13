@@ -37,6 +37,8 @@ Each v0 minor release carries one headline feature, in roughly this order. The o
 
 The simulation harness is not a milestone of its own: it ships in v0.1 and grows with every release, because each new feature must arrive with its failure schedules.
 
+**Not yet scheduled:** in-place promotion of a single-node `serve` deployment into a cluster. The two are different data paths — `serve` stores single-node blobs, a cluster stores erasure-coded shards — so there is no in-place conversion today. The recommended path for anyone who may grow is to start with `cluster init` (a one-node cluster is cluster-ready and grows by adding nodes). A `serve` → cluster migration is a recognized future convenience, not committed to a minor release.
+
 ## v1.0 — the compatibility promise
 
 v1.0 is the line where Hamster asks to be trusted:
