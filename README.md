@@ -108,15 +108,15 @@ Kill a node and the object still reads — reconstructed from the survivors. Wri
 
 ## Deployment
 
-There are two ways to run Hamster today, and they are separate paths — pick by whether you ever expect to grow.
+There are two ways to run Hamster today, and they are separate paths. Pick by what you are doing: to **try Hamster** or run a workload that fits on one machine, a single `serve` node is the fastest start; for **anything you need to keep durable across machines — and certainly for compliance workloads that use versioning or object lock — start with a cluster**, where mutual TLS is configured for you from the first node. A single `serve` node can be migrated into a cluster later (below), but with caveats around versioning and object lock that make starting clustered the better choice the moment those features matter.
 
-**A single node — the simplest thing.** `hamster serve` is a standalone S3 endpoint backed by one node's disk (the [Quick start](#quick-start) above). No cluster machinery, no inter-node TLS, no certificate authority — nothing to configure. It is the right choice for a laptop, a homelab box, or any workload that fits on one machine and does not need to scale out. The trade-off: its durability is one disk's durability, and it cannot become a cluster in place (see below).
+**A single node — the simplest thing.** `hamster serve` is a standalone S3 endpoint backed by one node's disk (the [Quick start](#quick-start) above). No cluster machinery, no Raft, no inter-node TLS, no certificate authority — nothing to configure. It is the right choice for a laptop, a homelab box, or any workload that fits on one machine and does not need to scale out. Note it is genuinely *not* a cluster of one — for a single node on the path that can grow, use `cluster init` instead. The trade-off: its durability is one disk's durability, and it cannot become a cluster in place (see below).
 
 ```sh
 hamster serve -data-dir ./data            # one node, S3 on :9000
 ```
 
-**A cluster — durable across machines, and able to grow.** `hamster cluster init` founds a cluster; `cluster init` mints the cluster CA once, automatically, and every node you add reuses it (the [Cluster preview](#cluster-preview) above shows three). Objects are erasure-coded `k+m` across the nodes and reconstructed from any `k`, so you can lose drives or whole machines without losing data. A one-node cluster is a valid starting point — it serves S3 just like `serve`, but on the path that scales:
+**A cluster — durable across machines, and able to grow.** `hamster cluster init` founds a cluster; `cluster init` mints the cluster CA once, automatically, and every node you add reuses it (the [Cluster preview](#cluster-preview) above shows three). Objects are erasure-coded `k+m` across the nodes and reconstructed from any `k`, so you can lose drives or whole machines without losing data. A one-node cluster is a valid starting point — it runs Raft and elects itself leader (a quorum of one), serving S3 just like `serve` but on the path that scales and can admit peers later:
 
 ```sh
 hamster cluster init -data-dir ./n1 -node n1 \
@@ -127,14 +127,20 @@ hamster cluster run -data-dir ./n1 -s3 127.0.0.1:9000    # one-node cluster, S3 
 
 **Growing a cluster (one, two, or more nodes).** Any deployment that is *already a cluster* grows the same way, with no data migration: mint a join token, run the new node with `-token`, and it joins as a learner and is promoted to voter automatically (up to a five-voter cap). You are adding a member, not moving data, so going from two nodes to three is just another join. (Two nodes is itself a cluster, and an awkward one — Raft needs both of two voters for a quorum, so it tolerates no failures; three is the first size that survives losing one. That is a reason to reach three, not a different way of getting there.) Existing objects climbing from a single-node profile up to a wider `k+m` as the cluster gains capacity is the v0.4 placement work (in progress).
 
-**Growing a single `serve` node into a cluster.** This is the one case with no in-place path: `serve` stores single-node blobs while a cluster stores erasure-coded shards, so there is nothing to promote — instead you *migrate the data*. Stand up the new cluster alongside the old node, then move objects from one S3 endpoint to the other, deleting each from the source once it is durably on the destination: you never need room for two full copies, and an interrupted run resumes where it left off. Both ends speak S3, so for ordinary objects this works today with `rclone move` (or any S3 sync-then-delete) — no Hamster-specific tool required:
+**Growing a single `serve` node into a cluster (the homelab path).** This is the one growth with no in-place path, and it is meant for the person who started on a single `serve` node to try Hamster and now wants real durability across machines — not for compliance workloads, which should start clustered (above). `serve` stores single-node blobs while a cluster stores erasure-coded shards, so there is nothing to promote — instead you *migrate the data*. Stand up the new cluster alongside the old node, then move objects from one S3 endpoint to the other, deleting each from the source once it is durably on the destination: you never need room for two full copies, and an interrupted run resumes where it left off. Both ends speak S3, so for ordinary objects this works today with `rclone move` (or any S3 sync-then-delete) — no Hamster-specific tool required:
 
 ```sh
 # old serve node and new cluster configured as two rclone remotes
 rclone move s3old:bucket s3new:bucket   # copies, then deletes each object from the source as it lands
 ```
 
-Two honest, forward-looking caveats: a generic S3 copy moves *current object data only* — it does not carry version history (v0.5) or object-lock/WORM state (v0.6) — and a COMPLIANCE-locked object **cannot** be deleted from the source until its retention expires (that lock has no override, by design), so locked data must be copied and left in place, not moved. A native, lock- and version-aware migration tool is the future answer for compliance data. Until then, **if you might ever grow beyond one machine, start with `cluster init` rather than `serve`** — a one-node cluster is cluster-ready from the first node and skips the migration entirely.
+Know plainly what a generic S3 copy does and does not carry:
+
+- **Current object data — yes.** Every object's latest version moves intact.
+- **Version history — no (lands v0.5).** Only the current version of each object is copied; older versions and delete markers are left behind on the source.
+- **Object-lock / WORM state — no (lands v0.6).** Retention settings and legal holds do not transfer. And a COMPLIANCE-locked object **cannot** be deleted from the source until its retention expires — that lock has no override by design — so such data can only be copied and left in place, never moved.
+
+The takeaway, stated plainly: **if you keep versioned or locked data, do not plan to migrate — start with a cluster.** This path is for evaluation and homelab growth, where the live set of objects is what matters and history is not. A native, lock- and version-aware migration tool is a possible future convenience, not a reason to defer starting clustered when those features matter.
 
 ## Roadmap
 
