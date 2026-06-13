@@ -56,10 +56,9 @@ func newEnv(t *testing.T) *env {
 			}
 			return "", false
 		},
-		Store: meta.NewStore(),
-		Loop:  loop,
 		Clock: fixedClock{now: clientNow},
-		Rand:  rand.New(rand.NewPCG(42, 0)),
+		Meta: gateway.NewLoopMetadata(meta.NewStore(), loop,
+			fixedClock{now: clientNow}, rand.New(rand.NewPCG(42, 0))),
 		Blobs: blob.NewStore(disk),
 	})
 	srv := httptest.NewServer(g)

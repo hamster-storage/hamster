@@ -24,15 +24,10 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		return
 	}
 
-	// Mint on the loop first — the rng is loop-owned state, and the blob
-	// needs its address before the body can stream to disk.
-	var vid meta.VersionID
-	var atMS int64
-	g.onLoop(func() {
-		now := g.cfg.Clock.Now()
-		atMS = now.UnixMilli()
-		vid = meta.NewVersionID(now, g.cfg.Rand)
-	})
+	// Mint first — the blob needs its address before the body can stream
+	// to disk.
+	vid, now := g.cfg.Meta.MintVersionID()
+	atMS := now.UnixMilli()
 
 	size, etag, checksum, err := g.streamBody(r, id, vid)
 	if err != nil {
@@ -46,30 +41,25 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		return
 	}
 
-	var applyErr error
-	var replaced []meta.VersionID
-	g.onLoop(func() {
-		replaced = g.replacedNullDataIDs(bucket, key)
-		// The result's possibly-bumped VersionID becomes the
-		// x-amz-version-id header when versioning is exposed (v0.5).
-		_, applyErr = g.cfg.Store.ApplyPutObject(meta.PutObject{
-			ProposedAtUnixMS: atMS,
-			Bucket:           bucket,
-			Key:              key,
-			VersionID:        vid,
-			Size:             size,
-			ETag:             etag,
-			ContentType:      r.Header.Get("Content-Type"),
-			UserMetadata:     userMetadata(r.Header),
-			ObjectChecksum:   checksum,
-		})
+	// The result's possibly-bumped VersionID becomes the
+	// x-amz-version-id header when versioning is exposed (v0.5).
+	res, applyErr := g.cfg.Meta.ApplyPutObject(meta.PutObject{
+		ProposedAtUnixMS: atMS,
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        vid,
+		Size:             size,
+		ETag:             etag,
+		ContentType:      r.Header.Get("Content-Type"),
+		UserMetadata:     userMetadata(r.Header),
+		ObjectChecksum:   checksum,
 	})
 	if applyErr != nil {
 		_ = g.cfg.Blobs.Remove(vid) // best effort; otherwise an orphan for GC
 		writeError(w, r, applyErr)
 		return
 	}
-	for _, dataID := range replaced {
+	for _, dataID := range res.ReplacedDataIDs {
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 
@@ -77,42 +67,17 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 	w.WriteHeader(http.StatusOK)
 }
 
-// replacedNullDataIDs captures the data addresses a commit to key on a
-// bucket without versioning enabled is about to displace — the null
-// version's blob, or every part of a multipart null version. Loop-owned
-// state: call only from a posted function, in the same trip as the apply.
-func (g *Gateway) replacedNullDataIDs(bucket, key string) []meta.VersionID {
-	cfg, ok := g.cfg.Store.GetBucket(bucket)
-	if !ok || cfg.Versioning == meta.VersioningEnabled {
-		return nil
-	}
-	for _, v := range g.cfg.Store.ListVersions(bucket, key) {
-		if v.NullVersion && v.Kind == meta.KindObject {
-			return v.DataIDs()
-		}
-	}
-	return nil
-}
-
-// lookupCurrent resolves a key's current version entry on the loop. The
-// returned error is ready for writeError.
+// lookupCurrent resolves a key's current version entry. The returned
+// error is ready for writeError.
 func (g *Gateway) lookupCurrent(bucket, key string) (meta.VersionEntry, error) {
-	var entry meta.VersionEntry
-	var bucketOK, found bool
-	g.onLoop(func() {
-		if _, ok := g.cfg.Store.GetBucket(bucket); !ok {
-			return
-		}
-		bucketOK = true
-		cur, ok := g.cfg.Store.Current(bucket, key)
-		if !ok {
-			return
-		}
-		entry, found = g.cfg.Store.GetVersion(bucket, key, cur.VersionID)
-	})
-	if !bucketOK {
+	if _, ok := g.cfg.Meta.GetBucket(bucket); !ok {
 		return meta.VersionEntry{}, meta.ErrNoSuchBucket
 	}
+	cur, ok := g.cfg.Meta.Current(bucket, key)
+	if !ok {
+		return meta.VersionEntry{}, errNoSuchKey
+	}
+	entry, found := g.cfg.Meta.GetVersion(bucket, key, cur.VersionID)
 	if !found {
 		return meta.VersionEntry{}, errNoSuchKey
 	}
@@ -179,33 +144,19 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 // deleteObject is S3 DeleteObject without a version ID. Idempotent: deleting
 // a missing key is 204, exactly like S3.
 func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	var res meta.DeleteObjectResult
-	var applyErr error
-	var removed []meta.VersionID
-	g.onLoop(func() {
-		now := g.cfg.Clock.Now()
-		// Capture the current version's data addresses: if the delete
-		// removes a row (unversioned bucket), its blobs can be reclaimed.
-		if cur, ok := g.cfg.Store.Current(bucket, key); ok {
-			if e, ok := g.cfg.Store.GetVersion(bucket, key, cur.VersionID); ok {
-				removed = e.DataIDs()
-			}
-		}
-		res, applyErr = g.cfg.Store.ApplyDeleteObject(meta.DeleteObject{
-			ProposedAtUnixMS: now.UnixMilli(),
-			Bucket:           bucket,
-			Key:              key,
-			VersionID:        meta.NewVersionID(now, g.cfg.Rand),
-		})
+	vid, now := g.cfg.Meta.MintVersionID()
+	res, applyErr := g.cfg.Meta.ApplyDeleteObject(meta.DeleteObject{
+		ProposedAtUnixMS: now.UnixMilli(),
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        vid,
 	})
 	if applyErr != nil {
 		writeError(w, r, applyErr)
 		return
 	}
-	if res.Removed {
-		for _, dataID := range removed {
-			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
-		}
+	for _, dataID := range res.RemovedDataIDs {
+		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 	if res.MarkerCreated {
 		w.Header().Set("x-amz-delete-marker", "true")

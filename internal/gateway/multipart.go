@@ -42,19 +42,14 @@ type initiateMultipartUploadResult struct {
 }
 
 func (g *Gateway) createMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	var uid meta.VersionID
-	var applyErr error
-	g.onLoop(func() {
-		now := g.cfg.Clock.Now()
-		uid = meta.NewVersionID(now, g.cfg.Rand)
-		applyErr = g.cfg.Store.ApplyCreateMultipartUpload(meta.CreateMultipartUpload{
-			ProposedAtUnixMS: now.UnixMilli(),
-			Bucket:           bucket,
-			Key:              key,
-			UploadID:         uid,
-			ContentType:      r.Header.Get("Content-Type"),
-			UserMetadata:     userMetadata(r.Header),
-		})
+	uid, now := g.cfg.Meta.MintVersionID()
+	applyErr := g.cfg.Meta.ApplyCreateMultipartUpload(meta.CreateMultipartUpload{
+		ProposedAtUnixMS: now.UnixMilli(),
+		Bucket:           bucket,
+		Key:              key,
+		UploadID:         uid,
+		ContentType:      r.Header.Get("Content-Type"),
+		UserMetadata:     userMetadata(r.Header),
 	})
 	if applyErr != nil {
 		writeError(w, r, applyErr)
@@ -82,22 +77,15 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 		return
 	}
 
-	// Check the upload and mint the data ID on the loop, before paying for
-	// the blob write — a part aimed at a nonexistent upload writes nothing.
-	var exists bool
-	var dataID meta.VersionID
-	var atMS int64
-	g.onLoop(func() {
-		now := g.cfg.Clock.Now()
-		atMS = now.UnixMilli()
-		if _, exists = g.cfg.Store.GetUpload(bucket, key, uid); exists {
-			dataID = meta.NewVersionID(now, g.cfg.Rand)
-		}
-	})
-	if !exists {
+	// Check the upload before paying for the blob write — a part aimed at
+	// a nonexistent upload writes nothing. The authoritative check is the
+	// apply; this one just saves the work.
+	if _, exists := g.cfg.Meta.GetUpload(bucket, key, uid); !exists {
 		writeError(w, r, meta.ErrNoSuchUpload)
 		return
 	}
+	dataID, now := g.cfg.Meta.MintVersionID()
+	atMS := now.UnixMilli()
 
 	size, etag, checksum, err := g.streamBody(r, id, dataID)
 	if err != nil {
@@ -109,20 +97,16 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 		return
 	}
 
-	var res meta.UploadPartResult
-	var applyErr error
-	g.onLoop(func() {
-		res, applyErr = g.cfg.Store.ApplyUploadPart(meta.UploadPart{
-			ProposedAtUnixMS: atMS,
-			Bucket:           bucket,
-			Key:              key,
-			UploadID:         uid,
-			PartNumber:       partNumber,
-			DataID:           dataID,
-			Size:             size,
-			ETag:             etag,
-			Checksum:         checksum,
-		})
+	res, applyErr := g.cfg.Meta.ApplyUploadPart(meta.UploadPart{
+		ProposedAtUnixMS: atMS,
+		Bucket:           bucket,
+		Key:              key,
+		UploadID:         uid,
+		PartNumber:       partNumber,
+		DataID:           dataID,
+		Size:             size,
+		ETag:             etag,
+		Checksum:         checksum,
 	})
 	if applyErr != nil {
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
@@ -191,30 +175,22 @@ func (g *Gateway) completeMultipartUpload(w http.ResponseWriter, r *http.Request
 	// part MD5s, rendered hex plus "-N" — what every sync tool verifies.
 	composite := md5.Sum(md5s)
 
-	var res meta.CompleteResult
-	var applyErr error
-	var replaced []meta.VersionID
-	g.onLoop(func() {
-		now := g.cfg.Clock.Now()
-		replaced = g.replacedNullDataIDs(bucket, key)
-		res, applyErr = g.cfg.Store.ApplyCompleteMultipartUpload(meta.CompleteMultipartUpload{
-			ProposedAtUnixMS: now.UnixMilli(),
-			Bucket:           bucket,
-			Key:              key,
-			UploadID:         uid,
-			VersionID:        meta.NewVersionID(now, g.cfg.Rand),
-			ETag:             composite[:],
-			Parts:            parts,
-		})
+	vid, now := g.cfg.Meta.MintVersionID()
+	res, applyErr := g.cfg.Meta.ApplyCompleteMultipartUpload(meta.CompleteMultipartUpload{
+		ProposedAtUnixMS: now.UnixMilli(),
+		Bucket:           bucket,
+		Key:              key,
+		UploadID:         uid,
+		VersionID:        vid,
+		ETag:             composite[:],
+		Parts:            parts,
 	})
 	if applyErr != nil {
 		writeError(w, r, applyErr)
 		return
 	}
+	// DiscardedDataIDs carries unused parts and any replaced null version.
 	for _, dataID := range res.DiscardedDataIDs {
-		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
-	}
-	for _, dataID := range replaced {
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 	writeXML(w, http.StatusOK, completeMultipartUploadResult{
@@ -227,15 +203,11 @@ func (g *Gateway) completeMultipartUpload(w http.ResponseWriter, r *http.Request
 }
 
 func (g *Gateway) abortMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string, uid meta.VersionID) {
-	var res meta.AbortResult
-	var applyErr error
-	g.onLoop(func() {
-		res, applyErr = g.cfg.Store.ApplyAbortMultipartUpload(meta.AbortMultipartUpload{
-			ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
-			Bucket:           bucket,
-			Key:              key,
-			UploadID:         uid,
-		})
+	res, applyErr := g.cfg.Meta.ApplyAbortMultipartUpload(meta.AbortMultipartUpload{
+		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
+		Bucket:           bucket,
+		Key:              key,
+		UploadID:         uid,
 	})
 	if applyErr != nil {
 		writeError(w, r, applyErr)
@@ -287,11 +259,7 @@ func (g *Gateway) listParts(w http.ResponseWriter, r *http.Request, bucket, key 
 		marker = min(n, meta.MaxPartNumber)
 	}
 
-	var parts []meta.PartRecord
-	var exists bool
-	g.onLoop(func() {
-		parts, exists = g.cfg.Store.ListUploadParts(bucket, key, uid, uint32(marker), maxParts+1)
-	})
+	parts, exists := g.cfg.Meta.ListUploadParts(bucket, key, uid, uint32(marker), maxParts+1)
 	if !exists {
 		writeError(w, r, meta.ErrNoSuchUpload)
 		return
@@ -376,19 +344,11 @@ func (g *Gateway) listMultipartUploads(w http.ResponseWriter, r *http.Request, b
 		}
 	}
 
-	var ls []meta.UploadListing
-	var bucketOK bool
-	g.onLoop(func() {
-		if _, ok := g.cfg.Store.GetBucket(bucket); !ok {
-			return
-		}
-		bucketOK = true
-		ls = g.cfg.Store.ListUploads(bucket, prefix, keyMarker, uidMarker, maxUploads+1)
-	})
-	if !bucketOK {
+	if _, ok := g.cfg.Meta.GetBucket(bucket); !ok {
 		writeError(w, r, meta.ErrNoSuchBucket)
 		return
 	}
+	ls := g.cfg.Meta.ListUploads(bucket, prefix, keyMarker, uidMarker, maxUploads+1)
 	truncated := len(ls) > maxUploads
 	if truncated {
 		ls = ls[:maxUploads]

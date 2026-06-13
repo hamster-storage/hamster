@@ -229,15 +229,18 @@ func (s *Store) ApplyCompleteMultipartUpload(p CompleteMultipartUpload) (res Com
 		NullVersion:   cfg.Versioning != VersioningEnabled,
 	}.clone()
 
+	var replaced []VersionID
 	if entry.NullVersion {
-		if err := s.removeNullVersion(p.Bucket, p.Key, p.ProposedAtUnixMS); err != nil {
+		var err error
+		if replaced, err = s.removeNullVersion(p.Bucket, p.Key, p.ProposedAtUnixMS); err != nil {
 			return CompleteResult{}, err
 		}
 	}
 	s.kv.set(versionRowKey(p.Bucket, p.Key, vid), entry)
 	s.kv.set(currentRowKey(p.Bucket, p.Key), currentRecordFor(entry))
 
-	res = CompleteResult{VersionID: vid}
+	// The replaced null version's data is as discarded as an unused part.
+	res = CompleteResult{VersionID: vid, DiscardedDataIDs: replaced}
 	s.kv.delete(uploadRow)
 	for _, pr := range storedParts {
 		if !used[pr.PartNumber] {

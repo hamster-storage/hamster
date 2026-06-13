@@ -31,8 +31,7 @@ type listAllMyBucketsResult struct {
 }
 
 func (g *Gateway) listBuckets(w http.ResponseWriter, r *http.Request) {
-	var configs []meta.BucketConfig
-	g.onLoop(func() { configs = g.cfg.Store.ListBuckets() })
+	configs := g.cfg.Meta.ListBuckets()
 
 	out := listAllMyBucketsResult{Xmlns: s3Xmlns, OwnerID: "hamster"}
 	for _, c := range configs {
@@ -49,12 +48,9 @@ func (g *Gateway) createBucket(w http.ResponseWriter, r *http.Request, bucket st
 		writeError(w, r, errNotImplemented)
 		return
 	}
-	var applyErr error
-	g.onLoop(func() {
-		applyErr = g.cfg.Store.ApplyCreateBucket(meta.CreateBucket{
-			ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
-			Bucket:           bucket,
-		})
+	applyErr := g.cfg.Meta.ApplyCreateBucket(meta.CreateBucket{
+		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
+		Bucket:           bucket,
 	})
 	if applyErr != nil {
 		writeError(w, r, applyErr)
@@ -65,12 +61,9 @@ func (g *Gateway) createBucket(w http.ResponseWriter, r *http.Request, bucket st
 }
 
 func (g *Gateway) deleteBucket(w http.ResponseWriter, r *http.Request, bucket string) {
-	var applyErr error
-	g.onLoop(func() {
-		applyErr = g.cfg.Store.ApplyDeleteBucket(meta.DeleteBucket{
-			ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
-			Bucket:           bucket,
-		})
+	applyErr := g.cfg.Meta.ApplyDeleteBucket(meta.DeleteBucket{
+		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
+		Bucket:           bucket,
 	})
 	if applyErr != nil {
 		writeError(w, r, applyErr)
@@ -80,9 +73,7 @@ func (g *Gateway) deleteBucket(w http.ResponseWriter, r *http.Request, bucket st
 }
 
 func (g *Gateway) headBucket(w http.ResponseWriter, r *http.Request, bucket string) {
-	var ok bool
-	g.onLoop(func() { _, ok = g.cfg.Store.GetBucket(bucket) })
-	if !ok {
+	if _, ok := g.cfg.Meta.GetBucket(bucket); !ok {
 		writeError(w, r, meta.ErrNoSuchBucket)
 		return
 	}
@@ -96,9 +87,7 @@ type locationConstraint struct {
 }
 
 func (g *Gateway) getBucketLocation(w http.ResponseWriter, r *http.Request, bucket string) {
-	var ok bool
-	g.onLoop(func() { _, ok = g.cfg.Store.GetBucket(bucket) })
-	if !ok {
+	if _, ok := g.cfg.Meta.GetBucket(bucket); !ok {
 		writeError(w, r, meta.ErrNoSuchBucket)
 		return
 	}
@@ -127,7 +116,7 @@ const listBatch = 1000
 // stopping at max entries. after is the resume point: a key (exclusive) or
 // a previously emitted common prefix, whose remaining group members are
 // skipped.
-func collectListing(s *meta.Store, bucket, prefix, delimiter, after string, max int) (listing, error) {
+func collectListing(s Metadata, bucket, prefix, delimiter, after string, max int) (listing, error) {
 	if _, ok := s.GetBucket(bucket); !ok {
 		return listing{}, meta.ErrNoSuchBucket
 	}
@@ -228,9 +217,7 @@ func (g *Gateway) listObjectsV2(w http.ResponseWriter, r *http.Request, bucket s
 		after = string(raw)
 	}
 
-	var l listing
-	var err error
-	g.onLoop(func() { l, err = collectListing(g.cfg.Store, bucket, prefix, delimiter, after, maxKeys) })
+	l, err := collectListing(g.cfg.Meta, bucket, prefix, delimiter, after, maxKeys)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -284,9 +271,7 @@ func (g *Gateway) listObjectsV1(w http.ResponseWriter, r *http.Request, bucket s
 		return
 	}
 
-	var l listing
-	var err error
-	g.onLoop(func() { l, err = collectListing(g.cfg.Store, bucket, prefix, delimiter, marker, maxKeys) })
+	l, err := collectListing(g.cfg.Meta, bucket, prefix, delimiter, marker, maxKeys)
 	if err != nil {
 		writeError(w, r, err)
 		return
