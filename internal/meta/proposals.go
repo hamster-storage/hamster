@@ -63,9 +63,12 @@ type PutObject struct {
 	LegalHold         bool
 }
 
-// PutResult reports the committed version ID, after any monotonicity bump.
+// PutResult reports the committed version ID, after any monotonicity bump,
+// and the data addresses the commit displaced (the prior null version of an
+// unversioned or suspended write) — the caller reclaims those.
 type PutResult struct {
-	VersionID VersionID
+	VersionID       VersionID
+	ReplacedDataIDs []VersionID
 }
 
 // DeleteObject is S3 DeleteObject without a version ID: on an unversioned
@@ -84,6 +87,10 @@ type DeleteObjectResult struct {
 	Removed       bool      // an unversioned object row was removed
 	MarkerCreated bool      // a delete marker was inserted
 	MarkerID      VersionID // its ID, after any monotonicity bump
+	// RemovedDataIDs are the data addresses the delete freed — the removed
+	// unversioned row's, or the null version a suspended-mode marker
+	// replaced. The caller reclaims them.
+	RemovedDataIDs []VersionID
 }
 
 // DeleteVersion is S3 DeleteObject with a version ID: it destroys one

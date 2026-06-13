@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/seam"
@@ -57,6 +58,40 @@ type BlobStore interface {
 	Remove(id meta.VersionID) error
 }
 
+// Metadata is the gateway's view of the metadata plane. Implementations
+// own their synchronization — every method is safe to call from request
+// goroutines and returns a consistent read or a committed mutation. The
+// single-node implementation (NewLoopMetadata) posts to the store's event
+// loop; the cluster implementation proposes mutations through Raft and
+// reads from the local replica.
+//
+// Listings page batch by batch, each batch its own consistent read —
+// cross-batch mutations may show, exactly as S3's own paginated listings
+// allow.
+type Metadata interface {
+	// MintVersionID mints a fresh version ID and returns the time it was
+	// minted from — the proposal timestamp for the operation carrying it.
+	MintVersionID() (meta.VersionID, time.Time)
+
+	GetBucket(name string) (meta.BucketConfig, bool)
+	ListBuckets() []meta.BucketConfig
+	Current(bucket, key string) (meta.CurrentRecord, bool)
+	GetVersion(bucket, key string, vid meta.VersionID) (meta.VersionEntry, bool)
+	ListObjects(bucket, prefix, startAfter string, max int) []meta.ObjectListing
+	GetUpload(bucket, key string, uid meta.VersionID) (meta.UploadRecord, bool)
+	ListUploads(bucket, prefix, keyMarker string, uploadMarker meta.VersionID, max int) []meta.UploadListing
+	ListUploadParts(bucket, key string, uid meta.VersionID, afterPart uint32, max int) ([]meta.PartRecord, bool)
+
+	ApplyCreateBucket(meta.CreateBucket) error
+	ApplyDeleteBucket(meta.DeleteBucket) error
+	ApplyPutObject(meta.PutObject) (meta.PutResult, error)
+	ApplyDeleteObject(meta.DeleteObject) (meta.DeleteObjectResult, error)
+	ApplyCreateMultipartUpload(meta.CreateMultipartUpload) error
+	ApplyUploadPart(meta.UploadPart) (meta.UploadPartResult, error)
+	ApplyCompleteMultipartUpload(meta.CompleteMultipartUpload) (meta.CompleteResult, error)
+	ApplyAbortMultipartUpload(meta.AbortMultipartUpload) (meta.AbortResult, error)
+}
+
 // Config carries the gateway's dependencies. All fields are required except
 // Domain.
 type Config struct {
@@ -70,15 +105,11 @@ type Config struct {
 	// Lookup resolves access key IDs to secrets.
 	Lookup sigv4.CredentialLookup
 
-	// Store is the metadata store, owned by Loop: the gateway touches it
-	// only from posted functions.
-	Store *meta.Store
-	// Loop is the event loop that owns Store and Rand.
-	Loop seam.Loop
-	// Clock provides request time for SigV4 validity and version minting.
+	// Clock provides request time for SigV4 validity and proposal
+	// timestamps.
 	Clock seam.Clock
-	// Rand mints version IDs. Owned by Loop, like the store.
-	Rand *rand.Rand
+	// Meta is the metadata plane.
+	Meta Metadata
 	// Blobs is the data path.
 	Blobs BlobStore
 }
@@ -99,14 +130,119 @@ func New(cfg Config) *Gateway {
 	}
 }
 
-// onLoop runs fn on the metadata loop and waits for it to finish.
-func (g *Gateway) onLoop(fn func()) {
+// loopMetadata is the single-node Metadata: a meta.Store and the version
+// rng owned by an event loop, with every call posted and awaited. The
+// loop is the synchronization; the methods themselves are one consistent
+// trip each.
+type loopMetadata struct {
+	store *meta.Store
+	loop  seam.Loop
+	clock seam.Clock
+	rng   *rand.Rand
+}
+
+// NewLoopMetadata wraps a loop-owned store and rng as the gateway's
+// Metadata. The clock is read inside the loop, so minted IDs and their
+// timestamps stay loop-ordered.
+func NewLoopMetadata(store *meta.Store, loop seam.Loop, clock seam.Clock, rng *rand.Rand) Metadata {
+	return &loopMetadata{store: store, loop: loop, clock: clock, rng: rng}
+}
+
+func (l *loopMetadata) on(fn func()) {
 	done := make(chan struct{})
-	g.cfg.Loop.Post(func() {
+	l.loop.Post(func() {
 		defer close(done)
 		fn()
 	})
 	<-done
+}
+
+func (l *loopMetadata) MintVersionID() (vid meta.VersionID, now time.Time) {
+	l.on(func() {
+		now = l.clock.Now()
+		vid = meta.NewVersionID(now, l.rng)
+	})
+	return
+}
+
+func (l *loopMetadata) GetBucket(name string) (cfg meta.BucketConfig, ok bool) {
+	l.on(func() { cfg, ok = l.store.GetBucket(name) })
+	return
+}
+
+func (l *loopMetadata) ListBuckets() (out []meta.BucketConfig) {
+	l.on(func() { out = l.store.ListBuckets() })
+	return
+}
+
+func (l *loopMetadata) Current(bucket, key string) (cur meta.CurrentRecord, ok bool) {
+	l.on(func() { cur, ok = l.store.Current(bucket, key) })
+	return
+}
+
+func (l *loopMetadata) GetVersion(bucket, key string, vid meta.VersionID) (e meta.VersionEntry, ok bool) {
+	l.on(func() { e, ok = l.store.GetVersion(bucket, key, vid) })
+	return
+}
+
+func (l *loopMetadata) ListObjects(bucket, prefix, startAfter string, max int) (out []meta.ObjectListing) {
+	l.on(func() { out = l.store.ListObjects(bucket, prefix, startAfter, max) })
+	return
+}
+
+func (l *loopMetadata) GetUpload(bucket, key string, uid meta.VersionID) (up meta.UploadRecord, ok bool) {
+	l.on(func() { up, ok = l.store.GetUpload(bucket, key, uid) })
+	return
+}
+
+func (l *loopMetadata) ListUploads(bucket, prefix, keyMarker string, uploadMarker meta.VersionID, max int) (out []meta.UploadListing) {
+	l.on(func() { out = l.store.ListUploads(bucket, prefix, keyMarker, uploadMarker, max) })
+	return
+}
+
+func (l *loopMetadata) ListUploadParts(bucket, key string, uid meta.VersionID, afterPart uint32, max int) (parts []meta.PartRecord, ok bool) {
+	l.on(func() { parts, ok = l.store.ListUploadParts(bucket, key, uid, afterPart, max) })
+	return
+}
+
+func (l *loopMetadata) ApplyCreateBucket(p meta.CreateBucket) (err error) {
+	l.on(func() { err = l.store.ApplyCreateBucket(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyDeleteBucket(p meta.DeleteBucket) (err error) {
+	l.on(func() { err = l.store.ApplyDeleteBucket(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyPutObject(p meta.PutObject) (res meta.PutResult, err error) {
+	l.on(func() { res, err = l.store.ApplyPutObject(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyDeleteObject(p meta.DeleteObject) (res meta.DeleteObjectResult, err error) {
+	l.on(func() { res, err = l.store.ApplyDeleteObject(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyCreateMultipartUpload(p meta.CreateMultipartUpload) (err error) {
+	l.on(func() { err = l.store.ApplyCreateMultipartUpload(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyUploadPart(p meta.UploadPart) (res meta.UploadPartResult, err error) {
+	l.on(func() { res, err = l.store.ApplyUploadPart(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyCompleteMultipartUpload(p meta.CompleteMultipartUpload) (res meta.CompleteResult, err error) {
+	l.on(func() { res, err = l.store.ApplyCompleteMultipartUpload(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyAbortMultipartUpload(p meta.AbortMultipartUpload) (res meta.AbortResult, err error) {
+	l.on(func() { res, err = l.store.ApplyAbortMultipartUpload(p) })
+	return
 }
 
 // virtualHostBucket extracts the bucket from a virtual-hosted Host header.

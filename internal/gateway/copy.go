@@ -123,40 +123,30 @@ func (g *Gateway) copyObject(w http.ResponseWriter, r *http.Request, bucket, key
 	etag := md5.Sum(data)
 	checksum := sha256.Sum256(data)
 
-	var vid meta.VersionID
-	var atMS int64
-	g.onLoop(func() {
-		now := g.cfg.Clock.Now()
-		atMS = now.UnixMilli()
-		vid = meta.NewVersionID(now, g.cfg.Rand)
-	})
+	vid, now := g.cfg.Meta.MintVersionID()
+	atMS := now.UnixMilli()
 	if _, err := g.cfg.Blobs.Put(vid, bytes.NewReader(data)); err != nil {
 		writeError(w, r, errInternal)
 		return
 	}
 
-	var applyErr error
-	var replaced []meta.VersionID
-	g.onLoop(func() {
-		replaced = g.replacedNullDataIDs(bucket, key)
-		_, applyErr = g.cfg.Store.ApplyPutObject(meta.PutObject{
-			ProposedAtUnixMS: atMS,
-			Bucket:           bucket,
-			Key:              key,
-			VersionID:        vid,
-			Size:             int64(len(data)),
-			ETag:             etag[:],
-			ContentType:      contentType,
-			UserMetadata:     userMeta,
-			ObjectChecksum:   checksum[:],
-		})
+	res, applyErr := g.cfg.Meta.ApplyPutObject(meta.PutObject{
+		ProposedAtUnixMS: atMS,
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        vid,
+		Size:             int64(len(data)),
+		ETag:             etag[:],
+		ContentType:      contentType,
+		UserMetadata:     userMeta,
+		ObjectChecksum:   checksum[:],
 	})
 	if applyErr != nil {
 		_ = g.cfg.Blobs.Remove(vid) // best effort; otherwise an orphan for GC
 		writeError(w, r, applyErr)
 		return
 	}
-	for _, dataID := range replaced {
+	for _, dataID := range res.ReplacedDataIDs {
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 	writeXML(w, http.StatusOK, copyObjectResult{
@@ -199,39 +189,27 @@ func (g *Gateway) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket,
 	etag := md5.Sum(data)
 	checksum := sha256.Sum256(data)
 
-	var exists bool
-	var dataID meta.VersionID
-	var atMS int64
-	g.onLoop(func() {
-		now := g.cfg.Clock.Now()
-		atMS = now.UnixMilli()
-		if _, exists = g.cfg.Store.GetUpload(bucket, key, uid); exists {
-			dataID = meta.NewVersionID(now, g.cfg.Rand)
-		}
-	})
-	if !exists {
+	if _, exists := g.cfg.Meta.GetUpload(bucket, key, uid); !exists {
 		writeError(w, r, meta.ErrNoSuchUpload)
 		return
 	}
+	dataID, now := g.cfg.Meta.MintVersionID()
+	atMS := now.UnixMilli()
 	if _, err := g.cfg.Blobs.Put(dataID, bytes.NewReader(data)); err != nil {
 		writeError(w, r, errInternal)
 		return
 	}
 
-	var res meta.UploadPartResult
-	var applyErr error
-	g.onLoop(func() {
-		res, applyErr = g.cfg.Store.ApplyUploadPart(meta.UploadPart{
-			ProposedAtUnixMS: atMS,
-			Bucket:           bucket,
-			Key:              key,
-			UploadID:         uid,
-			PartNumber:       uint32(n),
-			DataID:           dataID,
-			Size:             int64(len(data)),
-			ETag:             etag[:],
-			Checksum:         checksum[:],
-		})
+	res, applyErr := g.cfg.Meta.ApplyUploadPart(meta.UploadPart{
+		ProposedAtUnixMS: atMS,
+		Bucket:           bucket,
+		Key:              key,
+		UploadID:         uid,
+		PartNumber:       uint32(n),
+		DataID:           dataID,
+		Size:             int64(len(data)),
+		ETag:             etag[:],
+		Checksum:         checksum[:],
 	})
 	if applyErr != nil {
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC

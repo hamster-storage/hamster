@@ -124,8 +124,10 @@ func (s *Store) ApplyPutObject(p PutObject) (res PutResult, err error) {
 		NullVersion:       cfg.Versioning != VersioningEnabled,
 	}.clone() // own every reference field; the proposer may reuse its buffers
 
+	var replaced []VersionID
 	if entry.NullVersion {
-		if err := s.removeNullVersion(p.Bucket, p.Key, p.ProposedAtUnixMS); err != nil {
+		var err error
+		if replaced, err = s.removeNullVersion(p.Bucket, p.Key, p.ProposedAtUnixMS); err != nil {
 			return PutResult{}, err
 		}
 	}
@@ -133,7 +135,7 @@ func (s *Store) ApplyPutObject(p PutObject) (res PutResult, err error) {
 	// The bump made vid the key's newest, so the current row is always
 	// this entry.
 	s.kv.set(currentRowKey(p.Bucket, p.Key), currentRecordFor(entry))
-	return PutResult{VersionID: vid}, nil
+	return PutResult{VersionID: vid, ReplacedDataIDs: replaced}, nil
 }
 
 // ApplyDeleteObject is DELETE without a version ID.
@@ -160,7 +162,7 @@ func (s *Store) ApplyDeleteObject(p DeleteObject) (res DeleteObjectResult, err e
 		}
 		s.kv.delete(versionRowKey(p.Bucket, p.Key, newest.VersionID))
 		s.kv.delete(currentRowKey(p.Bucket, p.Key))
-		return DeleteObjectResult{Removed: true}, nil
+		return DeleteObjectResult{Removed: true, RemovedDataIDs: newest.DataIDs()}, nil
 	}
 
 	// Versioned bucket: insert a delete marker. Under suspension the
@@ -177,14 +179,16 @@ func (s *Store) ApplyDeleteObject(p DeleteObject) (res DeleteObjectResult, err e
 		CreatedUnixMS: p.ProposedAtUnixMS,
 		NullVersion:   cfg.Versioning == VersioningSuspended,
 	}
+	var replaced []VersionID
 	if marker.NullVersion {
-		if err := s.removeNullVersion(p.Bucket, p.Key, p.ProposedAtUnixMS); err != nil {
+		var err error
+		if replaced, err = s.removeNullVersion(p.Bucket, p.Key, p.ProposedAtUnixMS); err != nil {
 			return DeleteObjectResult{}, err
 		}
 	}
 	s.kv.set(versionRowKey(p.Bucket, p.Key, vid), marker)
 	s.kv.delete(currentRowKey(p.Bucket, p.Key)) // newest is now a marker
-	return DeleteObjectResult{MarkerCreated: true, MarkerID: vid}, nil
+	return DeleteObjectResult{MarkerCreated: true, MarkerID: vid, RemovedDataIDs: replaced}, nil
 }
 
 // ApplyDeleteVersion is DELETE with a version ID — the one operation that
@@ -304,14 +308,14 @@ func (s *Store) lockTarget(bucket, key string, vid VersionID) (VersionEntry, err
 // part of an unversioned or suspended write. The lock check is defense in
 // depth: lock-enabled buckets can never reach this path, but no code path
 // may destroy a locked version, full stop.
-func (s *Store) removeNullVersion(bucket, key string, atUnixMS int64) error {
+func (s *Store) removeNullVersion(bucket, key string, atUnixMS int64) ([]VersionID, error) {
 	prior, ok := s.nullVersion(bucket, key)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	if prior.lockedAt(atUnixMS, false) {
-		return ErrObjectLocked
+		return nil, ErrObjectLocked
 	}
 	s.kv.delete(versionRowKey(bucket, key, prior.VersionID))
-	return nil
+	return prior.DataIDs(), nil
 }

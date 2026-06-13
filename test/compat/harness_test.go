@@ -57,10 +57,8 @@ func startServer(t *testing.T) *server {
 			}
 			return "", false
 		},
-		Store: meta.NewStore(),
-		Loop:  loop,
 		Clock: sys.Clock{},
-		Rand:  rng,
+		Meta:  gateway.NewLoopMetadata(meta.NewStore(), loop, sys.Clock{}, rng),
 		Blobs: blob.NewStore(disk),
 	}))
 	// Shutdown order per the gateway contract: HTTP first, loop second.

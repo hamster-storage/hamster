@@ -172,6 +172,21 @@ func (m *model) setVersioning(t *testing.T, p SetBucketVersioning, got error) {
 	b.versioning = p.State
 }
 
+// modelDataIDs mirrors VersionEntry.DataIDs for a model version.
+func modelDataIDs(v modelVersion) []VersionID {
+	if len(v.parts) > 0 {
+		ids := make([]VersionID, len(v.parts))
+		for i, p := range v.parts {
+			ids[i] = p.dataID
+		}
+		return ids
+	}
+	if v.kind != KindObject || v.dataID.IsZero() {
+		return nil
+	}
+	return []VersionID{v.dataID}
+}
+
 func (m *model) put(t *testing.T, p PutObject, res PutResult, got error) {
 	t.Helper()
 	var want error
@@ -193,10 +208,15 @@ func (m *model) put(t *testing.T, p PutObject, res PutResult, got error) {
 		t.Fatalf("PutObject: committed ID %v does not sort after newest %v", res.VersionID, vs[len(vs)-1].id)
 	}
 	null := b.versioning != VersioningEnabled
+	var wantReplaced []VersionID
 	if null {
 		if i := b.findNull(p.Key); i >= 0 {
+			wantReplaced = modelDataIDs(b.objects[p.Key][i])
 			b.removeAt(p.Key, i)
 		}
+	}
+	if !slices.Equal(res.ReplacedDataIDs, wantReplaced) {
+		t.Fatalf("PutObject: replaced %v, model expects %v", res.ReplacedDataIDs, wantReplaced)
 	}
 	b.objects[p.Key] = append(b.objects[p.Key], modelVersion{
 		id: res.VersionID, dataID: p.VersionID, kind: KindObject,
@@ -223,8 +243,13 @@ func (m *model) deleteObject(t *testing.T, p DeleteObject, res DeleteObjectResul
 		if res.Removed != (len(vs) > 0) || res.MarkerCreated {
 			t.Fatalf("DeleteObject(unversioned): result %+v with %d versions", res, len(vs))
 		}
+		var wantRemoved []VersionID
 		if len(vs) > 0 {
+			wantRemoved = modelDataIDs(vs[len(vs)-1])
 			b.removeAt(p.Key, len(vs)-1)
+		}
+		if !slices.Equal(res.RemovedDataIDs, wantRemoved) {
+			t.Fatalf("DeleteObject: removed %v, model expects %v", res.RemovedDataIDs, wantRemoved)
 		}
 		return
 	}
@@ -235,10 +260,15 @@ func (m *model) deleteObject(t *testing.T, p DeleteObject, res DeleteObjectResul
 		t.Fatalf("DeleteObject: marker ID %v does not sort after newest", res.MarkerID)
 	}
 	null := b.versioning == VersioningSuspended
+	var wantRemoved []VersionID
 	if null {
 		if i := b.findNull(p.Key); i >= 0 {
+			wantRemoved = modelDataIDs(b.objects[p.Key][i])
 			b.removeAt(p.Key, i)
 		}
+	}
+	if !slices.Equal(res.RemovedDataIDs, wantRemoved) {
+		t.Fatalf("DeleteObject(marker): removed %v, model expects %v", res.RemovedDataIDs, wantRemoved)
 	}
 	b.objects[p.Key] = append(b.objects[p.Key], modelVersion{
 		id: res.MarkerID, kind: KindDeleteMarker, created: p.ProposedAtUnixMS, null: null,
@@ -343,7 +373,17 @@ func (m *model) completeUpload(t *testing.T, p CompleteMultipartUpload, res Comp
 		parts = append(parts, modelPartRef{dataID: mp.dataID, size: mp.size})
 		used[cp.PartNumber] = true
 	}
+	if vs := b.objects[p.Key]; len(vs) > 0 && res.VersionID.Compare(vs[len(vs)-1].id) <= 0 {
+		t.Fatalf("CompleteMultipartUpload: committed ID %v does not sort after newest", res.VersionID)
+	}
+	null := b.versioning != VersioningEnabled
 	var wantDiscard []VersionID
+	if null {
+		if i := b.findNull(p.Key); i >= 0 {
+			wantDiscard = modelDataIDs(b.objects[p.Key][i])
+			b.removeAt(p.Key, i)
+		}
+	}
 	for _, n := range up.partNumbers() {
 		if !used[n] {
 			wantDiscard = append(wantDiscard, up.parts[n].dataID)
@@ -351,16 +391,6 @@ func (m *model) completeUpload(t *testing.T, p CompleteMultipartUpload, res Comp
 	}
 	if !slices.Equal(res.DiscardedDataIDs, wantDiscard) {
 		t.Fatalf("CompleteMultipartUpload: discarded %v, model expects %v", res.DiscardedDataIDs, wantDiscard)
-	}
-
-	if vs := b.objects[p.Key]; len(vs) > 0 && res.VersionID.Compare(vs[len(vs)-1].id) <= 0 {
-		t.Fatalf("CompleteMultipartUpload: committed ID %v does not sort after newest", res.VersionID)
-	}
-	null := b.versioning != VersioningEnabled
-	if null {
-		if i := b.findNull(p.Key); i >= 0 {
-			b.removeAt(p.Key, i)
-		}
 	}
 	b.objects[p.Key] = append(b.objects[p.Key], modelVersion{
 		id: res.VersionID, kind: KindObject, size: size,

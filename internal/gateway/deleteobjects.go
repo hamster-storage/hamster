@@ -59,65 +59,41 @@ func (g *Gateway) deleteObjects(w http.ResponseWriter, r *http.Request, id *sigv
 		return
 	}
 
-	// One outcome per key; the deletes and their reclaim captures run in a
-	// single loop trip, the blob removals after it, off the loop.
-	type outcome struct {
-		res     meta.DeleteObjectResult
-		err     error
-		reclaim []meta.VersionID
-	}
-	outcomes := make([]outcome, len(req.Objects))
-	var bucketOK bool
-	g.onLoop(func() {
-		if _, ok := g.cfg.Store.GetBucket(bucket); !ok {
-			return
-		}
-		bucketOK = true
-		for i, o := range req.Objects {
-			if o.VersionID != "" {
-				// Version-addressed deletes arrive with the versioning API
-				// (v0.5); deleting the current version instead would be a
-				// silent wrong answer.
-				outcomes[i].err = errNotImplemented
-				continue
-			}
-			now := g.cfg.Clock.Now()
-			var removed []meta.VersionID
-			if cur, ok := g.cfg.Store.Current(bucket, o.Key); ok {
-				if e, ok := g.cfg.Store.GetVersion(bucket, o.Key, cur.VersionID); ok {
-					removed = e.DataIDs()
-				}
-			}
-			res, err := g.cfg.Store.ApplyDeleteObject(meta.DeleteObject{
-				ProposedAtUnixMS: now.UnixMilli(),
-				Bucket:           bucket,
-				Key:              o.Key,
-				VersionID:        meta.NewVersionID(now, g.cfg.Rand),
-			})
-			outcomes[i] = outcome{res: res, err: err}
-			if err == nil && res.Removed {
-				outcomes[i].reclaim = removed
-			}
-		}
-	})
-	if !bucketOK {
+	if _, ok := g.cfg.Meta.GetBucket(bucket); !ok {
 		writeError(w, r, meta.ErrNoSuchBucket)
 		return
 	}
 
+	// One delete per key, each its own committed mutation — S3 batch
+	// delete is explicitly not atomic, and the result reports what each
+	// delete freed.
 	out := deleteObjectsResult{Xmlns: s3Xmlns}
-	for i, o := range req.Objects {
-		oc := outcomes[i]
-		if oc.err != nil {
-			s3e := mapError(oc.err)
+	for _, o := range req.Objects {
+		if o.VersionID != "" {
+			// Version-addressed deletes arrive with the versioning API
+			// (v0.5); deleting the current version instead would be a
+			// silent wrong answer.
+			s3e := mapError(errNotImplemented)
 			out.Errors = append(out.Errors, deleteErrorEntry{Key: o.Key, Code: s3e.Code, Message: s3e.Message})
 			continue
 		}
-		for _, dataID := range oc.reclaim {
+		vid, now := g.cfg.Meta.MintVersionID()
+		res, err := g.cfg.Meta.ApplyDeleteObject(meta.DeleteObject{
+			ProposedAtUnixMS: now.UnixMilli(),
+			Bucket:           bucket,
+			Key:              o.Key,
+			VersionID:        vid,
+		})
+		if err != nil {
+			s3e := mapError(err)
+			out.Errors = append(out.Errors, deleteErrorEntry{Key: o.Key, Code: s3e.Code, Message: s3e.Message})
+			continue
+		}
+		for _, dataID := range res.RemovedDataIDs {
 			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 		}
 		if !req.Quiet {
-			out.Deleted = append(out.Deleted, deletedEntry{Key: o.Key, DeleteMarker: oc.res.MarkerCreated})
+			out.Deleted = append(out.Deleted, deletedEntry{Key: o.Key, DeleteMarker: res.MarkerCreated})
 		}
 	}
 	writeXML(w, http.StatusOK, out)

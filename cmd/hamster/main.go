@@ -181,10 +181,8 @@ func serve(args []string) error {
 			}
 			return "", false
 		},
-		Store: store,
-		Loop:  loop,
 		Clock: sys.Clock{},
-		Rand:  rng,
+		Meta:  gateway.NewLoopMetadata(store, loop, sys.Clock{}, rng),
 		Blobs: blob.NewStore(disk),
 	})
 
