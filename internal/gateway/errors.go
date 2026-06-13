@@ -49,6 +49,15 @@ var (
 		"The payload exceeds the maximum size this operation allows."}
 )
 
+// ErrNoSuchKey is the missing-key miss, exported for object backends.
+var ErrNoSuchKey error = errNoSuchKey
+
+// ErrUnavailable is the backend saying "not now, try again": the cluster
+// is below its durability floor, or this node cannot commit (it is not
+// the Raft leader and v0.3 does not forward proposals). Mapped to the S3
+// SlowDown family — clients retry it.
+var ErrUnavailable = errors.New("gateway: service temporarily unavailable")
+
 // mapError translates a metadata-layer error into its S3 wire form.
 func mapError(err error) *s3Error {
 	var s3e *s3Error
@@ -56,6 +65,8 @@ func mapError(err error) *s3Error {
 		return s3e
 	}
 	switch {
+	case errors.Is(err, ErrUnavailable):
+		return &s3Error{"SlowDown", http.StatusServiceUnavailable, "The service is temporarily unable to commit writes; retry."}
 	case errors.Is(err, meta.ErrNoSuchBucket):
 		return &s3Error{"NoSuchBucket", http.StatusNotFound, "The specified bucket does not exist."}
 	case errors.Is(err, meta.ErrBucketExists):

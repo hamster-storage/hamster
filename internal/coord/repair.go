@@ -106,7 +106,7 @@ func (op *sweepOp) nextItem() {
 	e := op.item.entry
 	op.k = int(e.ECDataShards)
 	op.width = int(e.ECDataShards + e.ECParityShards)
-	nodes, err := place.Nodes(e.Partition, op.c.cfg.Members, op.width)
+	nodes, err := place.Nodes(e.Partition, op.c.cfg.Members(), op.width)
 	if err != nil {
 		op.itemFailed(fmt.Errorf("placing: %w", err))
 		return

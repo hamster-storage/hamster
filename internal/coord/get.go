@@ -56,7 +56,7 @@ func (c *Coordinator) Get(bucket, key string, off, length int64, done func([]byt
 	}
 
 	width := int(entry.ECDataShards + entry.ECParityShards)
-	nodes, err := place.Nodes(entry.Partition, c.cfg.Members, width)
+	nodes, err := place.Nodes(entry.Partition, c.cfg.Members(), width)
 	if err != nil {
 		done(nil, fmt.Errorf("coord: resolving partition %d: %w", entry.Partition, err))
 		return
@@ -95,18 +95,22 @@ type getOp struct {
 	extents  [][]extent // phase B: covering slice ranges
 	failed   []bool
 	pending  int
+	planned  bool // phase B started; straggling header answers ignored
 	finished bool
 }
 
 // fetchHeaders is phase A: the file front of every shard, in parallel.
-// Every fetch resolves (success, error, or timeout) before phase B, which
-// needs the recorded slice geometry to know what to ask for.
+// Phase B starts as soon as k shards have answered — a down node must
+// cost a degraded read nothing, not a timeout — abandoning stragglers
+// (their late answers are ignored). The trade, accepted: a slice fetch
+// failing on one of the chosen k refuses a read that a straggler could
+// have served; the client's retry chooses fresh responders.
 func (op *getOp) fetchHeaders() {
 	op.pending = op.width
 	for i := range op.nodes {
 		i := i
 		op.c.cfg.Data.Fetch(op.nodes[i], op.entry.DataID, uint32(i), 0, headerPrefix, func(b []byte, err error) {
-			if op.finished {
+			if op.finished || op.planned {
 				return
 			}
 			if err != nil || len(b) == 0 {
@@ -115,7 +119,19 @@ func (op *getOp) fetchHeaders() {
 				op.prefixes[i] = b
 			}
 			op.pending--
-			if op.pending == 0 {
+			have := 0
+			for j := range op.prefixes {
+				if op.prefixes[j] != nil {
+					have++
+				}
+			}
+			if op.pending == 0 || have >= op.k {
+				op.planned = true
+				for j := range op.prefixes {
+					if op.prefixes[j] == nil {
+						op.failed[j] = true // unresolved stragglers: absent
+					}
+				}
 				op.planSlices()
 			}
 		})
@@ -313,4 +329,24 @@ func (s *sparse) ReadAt(p []byte, off int64) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// DeleteShards best-effort removes a version's shards from its holders —
+// the reclaim after a metadata delete displaced the version. Outcomes are
+// ignored: anything that survives is an orphan a future scan collects,
+// unreadable as an object because no metadata names it.
+func (c *Coordinator) DeleteShards(e meta.VersionEntry) {
+	width := int(e.ECDataShards + e.ECParityShards)
+	if width == 0 {
+		return // a v0.1 whole-blob entry; not this data path's to reclaim
+	}
+	nodes, err := place.Nodes(e.Partition, c.cfg.Members(), width)
+	if err != nil {
+		return
+	}
+	for _, id := range e.DataIDs() {
+		for i, n := range nodes {
+			c.cfg.Data.Delete(n, id, uint32(i), func(error) {})
+		}
+	}
 }

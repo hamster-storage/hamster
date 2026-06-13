@@ -112,6 +112,9 @@ func clusterRun(args []string) error {
 	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address (first boot with -token only)")
 	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address (first boot with -token only)")
 	token := fs.String("token", "", "join token: an uninitialized data directory joins before running; ignored once joined, so the same command line is restart-safe")
+	s3 := fs.String("s3", "", "serve the S3 API on this address (host:port); empty disables")
+	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
+	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
@@ -135,7 +138,25 @@ func clusterRun(args []string) error {
 		return err
 	}
 	log.Printf("hamster cluster node: %s — transport %s, join/status %s", fullVersion(), n.Addr(), n.JoinAddr())
-	log.Printf("hamster cluster node: DEV PREVIEW — metadata plane only; S3 serving stays single-node until the data path replicates (v0.3)")
+	if *s3 != "" {
+		accessKey, secretKey := os.Getenv("HAMSTER_ACCESS_KEY_ID"), os.Getenv("HAMSTER_SECRET_ACCESS_KEY")
+		if accessKey == "" || secretKey == "" {
+			n.Stop()
+			return fmt.Errorf("-s3 requires HAMSTER_ACCESS_KEY_ID and HAMSTER_SECRET_ACCESS_KEY in the environment")
+		}
+		addr, err := n.ServeS3(cluster.S3Config{
+			Listen: *s3, Region: *region, Domain: *domain,
+			AccessKey: accessKey, SecretKey: secretKey,
+		})
+		if err != nil {
+			n.Stop()
+			return err
+		}
+		log.Printf("hamster cluster node: S3 API on http://%s (region %s) — erasure-coded across the cluster", addr, *region)
+		log.Printf("hamster cluster node: DEV PREVIEW — writes commit on the Raft leader only; multipart and copy are not yet on the cluster path")
+	} else {
+		log.Printf("hamster cluster node: DEV PREVIEW — pass -s3 to serve the S3 API over the cluster data path")
+	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	<-stop

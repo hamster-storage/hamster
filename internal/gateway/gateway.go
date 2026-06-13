@@ -112,6 +112,25 @@ type Config struct {
 	Meta Metadata
 	// Blobs is the data path.
 	Blobs BlobStore
+	// Objects, when non-nil, is the erasure-coded cluster data path for
+	// whole objects: the handlers delegate puts and gets to it wholesale
+	// (it places, encodes, transfers, and commits metadata itself),
+	// deletes reclaim shards through it, and multipart plus server-side
+	// copy are refused — their cluster data path is later work. Nil on a
+	// single node, where Blobs serves object data.
+	Objects ObjectBackend
+}
+
+// ObjectBackend is the cluster data path's face (internal/coord behind a
+// cluster composition). Implementations own their synchronization, like
+// Metadata. Get returns the served version's entry alongside its bytes —
+// one consistent read, so response headers can never describe a different
+// version than the body.
+type ObjectBackend interface {
+	Put(bucket, key string, body []byte, contentType string, userMeta map[string]string) (etag []byte, err error)
+	Get(bucket, key string) (data []byte, entry meta.VersionEntry, err error)
+	// DeleteShards best-effort reclaims a displaced version's shards.
+	DeleteShards(e meta.VersionEntry)
 }
 
 // Gateway is an http.Handler serving the S3 API.
@@ -128,6 +147,18 @@ func New(cfg Config) *Gateway {
 		cfg:      cfg,
 		verifier: &sigv4.Verifier{Region: cfg.Region, Lookup: cfg.Lookup},
 	}
+}
+
+// refuseOnCluster answers 501 for operations whose cluster data path is
+// not built yet (multipart, server-side copy — they ride the v0.1 blob
+// path until their erasure-coded design lands). Refusing honestly beats
+// committing metadata that names blobs no node stores.
+func (g *Gateway) refuseOnCluster(w http.ResponseWriter, r *http.Request) bool {
+	if g.cfg.Objects == nil {
+		return false
+	}
+	writeError(w, r, errNotImplemented)
+	return true
 }
 
 // loopMetadata is the single-node Metadata: a meta.Store and the version

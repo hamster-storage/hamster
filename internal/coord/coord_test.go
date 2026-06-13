@@ -119,8 +119,9 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 			n.raft = rn
 			n.co = coord.New(coord.Config{
 				Clock: w.Clock, Rand: w.Rand, Data: n.data, Raft: rn,
-				Members: c.members, PartitionCount: place.DefaultPartitionCount,
-				Profile: c.profile,
+				Members:        func() []seam.NodeID { return c.members },
+				PartitionCount: place.DefaultPartitionCount,
+				Profile:        func() ec.Profile { return c.profile },
 			})
 		}
 		c.nodes[id] = n
@@ -189,7 +190,7 @@ func (c *cluster) put(key string, body []byte) (coord.PutResult, error) {
 	var perr error
 	done := false
 	c.worlds[id].Loop.Post(func() {
-		c.nodes[id].co.Put(bucket, key, body, func(r coord.PutResult, e error) {
+		c.nodes[id].co.Put(bucket, key, body, coord.PutOptions{}, func(r coord.PutResult, e error) {
 			res, perr, done = r, e, true
 		})
 	})
@@ -475,7 +476,7 @@ func TestCoordinatorCrashMidPut(t *testing.T) {
 	body := randomBody(6, 2<<20)
 	lead := c.leader()
 	c.worlds[lead].Loop.Post(func() {
-		c.nodes[lead].co.Put(bucket, "casualty", body, func(coord.PutResult, error) {
+		c.nodes[lead].co.Put(bucket, "casualty", body, coord.PutOptions{}, func(coord.PutResult, error) {
 			t.Error("done fired for a coordinator that crashed mid-put")
 		})
 	})
