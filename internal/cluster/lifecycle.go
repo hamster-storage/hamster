@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/certs"
@@ -21,12 +22,29 @@ import (
 // identity, all under <data-dir>/cluster. The node becomes a running
 // cluster the first time `cluster run` starts it (a fresh Raft log
 // bootstraps a single-voter configuration).
-func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr string, now time.Time) error {
+// detectHost returns this machine's identity for failure-domain placement
+// (ADR-0016): the OS hostname, lowercased and trimmed. Processes on one box
+// share it with zero configuration. Falls back to the node ID when the OS
+// gives nothing usable, so a node always carries a host label.
+func detectHost(nodeID string) string {
+	if h, err := os.Hostname(); err == nil {
+		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+			return h
+		}
+	}
+	return nodeID
+}
+
+func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr, zone string, now time.Time) error {
 	if Initialized(dataDir) {
 		return fmt.Errorf("cluster: %s already holds a cluster identity", Dir(dataDir))
 	}
 	if nodeID == "" || clusterName == "" {
 		return errors.New("cluster: a cluster name and a node ID are required")
+	}
+	host := detectHost(nodeID)
+	if zone == "" {
+		zone = host
 	}
 	dir := Dir(dataDir)
 	if err := os.MkdirAll(tokensDir(dir), 0o700); err != nil {
@@ -59,8 +77,10 @@ func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr string, now time.T
 	return saveConfig(dir, NodeConfig{
 		Cluster: clusterName, NodeID: nodeID, RaftID: 1,
 		ClusterAddr: clusterAddr, JoinAddr: joinAddr,
-		Members:    []Member{{RaftID: 1, NodeID: nodeID, Dial: clusterAddr}},
+		Members:    []Member{{RaftID: 1, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone}},
 		NextRaftID: 2,
+		Host:       host, Zone: zone,
+		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone}},
 	})
 }
 
@@ -83,12 +103,16 @@ func MintToken(dataDir string, ttl time.Duration, now time.Time) (string, error)
 // issuer, authenticate it against the token's pinned CA hash, present the
 // token, and persist the identity it returns. The node is a cluster member
 // once `cluster run` starts it and admission commits.
-func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr string) error {
+func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string) error {
 	if Initialized(dataDir) {
 		return fmt.Errorf("cluster: %s already holds a cluster identity", Dir(dataDir))
 	}
 	if nodeID == "" {
 		return errors.New("cluster: a node ID is required")
+	}
+	host := detectHost(nodeID)
+	if zone == "" {
+		zone = host
 	}
 	tok, err := decodeToken(tokenStr)
 	if err != nil {
@@ -101,6 +125,7 @@ func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr string) error {
 	defer conn.Close()
 	req := encodeRequest(reqJoin, encodeJoinRequest(joinRequest{
 		Token: tokenStr, NodeID: nodeID, ClusterAddr: clusterAddr,
+		Host: host, Zone: zone,
 	}))
 	if err := writeFrame(conn, req); err != nil {
 		return fmt.Errorf("cluster: sending join request: %w", err)
@@ -128,11 +153,13 @@ func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr string) error {
 			return fmt.Errorf("cluster: writing %s: %w", name, err)
 		}
 	}
-	members := append(resp.Members, Member{RaftID: resp.RaftID, NodeID: nodeID, Dial: clusterAddr})
+	members := append(resp.Members, Member{RaftID: resp.RaftID, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone})
 	return saveConfig(dir, NodeConfig{
 		Cluster: resp.Cluster, NodeID: nodeID, RaftID: resp.RaftID,
 		ClusterAddr: clusterAddr, JoinAddr: joinAddr,
 		Join: true, Members: members,
+		Host: host, Zone: zone,
+		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone}},
 	})
 }
 

@@ -80,6 +80,76 @@ func TestSetClusterLayoutProposalGolden(t *testing.T) {
 	}
 }
 
+// TestClusterLayoutNodesRoundTrip exercises the labeled member set (ADR-0016,
+// field 5).
+func TestClusterLayoutNodesRoundTrip(t *testing.T) {
+	in := ClusterLayout{
+		FormatVersion: 1, Version: 4, PartitionCount: 4096,
+		Nodes: []LayoutNode{
+			{ID: "n1", Host: "boxA", Zone: "z1"},
+			{ID: "n2", Host: "boxA", Zone: "z1"},
+			{ID: "n3", Host: "boxB", Zone: "z2"},
+		},
+	}
+	out, err := unmarshalClusterLayout(marshalClusterLayout(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round trip:\n in: %+v\nout: %+v", in, out)
+	}
+}
+
+// TestClusterLayoutNodesGolden pins the field-5 (labeled node) bytes.
+func TestClusterLayoutNodesGolden(t *testing.T) {
+	// {format 1, version 3, partitions 4096, node n1/h/z}:
+	//   0801            format_version 1
+	//   1003            version 3
+	//   188020          partition_count 4096
+	//   2a0a <10 bytes> field 5 node:
+	//     0a026e31        id "n1"
+	//     120168          host "h"
+	//     1a017a          zone "z"
+	const want = "080110031880202a0a0a026e311201681a017a"
+	got := hex.EncodeToString(marshalClusterLayout(ClusterLayout{
+		FormatVersion: 1, Version: 3, PartitionCount: 4096,
+		Nodes: []LayoutNode{{ID: "n1", Host: "h", Zone: "z"}},
+	}))
+	if got != want {
+		t.Fatalf("ClusterLayout node bytes changed:\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestEffectiveNodes: Nodes when present, else the legacy Members IDs with
+// host and zone defaulted to the ID (a pass-1 layout reads as one node per
+// host and zone, spreading exactly as the bare rendezvous ranking).
+func TestEffectiveNodes(t *testing.T) {
+	withNodes := ClusterLayout{Nodes: []LayoutNode{{ID: "a", Host: "h", Zone: "z"}}}
+	if got := withNodes.EffectiveNodes(); !reflect.DeepEqual(got, withNodes.Nodes) {
+		t.Fatalf("with nodes: %+v", got)
+	}
+	legacy := ClusterLayout{Members: []string{"a", "b"}}
+	want := []LayoutNode{{ID: "a", Host: "a", Zone: "a"}, {ID: "b", Host: "b", Zone: "b"}}
+	if got := legacy.EffectiveNodes(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy fallback: %+v, want %+v", got, want)
+	}
+}
+
+// TestSetClusterLayoutNodesRoundTrip: the proposal carries the labeled set.
+func TestSetClusterLayoutNodesRoundTrip(t *testing.T) {
+	p := SetClusterLayout{
+		ProposedAtUnixMS: 123, Version: 2, PartitionCount: 4096,
+		Nodes: []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}},
+	}
+	got, err := DecodeProposal(EncodeProposal(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, p) {
+		t.Fatalf("round trip:\n got %+v\nwant %+v", got, p)
+	}
+}
+
 // TestApplySetClusterLayout proves the compare-and-set: the first install is
 // version 1, each later one exactly +1, and every off-version or invalid
 // proposal is a deterministic refusal that leaves state untouched.

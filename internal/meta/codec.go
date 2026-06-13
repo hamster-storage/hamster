@@ -472,6 +472,10 @@ func marshalClusterLayout(l ClusterLayout) []byte {
 	for _, m := range l.Members {
 		b = putString(b, 4, m)
 	}
+	for _, n := range l.Nodes {
+		b = protowire.AppendTag(b, 5, protowire.BytesType)
+		b = protowire.AppendBytes(b, marshalLayoutNode(n))
+	}
 	return append(b, l.unknown...)
 }
 
@@ -488,11 +492,47 @@ func unmarshalClusterLayout(b []byte) (ClusterLayout, error) {
 			l.PartitionCount = d.uint32()
 		case 4:
 			l.Members = append(l.Members, d.str())
+		case 5:
+			n, err := unmarshalLayoutNode(d.bytes())
+			if err != nil {
+				d.fail("field 5: node: %w", err)
+				break
+			}
+			l.Nodes = append(l.Nodes, n)
 		default:
 			d.skipUnknown(&l.unknown)
 		}
 	}
 	return l, d.err
+}
+
+// marshalLayoutNode encodes one labeled member (ADR-0016). A nested message,
+// like marshalPartRef; the layout is rewritten wholesale each generation, so
+// it carries no unknown-field preservation.
+func marshalLayoutNode(n LayoutNode) []byte {
+	var b []byte
+	b = putString(b, 1, n.ID)
+	b = putString(b, 2, n.Host)
+	b = putString(b, 3, n.Zone)
+	return b
+}
+
+func unmarshalLayoutNode(b []byte) (LayoutNode, error) {
+	var n LayoutNode
+	d := &dec{b: b}
+	for d.next() {
+		switch d.num {
+		case 1:
+			n.ID = d.str()
+		case 2:
+			n.Host = d.str()
+		case 3:
+			n.Zone = d.str()
+		default:
+			d.skipUnknown(nil)
+		}
+	}
+	return n, d.err
 }
 
 // --- row dispatch: a key's shape names its record type ---

@@ -58,11 +58,12 @@ func clusterInit(args []string) error {
 	node := fs.String("node", "n1", "this node's ID")
 	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address; peers dial it, so use a reachable one")
 	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address")
+	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
 	}
-	if err := cluster.Init(*dataDir, *name, *node, *listenCluster, *listenJoin, time.Now()); err != nil {
+	if err := cluster.Init(*dataDir, *name, *node, *listenCluster, *listenJoin, *zone, time.Now()); err != nil {
 		return err
 	}
 	log.Printf("cluster %q initialized: node %s, transport %s, join %s", *name, *node, *listenCluster, *listenJoin)
@@ -93,11 +94,12 @@ func clusterJoin(args []string) error {
 	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address; peers dial it, so use a reachable one")
 	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address")
 	token := fs.String("token", "", "join token from `hamster cluster token` (required)")
+	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	fs.Parse(args)
 	if *dataDir == "" || *node == "" || *token == "" {
 		return fmt.Errorf("-data-dir, -node, and -token are required")
 	}
-	if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token); err != nil {
+	if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone); err != nil {
 		return err
 	}
 	log.Printf("joined as node %s", *node)
@@ -112,6 +114,7 @@ func clusterRun(args []string) error {
 	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address (first boot with -token only)")
 	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address (first boot with -token only)")
 	token := fs.String("token", "", "join token: an uninitialized data directory joins before running; ignored once joined, so the same command line is restart-safe")
+	zone := fs.String("zone", "", "failure-domain label when joining with -token — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	s3 := fs.String("s3", "", "serve the S3 API on this address (host:port); empty disables")
 	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
 	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
@@ -126,7 +129,7 @@ func clusterRun(args []string) error {
 		if *node == "" {
 			return fmt.Errorf("-node is required when joining with -token")
 		}
-		if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token); err != nil {
+		if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone); err != nil {
 			return err
 		}
 		log.Printf("joined as node %s", *node)
@@ -217,7 +220,8 @@ func clusterStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-8s %-16s %-22s %-8s\n", "RAFT-ID", "NODE", "ADDRESS", "ROLE")
+	fmt.Printf("%-8s %-16s %-22s %-16s %-12s %-12s\n", "RAFT-ID", "NODE", "ADDRESS", "ROLE", "HOST", "ZONE")
+	hosts, zones := map[string]bool{}, map[string]bool{}
 	for _, m := range members {
 		role := "voter"
 		if m.Learner {
@@ -226,7 +230,22 @@ func clusterStatus(args []string) error {
 		if m.Leader {
 			role += " (leader)"
 		}
-		fmt.Printf("%-8d %-16s %-22s %-8s\n", m.RaftID, m.NodeID, m.Dial, role)
+		fmt.Printf("%-8d %-16s %-22s %-16s %-12s %-12s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone)
+		if m.Host != "" {
+			hosts[m.Host] = true
+		}
+		if m.Zone != "" {
+			zones[m.Zone] = true
+		}
+	}
+	// Failure-domain topology (ADR-0016): state plainly when a level is
+	// trivial — a single host or zone has no tolerance at that level.
+	fmt.Printf("\ntopology: %d node(s), %d host(s), %d zone(s)\n", len(members), len(hosts), len(zones))
+	if len(hosts) <= 1 {
+		fmt.Println("  note: one host — no host-level failure tolerance (shards can share a machine)")
+	}
+	if len(zones) <= 1 {
+		fmt.Println("  note: one zone — no zone-level failure tolerance")
 	}
 	return nil
 }

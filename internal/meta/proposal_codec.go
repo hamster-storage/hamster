@@ -149,6 +149,10 @@ func EncodeProposal(p any) []byte {
 		for _, m := range c.Members {
 			cmd = putString(cmd, 3, m)
 		}
+		for _, n := range c.Nodes {
+			cmd = protowire.AppendTag(cmd, 4, protowire.BytesType)
+			cmd = protowire.AppendBytes(cmd, marshalLayoutNode(n))
+		}
 	default:
 		panic(fmt.Sprintf("meta: unencodable proposal type %T", p))
 	}
@@ -443,6 +447,13 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.PartitionCount = d.uint32()
 			case 3:
 				c.Members = append(c.Members, d.str())
+			case 4:
+				n, err := unmarshalLayoutNode(d.bytes())
+				if err != nil {
+					d.fail("set_layout node: %w", err)
+					break
+				}
+				c.Nodes = append(c.Nodes, n)
 			default:
 				d.skipUnknown(nil)
 			}

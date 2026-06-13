@@ -120,10 +120,16 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 			n.co = coord.New(coord.Config{
 				Clock: w.Clock, Rand: w.Rand, Data: n.data, Raft: rn,
 				Layout: func() (place.Layout, bool) {
+					// Distinct host/zone per node: spread collapses to the
+					// bare rendezvous ranking readObject verifies against.
+					nodes := make([]place.Node, len(c.members))
+					for i, id := range c.members {
+						nodes[i] = place.Node{ID: id, Host: string(id), Zone: string(id)}
+					}
 					return place.Layout{
 						Version:        1,
 						PartitionCount: place.DefaultPartitionCount,
-						Members:        c.members,
+						Members:        nodes,
 					}, true
 				},
 			})

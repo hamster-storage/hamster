@@ -139,11 +139,14 @@ type UpdateLegalHold struct {
 // greater than the stored layout's (the first install is Version 1), so a
 // reconciling leader that retransmits, or two proposals that race, converge
 // every replica to the same layout instead of clobbering each other.
-// Members is the ordered node-ID set placement ranks over; PartitionCount
-// is the cluster constant (ADR-0004), fixed at the first install.
+// Nodes is the labeled member set placement spreads over (ADR-0016);
+// Members is the older unlabeled form (v0.4 pass 1). New proposers set
+// Nodes. PartitionCount is the cluster constant (ADR-0004), fixed at the
+// first install.
 type SetClusterLayout struct {
 	ProposedAtUnixMS int64
 	Version          uint64
 	PartitionCount   uint32
 	Members          []string
+	Nodes            []LayoutNode
 }
