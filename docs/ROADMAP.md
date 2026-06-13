@@ -37,7 +37,7 @@ Each v0 minor release carries one headline feature, in roughly this order. The o
 
 The simulation harness is not a milestone of its own: it ships in v0.1 and grows with every release, because each new feature must arrive with its failure schedules.
 
-**Not yet scheduled:** in-place promotion of a single-node `serve` deployment into a cluster. The two are different data paths — `serve` stores single-node blobs, a cluster stores erasure-coded shards — so there is no in-place conversion today. The recommended path for anyone who may grow is to start with `cluster init` (a one-node cluster is cluster-ready and grows by adding nodes). A `serve` → cluster migration is a recognized future convenience, not committed to a minor release.
+**Not yet scheduled:** a native, lock- and version-aware tool to migrate a single-node `serve` deployment into a cluster. The two are different data paths — `serve` stores single-node blobs, a cluster stores erasure-coded shards — so there is no *in-place* conversion; the cross-path move is a data migration, not a promotion. For ordinary objects that migration is already possible with generic S3 tooling (copy to the new cluster, delete from the source as each object lands — no double storage), so the future tool's job is the compliance part: preserving version history and object-lock state, and copying COMPLIANCE-locked data *without* deleting it from the source (that lock has no override). It is therefore gated on versioning (v0.5) and object lock (v0.6) and not committed to a minor release. A deployment that is already a cluster needs none of this — it grows by adding nodes. The recommended path for anyone who may grow is to start with `cluster init`.
 
 ## v1.0 — the compatibility promise
 

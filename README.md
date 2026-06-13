@@ -125,9 +125,16 @@ hamster cluster run -data-dir ./n1 -s3 127.0.0.1:9000    # one-node cluster, S3 
 # later: mint a token on n1, then `cluster run -token …` on n2, n3, …
 ```
 
-**Growing from one node to many.** A *cluster* grows by adding nodes — mint a join token, run the new node with `-token`, and it joins as a learner and is promoted automatically. Existing objects climbing from a single-node profile up to a wider `k+m` as the cluster gains capacity is the v0.4 placement work (in progress).
+**Growing a cluster (one, two, or more nodes).** Any deployment that is *already a cluster* grows the same way, with no data migration: mint a join token, run the new node with `-token`, and it joins as a learner and is promoted to voter automatically (up to a five-voter cap). You are adding a member, not moving data, so going from two nodes to three is just another join. (Two nodes is itself a cluster, and an awkward one — Raft needs both of two voters for a quorum, so it tolerates no failures; three is the first size that survives losing one. That is a reason to reach three, not a different way of getting there.) Existing objects climbing from a single-node profile up to a wider `k+m` as the cluster gains capacity is the v0.4 placement work (in progress).
 
-What is **not** supported is promoting a single-node `serve` deployment into a cluster: `serve` stores single-node blobs while a cluster stores erasure-coded shards, so there is no in-place conversion between them yet. **If you think you might ever grow beyond one machine, start with `cluster init` rather than `serve`** — a one-node cluster is cluster-ready from the first node and costs you nothing extra. In-place `serve` → cluster promotion is a recognized future convenience, but it is not yet scheduled to a release.
+**Growing a single `serve` node into a cluster.** This is the one case with no in-place path: `serve` stores single-node blobs while a cluster stores erasure-coded shards, so there is nothing to promote — instead you *migrate the data*. Stand up the new cluster alongside the old node, then move objects from one S3 endpoint to the other, deleting each from the source once it is durably on the destination: you never need room for two full copies, and an interrupted run resumes where it left off. Both ends speak S3, so for ordinary objects this works today with `rclone move` (or any S3 sync-then-delete) — no Hamster-specific tool required:
+
+```sh
+# old serve node and new cluster configured as two rclone remotes
+rclone move s3old:bucket s3new:bucket   # copies, then deletes each object from the source as it lands
+```
+
+Two honest, forward-looking caveats: a generic S3 copy moves *current object data only* — it does not carry version history (v0.5) or object-lock/WORM state (v0.6) — and a COMPLIANCE-locked object **cannot** be deleted from the source until its retention expires (that lock has no override, by design), so locked data must be copied and left in place, not moved. A native, lock- and version-aware migration tool is the future answer for compliance data. Until then, **if you might ever grow beyond one machine, start with `cluster init` rather than `serve`** — a one-node cluster is cluster-ready from the first node and skips the migration entirely.
 
 ## Roadmap
 
