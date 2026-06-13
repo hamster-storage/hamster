@@ -106,6 +106,29 @@ aws --endpoint-url http://127.0.0.1:9000 s3 cp video.mp4 s3://vault/
 
 Kill a node and the object still reads — reconstructed from the survivors. Writes commit on the leader's node in v0.3, so if one answers `503 SlowDown`, retry against another.
 
+## Deployment
+
+There are two ways to run Hamster today, and they are separate paths — pick by whether you ever expect to grow.
+
+**A single node — the simplest thing.** `hamster serve` is a standalone S3 endpoint backed by one node's disk (the [Quick start](#quick-start) above). No cluster machinery, no inter-node TLS, no certificate authority — nothing to configure. It is the right choice for a laptop, a homelab box, or any workload that fits on one machine and does not need to scale out. The trade-off: its durability is one disk's durability, and it cannot become a cluster in place (see below).
+
+```sh
+hamster serve -data-dir ./data            # one node, S3 on :9000
+```
+
+**A cluster — durable across machines, and able to grow.** `hamster cluster init` founds a cluster; `cluster init` mints the cluster CA once, automatically, and every node you add reuses it (the [Cluster preview](#cluster-preview) above shows three). Objects are erasure-coded `k+m` across the nodes and reconstructed from any `k`, so you can lose drives or whole machines without losing data. A one-node cluster is a valid starting point — it serves S3 just like `serve`, but on the path that scales:
+
+```sh
+hamster cluster init -data-dir ./n1 -node n1 \
+  -listen-cluster 127.0.0.1:7946 -listen-join 127.0.0.1:7947
+hamster cluster run -data-dir ./n1 -s3 127.0.0.1:9000    # one-node cluster, S3 on :9000
+# later: mint a token on n1, then `cluster run -token …` on n2, n3, …
+```
+
+**Growing from one node to many.** A *cluster* grows by adding nodes — mint a join token, run the new node with `-token`, and it joins as a learner and is promoted automatically. Existing objects climbing from a single-node profile up to a wider `k+m` as the cluster gains capacity is the v0.4 placement work (in progress).
+
+What is **not** supported is promoting a single-node `serve` deployment into a cluster: `serve` stores single-node blobs while a cluster stores erasure-coded shards, so there is no in-place conversion between them yet. **If you think you might ever grow beyond one machine, start with `cluster init` rather than `serve`** — a one-node cluster is cluster-ready from the first node and costs you nothing extra. In-place `serve` → cluster promotion is a recognized future convenience, but it is not yet scheduled to a release.
+
 ## Roadmap
 
 - **v0.x** — core PUT and GET, erasure coding with repair, partitioned placement, versioning, object lock, the simulation harness, and the upgrade test suite. On disk and on wire formats may change between v0 releases.
