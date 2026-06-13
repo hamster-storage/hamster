@@ -41,6 +41,8 @@ task test-race  # the same tests under the race detector (the detector needs cgo
 task check      # go vet + gofmt
 task e2e        # end-to-end suite over the real binary: real processes, real CLI, loopback mTLS (test/e2e, `e2e` build tag)
 task compat     # third-party client compatibility suite (aws CLI, rclone, restic, s3cmd) against an in-process gateway; absent tools skip
+task dist       # cross-compile the static, version-stamped release binaries + SHA256SUMS into dist/ (VERSION=vX.Y.Z)
+task release    # run the full gate, cross-compile, tag, and publish a GitHub release (VERSION=… TITLE=… NOTES=…)
 ```
 
 The first four must pass before any commit. `e2e` and `compat` are not part of the pre-commit gate (`e2e` builds and spawns real processes — hermetic but slower; `compat` shells out to locally installed third-party binaries — not hermetic). Run `e2e` for changes touching `cmd/hamster` or `internal/cluster`, and `compat` for changes touching `internal/gateway` or `internal/sigv4`. Its tests live in `test/compat` behind the `compat` build tag.

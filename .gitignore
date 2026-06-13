@@ -37,3 +37,6 @@ go.work.sum
 /cmd/hamster/data/
 /data/
 /n[0-9]/
+
+# Release build output (cross-compiled binaries and checksums)
+/dist/
