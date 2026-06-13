@@ -33,6 +33,8 @@ func (s *Store) Apply(p any) (any, error) {
 		return s.ApplyCompleteMultipartUpload(c)
 	case AbortMultipartUpload:
 		return s.ApplyAbortMultipartUpload(c)
+	case SetClusterLayout:
+		return nil, s.ApplySetClusterLayout(c)
 	default:
 		return nil, fmt.Errorf("meta: Apply on unknown proposal type %T", p)
 	}

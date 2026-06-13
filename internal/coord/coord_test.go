@@ -119,9 +119,13 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 			n.raft = rn
 			n.co = coord.New(coord.Config{
 				Clock: w.Clock, Rand: w.Rand, Data: n.data, Raft: rn,
-				Members:        func() []seam.NodeID { return c.members },
-				PartitionCount: place.DefaultPartitionCount,
-				Profile:        func() ec.Profile { return c.profile },
+				Layout: func() (place.Layout, bool) {
+					return place.Layout{
+						Version:        1,
+						PartitionCount: place.DefaultPartitionCount,
+						Members:        c.members,
+					}, true
+				},
 			})
 		}
 		c.nodes[id] = n
@@ -862,5 +866,34 @@ func TestRepairDeterminism(t *testing.T) {
 	}
 	if r1.RebuiltShards != 1 {
 		t.Fatalf("expected one rebuilt shard: %+v", r1)
+	}
+}
+
+// stubClock is the minimum seam.Clock for a Put that never schedules a timer
+// — the no-layout refusal returns before any data-plane work.
+type stubClock struct{}
+
+func (stubClock) Now() time.Time                             { return time.Unix(0, 0) }
+func (stubClock) AfterFunc(time.Duration, func()) seam.Timer { return nil }
+
+// TestPutRefusesWithoutLayout proves a PUT before the first cluster layout is
+// installed refuses transiently (SlowDown), not crashes — the forming-cluster
+// case (ADR-0028).
+func TestPutRefusesWithoutLayout(t *testing.T) {
+	co := coord.New(coord.Config{
+		Clock:  stubClock{},
+		Rand:   rand.New(rand.NewPCG(1, 2)),
+		Layout: func() (place.Layout, bool) { return place.Layout{}, false },
+	})
+	var gotErr error
+	called := false
+	co.Put("bucket", "key", []byte("hello"), coord.PutOptions{}, func(_ coord.PutResult, err error) {
+		called, gotErr = true, err
+	})
+	if !called {
+		t.Fatal("done was not called")
+	}
+	if !errors.Is(gotErr, coord.ErrRefused) {
+		t.Fatalf("got %v, want ErrRefused", gotErr)
 	}
 }

@@ -24,6 +24,10 @@ import (
 
 const nul = "\x00"
 
+// clusterLayoutKey is the singleton row holding the cluster layout
+// (ADR-0028), under the reserved s/ system prefix. There is exactly one.
+const clusterLayoutKey = "s/layout"
+
 const bucketScanPrefix = "b/"
 
 func bucketRowKey(bucket string) string { return "b/" + bucket }

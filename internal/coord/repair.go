@@ -8,7 +8,6 @@ import (
 	"github.com/hamster-storage/hamster/internal/datapath"
 	"github.com/hamster-storage/hamster/internal/ec"
 	"github.com/hamster-storage/hamster/internal/meta"
-	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/seam"
 )
 
@@ -106,7 +105,12 @@ func (op *sweepOp) nextItem() {
 	e := op.item.entry
 	op.k = int(e.ECDataShards)
 	op.width = int(e.ECDataShards + e.ECParityShards)
-	nodes, err := place.Nodes(e.Partition, op.c.cfg.Members(), op.width)
+	layout, ok := op.c.cfg.Layout()
+	if !ok {
+		op.itemFailed(fmt.Errorf("placing: no cluster layout"))
+		return
+	}
+	nodes, err := layout.Nodes(e.Partition, op.width)
 	if err != nil {
 		op.itemFailed(fmt.Errorf("placing: %w", err))
 		return

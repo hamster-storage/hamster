@@ -132,3 +132,18 @@ type UpdateLegalHold struct {
 	VersionID        VersionID
 	Hold             bool
 }
+
+// SetClusterLayout installs a new cluster-layout generation (ADR-0028) —
+// the replicated placement basis, not an object mutation. It is a
+// compare-and-set: apply accepts it only when Version is exactly one
+// greater than the stored layout's (the first install is Version 1), so a
+// reconciling leader that retransmits, or two proposals that race, converge
+// every replica to the same layout instead of clobbering each other.
+// Members is the ordered node-ID set placement ranks over; PartitionCount
+// is the cluster constant (ADR-0004), fixed at the first install.
+type SetClusterLayout struct {
+	ProposedAtUnixMS int64
+	Version          uint64
+	PartitionCount   uint32
+	Members          []string
+}

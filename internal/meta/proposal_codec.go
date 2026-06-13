@@ -38,7 +38,7 @@ const (
 	propUploadPart      = 12
 	propCompleteUpload  = 13
 	propAbortUpload     = 14
-	propReservedLayout  = 15 // cluster layout, v0.4
+	propSetLayout       = 15 // cluster layout (ADR-0028)
 	propReservedNode    = 16 // membership records, v0.2
 )
 
@@ -142,6 +142,13 @@ func EncodeProposal(p any) []byte {
 		cmd = putString(cmd, 1, c.Bucket)
 		cmd = putString(cmd, 2, c.Key)
 		cmd = putID(cmd, 3, c.UploadID)
+	case SetClusterLayout:
+		atMS, num = c.ProposedAtUnixMS, propSetLayout
+		cmd = putUvarint(cmd, 1, c.Version)
+		cmd = putUvarint(cmd, 2, uint64(c.PartitionCount))
+		for _, m := range c.Members {
+			cmd = putString(cmd, 3, m)
+		}
 	default:
 		panic(fmt.Sprintf("meta: unencodable proposal type %T", p))
 	}
@@ -170,7 +177,7 @@ func DecodeProposal(b []byte) (any, error) {
 			d.uint32() // format_version: additive, no branching yet
 		case d.num == propAt:
 			atMS = d.int64()
-		case d.num >= propCreateBucket && d.num <= propAbortUpload:
+		case d.num >= propCreateBucket && d.num <= propSetLayout:
 			if seen {
 				d.fail("proposal carries more than one command")
 				break
@@ -421,6 +428,21 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.Key = d.str()
 			case 3:
 				c.UploadID = d.id()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propSetLayout:
+		c := SetClusterLayout{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.Version = d.uvarint()
+			case 2:
+				c.PartitionCount = d.uint32()
+			case 3:
+				c.Members = append(c.Members, d.str())
 			default:
 				d.skipUnknown(nil)
 			}

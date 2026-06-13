@@ -35,6 +35,7 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0025](0025-force-new-cluster-recovery.md) | `cluster recover` is an offline force-new-cluster, and the local log wins |
 | [0026](0026-stripe-and-shard-layout.md) | Stripe and shard layout: contiguous 256 KiB slices, self-describing shard files |
 | [0027](0027-v03-distributed-data-path.md) | The v0.3 distributed data path: derived placement, shard transfer over the seam, coordinator state machines |
+| [0028](0028-stored-cluster-layout.md) | The stored, versioned cluster layout: placement reads from a replicated record, compare-and-set on install |
 
 ## Template
 

@@ -304,6 +304,41 @@ func (s *Store) lockTarget(bucket, key string, vid VersionID) (VersionEntry, err
 	return entry, nil
 }
 
+// ApplySetClusterLayout installs a new cluster-layout generation (ADR-0028):
+// the replicated placement basis, committed like any other proposal but
+// naming nodes, not objects. Compare-and-set on Version — the first layout
+// must be Version 1 and each later one exactly the stored Version plus one —
+// so a reconciling leader that retransmits, or two proposals that race, is
+// refused deterministically (ErrStaleLayout) instead of overwriting a newer
+// layout; every replica converges to the same generation. The partition
+// count is fixed at the first install and may never change (ADR-0004: never
+// resized); a later layout disagreeing on it is refused. A layout with no
+// members or a zero partition count is invalid.
+func (s *Store) ApplySetClusterLayout(p SetClusterLayout) (err error) {
+	defer s.txn(&err)()
+	want := uint64(1)
+	if prev, ok := s.kv.get(clusterLayoutKey); ok {
+		cur := prev.(ClusterLayout)
+		want = cur.Version + 1
+		if p.PartitionCount != cur.PartitionCount {
+			return ErrInvalidLayout
+		}
+	}
+	if p.Version != want {
+		return ErrStaleLayout
+	}
+	if p.PartitionCount == 0 || len(p.Members) == 0 {
+		return ErrInvalidLayout
+	}
+	s.kv.set(clusterLayoutKey, ClusterLayout{
+		FormatVersion:  currentFormatVersion,
+		Version:        p.Version,
+		PartitionCount: p.PartitionCount,
+		Members:        append([]string(nil), p.Members...),
+	})
+	return nil
+}
+
 // removeNullVersion deletes the key's null-version entry if one exists, as
 // part of an unversioned or suspended write. The lock check is defense in
 // depth: lock-enabled buckets can never reach this path, but no code path

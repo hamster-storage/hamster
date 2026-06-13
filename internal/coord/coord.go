@@ -16,22 +16,24 @@
 //
 // [ADR-0015]: ../../docs/adr/0015-storage-profiles.md
 // [ADR-0027]: ../../docs/adr/0027-v03-distributed-data-path.md
+// [ADR-0028]: ../../docs/adr/0028-stored-cluster-layout.md
 package coord
 
 import (
 	"math/rand/v2"
 
 	"github.com/hamster-storage/hamster/internal/datapath"
-	"github.com/hamster-storage/hamster/internal/ec"
 	"github.com/hamster-storage/hamster/internal/meta"
+	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/raftnode"
 	"github.com/hamster-storage/hamster/internal/seam"
 )
 
-// Config carries a Coordinator's world and cluster shape. In v0.3 the
-// member set and profile are fixed at construction ([ADR-0027] decision
-// 2: derived placement holds membership static until the stored layout
-// ships in v0.4); both move into replicated ClusterConfig with it.
+// Config carries a Coordinator's world and cluster shape. Placement reads
+// from the stored, versioned cluster layout ([ADR-0028]): the member set
+// and partition count are a committed fact, resolved per operation, not
+// recomputed from whoever is in the cluster at the moment ([ADR-0027]
+// decision 2 described the v0.3 derived placement this replaces).
 type Config struct {
 	// Clock and Rand are the node's loop-owned time and randomness —
 	// version IDs are minted from explicit inputs, never ambient ones.
@@ -43,15 +45,14 @@ type Config struct {
 	// Raft is the node's metadata plane: proposals in, store out.
 	Raft *raftnode.Node
 
-	// Members reports the data-plane member set placement ranks over —
-	// read per operation, so replicated membership changes are seen
-	// without restarts. Must be loop-safe (called on the loop).
-	Members func() []seam.NodeID
-	// PartitionCount is the cluster's fixed partition count.
-	PartitionCount uint32
-	// Profile reports the active storage profile for new writes — read
-	// per operation, following the auto ladder as membership moves.
-	Profile func() ec.Profile
+	// Layout resolves the cluster's placement basis for one operation: the
+	// stored, versioned cluster layout ([ADR-0028]), read once per op so an
+	// object's partition and its node ranking share a single generation. ok
+	// is false until the first layout is installed (the cluster is still
+	// forming); the operation then refuses transiently. The active storage
+	// profile follows the layout's member count (the auto ladder). Loop-safe
+	// — called on the loop.
+	Layout func() (place.Layout, bool)
 }
 
 // Coordinator runs data-path operations for one node.

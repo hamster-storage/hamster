@@ -42,6 +42,8 @@ func fullProposals() []any {
 			VersionID: vid, ETag: []byte{0xE4},
 			Parts: []CompletedPart{{PartNumber: 1, ETag: []byte{0x51}}, {PartNumber: 2, ETag: []byte{0x52}}}},
 		AbortMultipartUpload{ProposedAtUnixMS: 1700000000012, Bucket: "docs", Key: "k", UploadID: uid},
+		SetClusterLayout{ProposedAtUnixMS: 1700000000013, Version: 3, PartitionCount: 4096,
+			Members: []string{"n1", "n2", "n3"}},
 	}
 }
 
