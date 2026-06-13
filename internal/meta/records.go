@@ -235,3 +235,26 @@ type PartRecord struct {
 
 	unknown []byte
 }
+
+// ClusterLayout is the singleton row under s/layout — the replicated,
+// versioned placement basis (ADR-0004, ADR-0028). It names the ordered
+// member set that the placement function ranks over, so every node and
+// every restart computes the same partition→node assignment from a
+// committed fact rather than from whoever happens to be in the cluster at
+// the moment a read or write arrives.
+//
+// Version is a monotonic generation: a new layout is installed by proposing
+// Version = prior + 1 (the first install is Version 1), which makes layout
+// changes a compare-and-set and gives a future rebalance (v0.4) the old→new
+// pair it needs to track a migration. PartitionCount is the cluster
+// constant (ADR-0004: fixed at creation, never resized) carried so the
+// record is self-contained. Members are raw node-ID strings so this package
+// imports nothing of the seam; the cluster layer maps them to seam.NodeID.
+type ClusterLayout struct {
+	FormatVersion  uint32
+	Version        uint64
+	PartitionCount uint32
+	Members        []string
+
+	unknown []byte
+}

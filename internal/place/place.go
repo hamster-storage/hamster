@@ -57,6 +57,25 @@ func Partition(id meta.VersionID, count uint32) uint64 {
 	return mix(h.Sum64()) % uint64(count)
 }
 
+// Layout is a resolved snapshot of the stored cluster layout (ADR-0028):
+// the placement basis a single operation reads once, so an object's
+// partition and its node ranking are computed from one generation, never
+// two. The cluster layer builds it from meta.ClusterLayout (mapping the
+// stored node-ID strings to seam.NodeID); v0.3's live-membership getter is
+// gone — placement is a committed fact now.
+type Layout struct {
+	Version        uint64
+	PartitionCount uint32
+	Members        []seam.NodeID
+}
+
+// Nodes returns the first width nodes of this layout's ranking for the
+// partition — the same rendezvous ranking as the package-level Nodes,
+// sourced from a committed layout's member set.
+func (l Layout) Nodes(partition uint64, width int) ([]seam.NodeID, error) {
+	return Nodes(partition, l.Members, width)
+}
+
 // Nodes returns the first width nodes of the partition's rendezvous
 // ranking: members ordered by descending FNV-1a 64 of (partition, member),
 // ties broken by member ID. A ranking of distinct members is a

@@ -464,6 +464,37 @@ func unmarshalPartRecord(b []byte) (PartRecord, error) {
 	return p, d.err
 }
 
+func marshalClusterLayout(l ClusterLayout) []byte {
+	var b []byte
+	b = putUvarint(b, 1, uint64(l.FormatVersion))
+	b = putUvarint(b, 2, l.Version)
+	b = putUvarint(b, 3, uint64(l.PartitionCount))
+	for _, m := range l.Members {
+		b = putString(b, 4, m)
+	}
+	return append(b, l.unknown...)
+}
+
+func unmarshalClusterLayout(b []byte) (ClusterLayout, error) {
+	var l ClusterLayout
+	d := &dec{b: b}
+	for d.next() {
+		switch d.num {
+		case 1:
+			l.FormatVersion = d.uint32()
+		case 2:
+			l.Version = d.uvarint()
+		case 3:
+			l.PartitionCount = d.uint32()
+		case 4:
+			l.Members = append(l.Members, d.str())
+		default:
+			d.skipUnknown(&l.unknown)
+		}
+	}
+	return l, d.err
+}
+
 // --- row dispatch: a key's shape names its record type ---
 
 // marshalRecord encodes any keyspace record value.
@@ -479,6 +510,8 @@ func marshalRecord(v any) []byte {
 		return marshalUploadRecord(r)
 	case PartRecord:
 		return marshalPartRecord(r)
+	case ClusterLayout:
+		return marshalClusterLayout(r)
 	default:
 		panic(fmt.Sprintf("meta: unencodable record type %T", v))
 	}
@@ -489,6 +522,8 @@ func marshalRecord(v any) []byte {
 // distinguishes an upload row (16 bytes) from a part row (20).
 func decodeRow(key string, value []byte) (any, error) {
 	switch {
+	case key == clusterLayoutKey:
+		return unmarshalClusterLayout(value)
 	case strings.HasPrefix(key, bucketScanPrefix):
 		return unmarshalBucketConfig(value)
 	case strings.HasPrefix(key, "v/"):

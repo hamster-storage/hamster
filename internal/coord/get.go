@@ -8,7 +8,6 @@ import (
 
 	"github.com/hamster-storage/hamster/internal/ec"
 	"github.com/hamster-storage/hamster/internal/meta"
-	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/seam"
 	"github.com/hamster-storage/hamster/internal/stream"
 )
@@ -56,7 +55,12 @@ func (c *Coordinator) Get(bucket, key string, off, length int64, done func([]byt
 	}
 
 	width := int(entry.ECDataShards + entry.ECParityShards)
-	nodes, err := place.Nodes(entry.Partition, c.cfg.Members(), width)
+	layout, ok := c.cfg.Layout()
+	if !ok {
+		done(nil, fmt.Errorf("coord: no cluster layout: %w", ErrUnreadable))
+		return
+	}
+	nodes, err := layout.Nodes(entry.Partition, width)
 	if err != nil {
 		done(nil, fmt.Errorf("coord: resolving partition %d: %w", entry.Partition, err))
 		return
@@ -340,7 +344,11 @@ func (c *Coordinator) DeleteShards(e meta.VersionEntry) {
 	if width == 0 {
 		return // a v0.1 whole-blob entry; not this data path's to reclaim
 	}
-	nodes, err := place.Nodes(e.Partition, c.cfg.Members(), width)
+	layout, ok := c.cfg.Layout()
+	if !ok {
+		return // no layout to resolve holders against; orphans await GC
+	}
+	nodes, err := layout.Nodes(e.Partition, width)
 	if err != nil {
 		return
 	}

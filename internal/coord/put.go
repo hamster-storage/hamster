@@ -44,10 +44,18 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 	now := c.cfg.Clock.Now()
 	vid := meta.NewVersionID(now, c.cfg.Rand)
 	size := int64(len(body))
-	k, m := c.cfg.Profile().Params(size)
 
-	partition := place.Partition(vid, c.cfg.PartitionCount)
-	nodes, err := place.Nodes(partition, c.cfg.Members(), k+m)
+	layout, ok := c.cfg.Layout()
+	if !ok {
+		// No layout installed yet — the cluster is still forming. Refuse
+		// transiently, the same SlowDown a write below the floor gets.
+		done(PutResult{}, fmt.Errorf("coord: no cluster layout yet: %w", ErrRefused))
+		return
+	}
+	k, m := ec.AutoProfile(len(layout.Members)).Params(size)
+
+	partition := place.Partition(vid, layout.PartitionCount)
+	nodes, err := layout.Nodes(partition, k+m)
 	if err != nil {
 		done(PutResult{}, fmt.Errorf("coord: placing %d shards: %w", k+m, err))
 		return

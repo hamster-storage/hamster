@@ -31,6 +31,20 @@ func (s *Store) ListBuckets() []BucketConfig {
 	return out
 }
 
+// ClusterLayout returns the installed cluster layout (ADR-0028), present
+// once the first generation has been committed. Placement resolves against
+// it rather than the live member set. The returned Members slice is a copy
+// the caller may hold and mutate freely.
+func (s *Store) ClusterLayout() (ClusterLayout, bool) {
+	v, ok := s.kv.get(clusterLayoutKey)
+	if !ok {
+		return ClusterLayout{}, false
+	}
+	l := v.(ClusterLayout)
+	l.Members = slices.Clone(l.Members)
+	return l, true
+}
+
 // Current returns the derived current-version record for a key: present
 // if and only if the key's newest version is a live object.
 func (s *Store) Current(bucket, key string) (CurrentRecord, bool) {

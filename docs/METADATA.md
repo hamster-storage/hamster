@@ -152,13 +152,14 @@ message BucketConfig {
   DefaultRetention default_retention = 6;
 }
 
-message ClusterLayout {
-  uint32 format_version = 1;
-  uint64 layout_version = 2;   // monotonic; bumped by every topology change
-  repeated PartitionAssignment assignments = 3;  // partition -> ordered k+m node IDs
-  // During a rebalance: the previous assignments, so reads consult both.
-  repeated PartitionAssignment previous_assignments = 4;
-  TransitionState transition = 5;
+message ClusterLayout {          // s/layout, ADR-0028
+  uint32 format_version  = 1;
+  uint64 version         = 2;   // monotonic generation; compare-and-set on install
+  uint32 partition_count = 3;   // the cluster constant (ADR-0004), until ClusterConfig lands
+  repeated string members = 4;  // ordered node IDs; placement ranks over this set (ADR-0027)
+  // Rebalance (later v0.4 passes) adds the explicit per-partition assignments,
+  // the previous assignments, and a transition state for mid-migration
+  // dual-read that ADR-0004 describes — additive fields from here.
 }
 
 message ClusterConfig {
@@ -213,8 +214,8 @@ message Proposal {
     UploadPart              upload_part               = 12;
     CompleteMultipartUpload complete_multipart_upload = 13;
     AbortMultipartUpload    abort_multipart_upload    = 14;
-    // 15 update_layout and 16 update_node are reserved: cluster layout
-    // (v0.4) and membership records (v0.2) arrive additively.
+    SetClusterLayout        set_layout                = 15;  // cluster layout (ADR-0028)
+    // 16 update_node is reserved: membership records arrive additively.
   }
 }
 ```

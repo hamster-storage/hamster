@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,7 +19,7 @@ import (
 	"github.com/hamster-storage/hamster/internal/certs"
 	"github.com/hamster-storage/hamster/internal/coord"
 	"github.com/hamster-storage/hamster/internal/datapath"
-	"github.com/hamster-storage/hamster/internal/ec"
+	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/raftnode"
 	"github.com/hamster-storage/hamster/internal/seam"
@@ -46,6 +48,7 @@ type Node struct {
 	transport *sys.Transport
 	raft      *raftnode.Node
 	rng       *mathrand.Rand // loop-owned, shared by raft timing and minting
+	clock     seam.Clock     // loop-owned; stamps layout-reconcile proposals
 	data      *datapath.Service
 	coord     *coord.Coordinator
 	s3        *s3Server // nil unless ServeS3 was asked for
@@ -159,6 +162,7 @@ func Run(dataDir string) (*Node, error) {
 		rng := mathrand.New(mathrand.NewPCG(
 			binary.LittleEndian.Uint64(seed[0:8]), binary.LittleEndian.Uint64(seed[8:16])))
 		n.rng = rng
+		n.clock = clock
 		rn, err := raftnode.New(raftnode.Config{
 			ID: cfg.RaftID, Peers: raftPeers, Dials: dials, Join: cfg.Join,
 			Clock:     clock,
@@ -171,24 +175,26 @@ func Run(dataDir string) (*Node, error) {
 		// Every cluster node is a shard holder: the data-plane service
 		// answers writes, reads, verifies, and deletes from its peers.
 		n.data = datapath.New(datapath.Config{Clock: clock, Transport: transport, Disk: disk})
-		// The coordinator drives this node's own S3 operations. The
-		// member set and the auto-ladder profile are read per operation
-		// from the replicated membership, so every node places across
-		// the same converged set with no restarts (derived placement,
-		// ADR-0027 decision 2 — joins after data exists still wait for
-		// the stored layout in v0.4 to move existing shards).
-		members := func() []seam.NodeID {
-			var ms []seam.NodeID
-			for _, m := range rn.Members() {
-				ms = append(ms, m.Addr)
-			}
-			return ms
-		}
+		// The coordinator drives this node's own S3 operations. Placement
+		// resolves from the stored, versioned cluster layout (ADR-0028):
+		// every node reads the same committed member set and partition
+		// count, so the same object lands on the same nodes regardless of
+		// transient membership views. The layout is reconciled toward the
+		// Raft membership by the leader (reconcileLayout); the auto-ladder
+		// profile follows the layout's member count inside the coordinator.
 		n.coord = coord.New(coord.Config{
 			Clock: clock, Rand: rng, Data: n.data, Raft: rn,
-			Members:        members,
-			PartitionCount: place.DefaultPartitionCount,
-			Profile:        func() ec.Profile { return ec.AutoProfile(len(members())) },
+			Layout: func() (place.Layout, bool) {
+				cl, ok := rn.Store().ClusterLayout()
+				if !ok {
+					return place.Layout{}, false
+				}
+				ms := make([]seam.NodeID, len(cl.Members))
+				for i, m := range cl.Members {
+					ms[i] = seam.NodeID(m)
+				}
+				return place.Layout{Version: cl.Version, PartitionCount: cl.PartitionCount, Members: ms}, true
+			},
 		})
 		built <- err
 	})
@@ -283,8 +289,50 @@ func (n *Node) syncPeers() {
 					n.transport.AddPeer(seam.NodeID(m.NodeID), m.Dial)
 				}
 			}
+			// Drive the stored cluster layout toward membership. Only the
+			// leader's proposal commits; every other node's is a benign
+			// no-op (ADR-0028). This is what installs the first layout once
+			// a leader exists and advances it as the cluster forms.
+			n.loop.Post(n.reconcileLayout)
 		}
 	}
+}
+
+// reconcileLayout advances the stored cluster layout (ADR-0028) toward the
+// current Raft membership. Runs on the loop. Every node may call it freely:
+// Propose is leader-gated and the apply is a compare-and-set on the layout
+// version, so a non-leader or a stale generation is an ignored outcome, and
+// a layout already matching membership proposes nothing. Members are sorted
+// so the proposal is byte-identical whichever leader composes it — placement
+// ranks by hash, so the order in the record never affects where shards land.
+func (n *Node) reconcileLayout() {
+	if n.raft == nil {
+		return
+	}
+	desired := make([]string, 0, 8)
+	for _, m := range n.raft.Members() {
+		desired = append(desired, string(m.Addr))
+	}
+	if len(desired) == 0 {
+		return
+	}
+	sort.Strings(desired)
+	cur, ok := n.raft.Store().ClusterLayout()
+	if ok && slices.Equal(cur.Members, desired) {
+		return // already current
+	}
+	next := uint64(1)
+	pc := uint32(place.DefaultPartitionCount)
+	if ok {
+		next = cur.Version + 1
+		pc = cur.PartitionCount
+	}
+	n.raft.Propose(meta.SetClusterLayout{
+		ProposedAtUnixMS: n.clock.Now().UnixMilli(),
+		Version:          next,
+		PartitionCount:   pc,
+		Members:          desired,
+	}, func(any, error) {}) // stale / not-leader outcomes are benign
 }
 
 func (n *Node) acceptLoop() {

@@ -2,7 +2,12 @@
 
 ## Status
 
-Accepted
+Accepted. First implementation step landed in v0.4 pass 1: the layout is now a
+stored, versioned, Raft-replicated `ClusterLayout` record that placement reads
+from ([ADR-0028](0028-stored-cluster-layout.md)). That pass stores the member
+set and derives per-partition assignments by rendezvous; the explicit
+old→new transition tracking and incremental rebalance this ADR describes are
+the remaining v0.4 passes.
 
 ## Context
 
