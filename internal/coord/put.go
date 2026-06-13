@@ -30,18 +30,24 @@ const (
 // because an acknowledgment here would be a durability lie (ADR-0015).
 var ErrRefused = fmt.Errorf("coord: too few nodes reachable to write durably (SlowDown)")
 
+// PutOptions carries the S3 request facts the committed version records.
+type PutOptions struct {
+	ContentType  string
+	UserMetadata map[string]string
+}
+
 // Put stores one object: erasure-code the body onto the partition's
 // nodes, enforce the ack rule, commit the metadata through Raft, and call
 // done exactly once on the loop. The body slice must not be mutated until
 // done fires.
-func (c *Coordinator) Put(bucket, key string, body []byte, done func(PutResult, error)) {
+func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done func(PutResult, error)) {
 	now := c.cfg.Clock.Now()
 	vid := meta.NewVersionID(now, c.cfg.Rand)
 	size := int64(len(body))
-	k, m := c.cfg.Profile.Params(size)
+	k, m := c.cfg.Profile().Params(size)
 
 	partition := place.Partition(vid, c.cfg.PartitionCount)
-	nodes, err := place.Nodes(partition, c.cfg.Members, k+m)
+	nodes, err := place.Nodes(partition, c.cfg.Members(), k+m)
 	if err != nil {
 		done(PutResult{}, fmt.Errorf("coord: placing %d shards: %w", k+m, err))
 		return
@@ -50,7 +56,7 @@ func (c *Coordinator) Put(bucket, key string, body []byte, done func(PutResult, 
 	etag := md5.Sum(body)
 	objSum := sha256.Sum256(body)
 	op := &putOp{
-		c: c, done: done,
+		c: c, done: done, opts: opts,
 		bucket: bucket, key: key, atMS: now.UnixMilli(),
 		vid: vid, body: body, k: k, m: m,
 		floor:     min(k+1, k+m),
@@ -111,6 +117,7 @@ type putOp struct {
 	done func(PutResult, error)
 
 	bucket, key string
+	opts        PutOptions
 	atMS        int64
 	vid         meta.VersionID
 	body        []byte
@@ -229,6 +236,8 @@ func (op *putOp) evaluate(lastErr error) {
 		VersionID:        op.vid,
 		Size:             int64(len(op.body)),
 		ETag:             op.etag,
+		ContentType:      op.opts.ContentType,
+		UserMetadata:     op.opts.UserMetadata,
 		Partition:        op.partition,
 		ECDataShards:     uint32(op.k),
 		ECParityShards:   uint32(op.m),

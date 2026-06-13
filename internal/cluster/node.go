@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/certs"
+	"github.com/hamster-storage/hamster/internal/coord"
+	"github.com/hamster-storage/hamster/internal/datapath"
+	"github.com/hamster-storage/hamster/internal/ec"
+	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/raftnode"
 	"github.com/hamster-storage/hamster/internal/seam"
 	"github.com/hamster-storage/hamster/internal/sys"
@@ -41,6 +45,10 @@ type Node struct {
 
 	transport *sys.Transport
 	raft      *raftnode.Node
+	rng       *mathrand.Rand // loop-owned, shared by raft timing and minting
+	data      *datapath.Service
+	coord     *coord.Coordinator
+	s3        *s3Server // nil unless ServeS3 was asked for
 	joinLn    net.Listener
 	stopSync  chan struct{}
 
@@ -88,10 +96,25 @@ func Run(dataDir string) (*Node, error) {
 	transport, err := sys.NewTransport(sys.TransportConfig{
 		NodeID: seam.NodeID(cfg.NodeID), Listen: cfg.ClusterAddr, Peers: peers,
 		Cert: cert, CA: pool,
+		// The channel envelope (ADR-0027 decision 6): Raft and shard
+		// traffic share the transport; the demux routes by channel.
+		// Unknown channels and malformed envelopes drop — silence is
+		// always safe on this transport, peers retry or re-elect.
 		Deliver: func(from seam.NodeID, msg []byte) {
 			loop.Post(func() {
-				if n.raft != nil {
-					n.raft.HandleMessage(from, msg)
+				ch, payload, err := datapath.Unwrap(msg)
+				if err != nil {
+					return
+				}
+				switch ch {
+				case datapath.ChannelRaft:
+					if n.raft != nil {
+						n.raft.HandleMessage(from, payload)
+					}
+				case datapath.ChannelData:
+					if n.data != nil {
+						_ = n.data.HandleData(from, payload)
+					}
 				}
 			})
 		},
@@ -132,16 +155,41 @@ func Run(dataDir string) (*Node, error) {
 
 	built := make(chan error, 1)
 	loop.Post(func() {
+		clock := sys.LoopClock(sys.Clock{}, loop)
+		rng := mathrand.New(mathrand.NewPCG(
+			binary.LittleEndian.Uint64(seed[0:8]), binary.LittleEndian.Uint64(seed[8:16])))
+		n.rng = rng
 		rn, err := raftnode.New(raftnode.Config{
 			ID: cfg.RaftID, Peers: raftPeers, Dials: dials, Join: cfg.Join,
-			Clock:     sys.LoopClock(sys.Clock{}, loop),
-			Transport: transport, Disk: disk,
-			Rand: mathrand.New(mathrand.NewPCG(
-				binary.LittleEndian.Uint64(seed[0:8]), binary.LittleEndian.Uint64(seed[8:16]))),
+			Clock:     clock,
+			Transport: raftTransport{transport}, Disk: disk,
+			Rand:         rng,
 			TickInterval: tickInterval, ElectionTicks: electionTicks,
 			OnMembershipChange: onMembership,
 		})
 		n.raft = rn
+		// Every cluster node is a shard holder: the data-plane service
+		// answers writes, reads, verifies, and deletes from its peers.
+		n.data = datapath.New(datapath.Config{Clock: clock, Transport: transport, Disk: disk})
+		// The coordinator drives this node's own S3 operations. The
+		// member set and the auto-ladder profile are read per operation
+		// from the replicated membership, so every node places across
+		// the same converged set with no restarts (derived placement,
+		// ADR-0027 decision 2 — joins after data exists still wait for
+		// the stored layout in v0.4 to move existing shards).
+		members := func() []seam.NodeID {
+			var ms []seam.NodeID
+			for _, m := range rn.Members() {
+				ms = append(ms, m.Addr)
+			}
+			return ms
+		}
+		n.coord = coord.New(coord.Config{
+			Clock: clock, Rand: rng, Data: n.data, Raft: rn,
+			Members:        members,
+			PartitionCount: place.DefaultPartitionCount,
+			Profile:        func() ec.Profile { return ec.AutoProfile(len(members())) },
+		})
 		built <- err
 	})
 	if err := <-built; err != nil {
@@ -171,10 +219,22 @@ func Run(dataDir string) (*Node, error) {
 	return n, nil
 }
 
-// Stop shuts the node down: listener, peer sync, transport, loop.
+// raftTransport wraps Raft traffic in the channel envelope on its way to
+// the shared transport.
+type raftTransport struct{ t seam.Transport }
+
+func (rt raftTransport) Send(to seam.NodeID, msg []byte) {
+	rt.t.Send(to, datapath.Wrap(datapath.ChannelRaft, msg))
+}
+
+// Stop shuts the node down: S3 listener, join listener, peer sync,
+// transport, loop — HTTP before the loop, per the gateway contract.
 // Stopping twice is fine.
 func (n *Node) Stop() {
 	n.stopped.Do(func() {
+		if n.s3 != nil {
+			n.s3.stop()
+		}
 		close(n.stopSync)
 		if n.joinLn != nil {
 			n.joinLn.Close()

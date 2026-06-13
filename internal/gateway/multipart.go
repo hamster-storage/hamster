@@ -42,6 +42,9 @@ type initiateMultipartUploadResult struct {
 }
 
 func (g *Gateway) createMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	if g.refuseOnCluster(w, r) {
+		return
+	}
 	uid, now := g.cfg.Meta.MintVersionID()
 	applyErr := g.cfg.Meta.ApplyCreateMultipartUpload(meta.CreateMultipartUpload{
 		ProposedAtUnixMS: now.UnixMilli(),

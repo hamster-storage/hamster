@@ -77,6 +77,12 @@ func (g *Gateway) deleteObjects(w http.ResponseWriter, r *http.Request, id *sigv
 			out.Errors = append(out.Errors, deleteErrorEntry{Key: o.Key, Code: s3e.Code, Message: s3e.Message})
 			continue
 		}
+		var displaced meta.VersionEntry
+		if g.cfg.Objects != nil {
+			if cur, ok := g.cfg.Meta.Current(bucket, o.Key); ok {
+				displaced, _ = g.cfg.Meta.GetVersion(bucket, o.Key, cur.VersionID)
+			}
+		}
 		vid, now := g.cfg.Meta.MintVersionID()
 		res, err := g.cfg.Meta.ApplyDeleteObject(meta.DeleteObject{
 			ProposedAtUnixMS: now.UnixMilli(),
@@ -89,9 +95,7 @@ func (g *Gateway) deleteObjects(w http.ResponseWriter, r *http.Request, id *sigv
 			out.Errors = append(out.Errors, deleteErrorEntry{Key: o.Key, Code: s3e.Code, Message: s3e.Message})
 			continue
 		}
-		for _, dataID := range res.RemovedDataIDs {
-			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
-		}
+		g.reclaim(res.RemovedDataIDs, displaced)
 		if !req.Quiet {
 			out.Deleted = append(out.Deleted, deletedEntry{Key: o.Key, DeleteMarker: res.MarkerCreated})
 		}

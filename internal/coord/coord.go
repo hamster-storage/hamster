@@ -43,12 +43,15 @@ type Config struct {
 	// Raft is the node's metadata plane: proposals in, store out.
 	Raft *raftnode.Node
 
-	// Members is the data-plane member set placement ranks over.
-	Members []seam.NodeID
+	// Members reports the data-plane member set placement ranks over —
+	// read per operation, so replicated membership changes are seen
+	// without restarts. Must be loop-safe (called on the loop).
+	Members func() []seam.NodeID
 	// PartitionCount is the cluster's fixed partition count.
 	PartitionCount uint32
-	// Profile is the active storage profile for new writes.
-	Profile ec.Profile
+	// Profile reports the active storage profile for new writes — read
+	// per operation, following the auto ladder as membership moves.
+	Profile func() ec.Profile
 }
 
 // Coordinator runs data-path operations for one node.

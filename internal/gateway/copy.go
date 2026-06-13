@@ -92,6 +92,9 @@ type copyObjectResult struct {
 // MD5 of the bytes, even when the source was multipart (AWS does the
 // same: a copy is a new single-part object).
 func (g *Gateway) copyObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	if g.refuseOnCluster(w, r) {
+		return
+	}
 	directive := r.Header.Get("x-amz-metadata-directive")
 	if directive == "" {
 		directive = "COPY"

@@ -23,6 +23,10 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		writeError(w, r, errEntityTooLarge)
 		return
 	}
+	if g.cfg.Objects != nil {
+		g.putObjectCluster(w, r, id, bucket, key)
+		return
+	}
 
 	// Mint first — the blob needs its address before the body can stream
 	// to disk.
@@ -63,6 +67,29 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 
+	w.Header().Set("ETag", quoteETag(etag))
+	w.WriteHeader(http.StatusOK)
+}
+
+// putObjectCluster is PutObject on the erasure-coded cluster path: the
+// backend places, encodes, transfers, and commits — one call. The body is
+// buffered whole (the v0.3 preview shape, like the single-node GET; the
+// streaming pump arrives with the operational hardening).
+func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string) {
+	body, err := readBody(r, id)
+	if err != nil {
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
+		return
+	}
+	etag, err := g.cfg.Objects.Put(bucket, key, body, r.Header.Get("Content-Type"), userMetadata(r.Header))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
 	w.Header().Set("ETag", quoteETag(etag))
 	w.WriteHeader(http.StatusOK)
 }
@@ -117,15 +144,28 @@ func (g *Gateway) readObjectData(entry meta.VersionEntry) ([]byte, error) {
 // getObject serves GET and HEAD. Range and conditional headers are handled
 // by http.ServeContent over the in-memory blob.
 func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	entry, err := g.lookupCurrent(bucket, key)
-	if err != nil {
-		writeError(w, r, err)
-		return
-	}
-	data, err := g.readObjectData(entry)
-	if err != nil {
-		writeError(w, r, err)
-		return
+	var entry meta.VersionEntry
+	var data []byte
+	var err error
+	if g.cfg.Objects != nil {
+		// The cluster path: bytes and entry from one consistent read,
+		// integrity carried by the frame's chunk CRCs end to end.
+		data, entry, err = g.cfg.Objects.Get(bucket, key)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+	} else {
+		entry, err = g.lookupCurrent(bucket, key)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		data, err = g.readObjectData(entry)
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
 	}
 
 	w.Header().Set("ETag", objectETag(entry.ETag, len(entry.Parts)))
@@ -144,6 +184,16 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 // deleteObject is S3 DeleteObject without a version ID. Idempotent: deleting
 // a missing key is 204, exactly like S3.
 func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	// On the cluster path, shard reclaim needs the displaced version's
+	// parameters; capture them before the delete (best effort — a racing
+	// overwrite leaves an orphan for a future scan, never a wrong delete:
+	// the apply's result says which data IDs were actually freed).
+	var displaced meta.VersionEntry
+	if g.cfg.Objects != nil {
+		if cur, ok := g.cfg.Meta.Current(bucket, key); ok {
+			displaced, _ = g.cfg.Meta.GetVersion(bucket, key, cur.VersionID)
+		}
+	}
 	vid, now := g.cfg.Meta.MintVersionID()
 	res, applyErr := g.cfg.Meta.ApplyDeleteObject(meta.DeleteObject{
 		ProposedAtUnixMS: now.UnixMilli(),
@@ -155,9 +205,7 @@ func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, k
 		writeError(w, r, applyErr)
 		return
 	}
-	for _, dataID := range res.RemovedDataIDs {
-		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
-	}
+	g.reclaim(res.RemovedDataIDs, displaced)
 	if res.MarkerCreated {
 		w.Header().Set("x-amz-delete-marker", "true")
 	}
@@ -193,4 +241,20 @@ func objectETag(etag []byte, partCount int) string {
 		return `"` + hex.EncodeToString(etag) + "-" + strconv.Itoa(partCount) + `"`
 	}
 	return quoteETag(etag)
+}
+
+// reclaim best-effort frees displaced data: blobs on the single-node
+// path; shards through the cluster backend when the freed IDs belong to
+// the captured entry. Anything missed is an orphan for a future scan,
+// unreadable as an object because no metadata names it.
+func (g *Gateway) reclaim(freed []meta.VersionID, displaced meta.VersionEntry) {
+	if g.cfg.Objects == nil {
+		for _, dataID := range freed {
+			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+		}
+		return
+	}
+	if len(freed) > 0 && displaced.DataID == freed[0] {
+		g.cfg.Objects.DeleteShards(displaced)
+	}
 }
