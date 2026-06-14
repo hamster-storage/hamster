@@ -1,6 +1,17 @@
 package meta
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrPersist marks a failure to commit a transaction to durable storage, as
+// distinct from a deterministic validation error returned by apply. The
+// distinction is load bearing on a Raft replica: a committed entry applies on
+// every replica, so a local persist failure that silently reverted in-memory
+// state (as apply does on any error) would diverge this replica from the
+// peers that persisted. Callers applying committed entries treat it as fatal.
+var ErrPersist = errors.New("meta: persist metadata transaction failed")
 
 // Persistence: every apply is one transaction (METADATA.md principle 3),
 // and the transaction is durable before it is visible. The store records
@@ -79,7 +90,7 @@ func (s *Store) txn(errp *error) func() {
 		}
 		if err := s.persist.Commit(rows); err != nil {
 			t.rollback()
-			*errp = fmt.Errorf("persist metadata transaction: %w", err)
+			*errp = fmt.Errorf("%w: %w", ErrPersist, err)
 		}
 	}
 }

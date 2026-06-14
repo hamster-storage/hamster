@@ -93,6 +93,24 @@ type Config struct {
 	// any of those. The composition root logs it; the simulator leaves it
 	// nil.
 	OnMembershipChange func(members []Member)
+
+	// Persister, when set, makes every applied metadata change durable in
+	// an embedded key-value store (BadgerDB in production, ADR-0005) in
+	// addition to the WAL that backs recovery. Nil leaves the store purely
+	// log-recovered — the simulator sets it nil, proving recovery against
+	// the deterministic WAL. Recovery still replays the log either way; the
+	// persister is a write-through durable mirror until the source-of-truth
+	// recovery work lands (docs/PLAN.md).
+	Persister MetaPersister
+}
+
+// MetaPersister is the durable metadata store raftnode mirrors applies into:
+// meta's per-transaction Persister, plus a Reset for the wholesale state
+// replacement a snapshot install performs (a snapshot is the complete state
+// at its index, so the durable copy is replaced, not merged).
+type MetaPersister interface {
+	meta.Persister
+	Reset(rows []meta.Row) error
 }
 
 const defaultSnapshotEntries = 4096
@@ -152,6 +170,10 @@ func New(cfg Config) (*Node, error) {
 	for id, node := range cfg.Peers {
 		n.peers[id] = peerInfo{node: node, dial: cfg.Dials[id]}
 	}
+	// Attach the durable persister (if any) to the initial store, resetting
+	// it to empty. A restart then refills it from the replayed log; a
+	// snapshot restore re-adopts a fresh store below.
+	n.adoptStore(n.store)
 
 	fresh, err := n.recover()
 	if err != nil {
@@ -296,6 +318,22 @@ func (n *Node) replay(records [][]byte) error {
 	return nil
 }
 
+// adoptStore installs store as the replica's metadata state. When a durable
+// persister is configured it is reset to store's contents and attached, so
+// every later apply commits through it — the wholesale-replacement path
+// shared by boot and snapshot install, both of which hand over a complete
+// store. A reset failure is fatal: a replica that cannot make its state
+// durable cannot participate.
+func (n *Node) adoptStore(store *meta.Store) {
+	if n.cfg.Persister != nil {
+		if err := n.cfg.Persister.Reset(store.Dump()); err != nil {
+			panic(fmt.Sprintf("raftnode %d: reset persister: %v", n.cfg.ID, err))
+		}
+		store.SetPersister(n.cfg.Persister)
+	}
+	n.store = store
+}
+
 // restoreSnapshot resets storage and store to a snapshot — the shared core
 // of boot replay and MsgSnap installation.
 func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
@@ -306,7 +344,7 @@ func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
 	if err := n.storage.ApplySnapshot(snap); err != nil {
 		return fmt.Errorf("apply snapshot: %w", err)
 	}
-	n.store = store
+	n.adoptStore(store)
 	maps.Copy(n.peers, members)
 	n.applied = snap.Metadata.Index
 	n.snapIndex = snap.Metadata.Index
@@ -768,6 +806,14 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 			panic(fmt.Sprintf("raftnode %d: entry %d: %v", n.cfg.ID, e.Index, err))
 		}
 		res, err := n.store.Apply(p)
+		if errors.Is(err, meta.ErrPersist) {
+			// The entry committed cluster-wide but this replica could not
+			// make it durable; apply already rolled back in memory, which
+			// would diverge this replica from peers that persisted. Stop
+			// loudly — cannot persist, cannot participate — like the WAL
+			// append failures above.
+			panic(fmt.Sprintf("raftnode %d: apply entry %d: %v", n.cfg.ID, e.Index, err))
+		}
 		for _, done := range n.waiters[e.Index] {
 			done(res, err)
 		}
