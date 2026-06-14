@@ -43,7 +43,8 @@ func fullProposals() []any {
 			Parts: []CompletedPart{{PartNumber: 1, ETag: []byte{0x51}}, {PartNumber: 2, ETag: []byte{0x52}}}},
 		AbortMultipartUpload{ProposedAtUnixMS: 1700000000012, Bucket: "docs", Key: "k", UploadID: uid},
 		SetClusterLayout{ProposedAtUnixMS: 1700000000013, Version: 3, PartitionCount: 4096,
-			Members: []string{"n1", "n2", "n3"}},
+			Nodes:    []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}},
+			Previous: []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}, {ID: "n3", Host: "h3", Zone: "z3"}}},
 		RegisterNode{ProposedAtUnixMS: 1700000000014, NodeID: "n1", Host: "boxA", Zone: "z1", Capacity: 4},
 		SetNodeDraining{ProposedAtUnixMS: 1700000000015, NodeID: "n1", Draining: true},
 	}

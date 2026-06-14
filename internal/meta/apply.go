@@ -336,6 +336,7 @@ func (s *Store) ApplySetClusterLayout(p SetClusterLayout) (err error) {
 		PartitionCount: p.PartitionCount,
 		Members:        append([]string(nil), p.Members...),
 		Nodes:          append([]LayoutNode(nil), p.Nodes...),
+		Previous:       append([]LayoutNode(nil), p.Previous...),
 	})
 	return nil
 }

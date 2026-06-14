@@ -476,6 +476,12 @@ func marshalClusterLayout(l ClusterLayout) []byte {
 		b = protowire.AppendTag(b, 5, protowire.BytesType)
 		b = protowire.AppendBytes(b, marshalLayoutNode(n))
 	}
+	// Field 6 (previous) is additive and written only during a transition, so a
+	// steady-state layout encodes byte-identically to a pre-transition one.
+	for _, n := range l.Previous {
+		b = protowire.AppendTag(b, 6, protowire.BytesType)
+		b = protowire.AppendBytes(b, marshalLayoutNode(n))
+	}
 	return append(b, l.unknown...)
 }
 
@@ -499,6 +505,13 @@ func unmarshalClusterLayout(b []byte) (ClusterLayout, error) {
 				break
 			}
 			l.Nodes = append(l.Nodes, n)
+		case 6:
+			n, err := unmarshalLayoutNode(d.bytes())
+			if err != nil {
+				d.fail("field 6: previous node: %w", err)
+				break
+			}
+			l.Previous = append(l.Previous, n)
 		default:
 			d.skipUnknown(&l.unknown)
 		}

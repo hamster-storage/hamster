@@ -154,6 +154,10 @@ func EncodeProposal(p any) []byte {
 			cmd = protowire.AppendTag(cmd, 4, protowire.BytesType)
 			cmd = protowire.AppendBytes(cmd, marshalLayoutNode(n))
 		}
+		for _, n := range c.Previous {
+			cmd = protowire.AppendTag(cmd, 5, protowire.BytesType)
+			cmd = protowire.AppendBytes(cmd, marshalLayoutNode(n))
+		}
 	case RegisterNode:
 		atMS, num = c.ProposedAtUnixMS, propRegisterNode
 		cmd = putString(cmd, 1, c.NodeID)
@@ -467,6 +471,13 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 					break
 				}
 				c.Nodes = append(c.Nodes, n)
+			case 5:
+				n, err := unmarshalLayoutNode(d.bytes())
+				if err != nil {
+					d.fail("set_layout previous node: %w", err)
+					break
+				}
+				c.Previous = append(c.Previous, n)
 			default:
 				d.skipUnknown(nil)
 			}
