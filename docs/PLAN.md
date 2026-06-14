@@ -18,12 +18,12 @@ The current version. Pass 1 (the stored, versioned cluster layout) and pass 2
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Node liveness — surface it in `cluster status`** — the passive per-node
-  detector and the PUT skip have landed (`internal/coord`: a known-down node is
-  skipped up front instead of paying its retransmit timeout, floor permitting;
-  `Coordinator.DownNodes` exposes the local view). What remains is wiring that
-  view out through the status protocol so `cluster status` shows it, and feeding
-  the detector from GET/repair outcomes too (today only PUT feeds it). The
+- **Node liveness — feed the detector from GET/repair too** — the passive
+  per-node detector, the PUT skip, and the `cluster status` STATE column have
+  landed (`internal/coord`: a known-down node is skipped up front instead of
+  paying its retransmit timeout, floor permitting; `Coordinator.DownNodes`
+  exposes the local view, surfaced through the status protocol). What remains is
+  feeding the detector from GET/repair outcomes too — today only PUT does. The
   replicated `NodeRecord` (ADR-0016, ADR-0004) is where a committed status/
   `DRAINING` flag will hang off.
 - **Draining** — an operator-set drain flag on `NodeRecord`: placement excludes a

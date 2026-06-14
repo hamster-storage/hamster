@@ -68,6 +68,10 @@ import (
 //	  string dial = 3;
 //	  bool learner = 4;
 //	  bool leader = 5;
+//	  string host = 6;
+//	  string zone = 7;
+//	  uint32 capacity = 8;
+//	  bool down = 9;        // the answering node's local liveness view
 //	}
 const (
 	protocolVersion = 1
@@ -81,7 +85,10 @@ const maxFrame = 1 << 20
 // Member is one cluster member as the protocol reports it. Host and Zone are
 // its failure-domain labels (ADR-0016): the machine identity and the domain
 // above it; placement spreads shards across them. Capacity is its relative
-// weight (ADR-0004): zero means equal.
+// weight (ADR-0004): zero means equal. Down is the answering node's local,
+// best-effort liveness view — a peer it currently treats as down (a PUT skips
+// it to avoid the write timeout). It is not a committed cluster fact; a
+// different node may report a different view.
 type Member struct {
 	RaftID   uint64
 	NodeID   string
@@ -91,6 +98,7 @@ type Member struct {
 	Host     string
 	Zone     string
 	Capacity uint32
+	Down     bool
 }
 
 type joinRequest struct {
@@ -247,7 +255,8 @@ func encodeMemberMsg(m Member) []byte {
 	b = putBool(b, 5, m.Leader)
 	b = putString(b, 6, m.Host)
 	b = putString(b, 7, m.Zone)
-	return putUint(b, 8, uint64(m.Capacity))
+	b = putUint(b, 8, uint64(m.Capacity))
+	return putBool(b, 9, m.Down)
 }
 
 func decodeMemberMsg(buf []byte) (Member, error) {
@@ -270,6 +279,8 @@ func decodeMemberMsg(buf []byte) (Member, error) {
 			m.Zone = string(f.b)
 		case 8:
 			m.Capacity = uint32(f.u)
+		case 9:
+			m.Down = f.u != 0
 		}
 		return nil
 	})

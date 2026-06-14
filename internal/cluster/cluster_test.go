@@ -362,6 +362,31 @@ func TestNodeConfigRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMemberDownRoundTrip pins the additive STATE field (Member.Down) through
+// the status-protocol member codec: a down member encodes and decodes back
+// down, and a member without field 9 decodes to up — back-compat with any
+// peer that predates the field.
+func TestMemberDownRoundTrip(t *testing.T) {
+	m := Member{RaftID: 7, NodeID: "n7", Dial: "127.0.0.1:9", Host: "h1", Zone: "za", Capacity: 3, Down: true}
+	got, err := decodeMemberMsg(encodeMemberMsg(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != m {
+		t.Fatalf("member round trip diverged: %+v vs %+v", got, m)
+	}
+	// An "up" member omits field 9 entirely (zero values are not encoded);
+	// it must still decode as up.
+	up := Member{RaftID: 7, NodeID: "n7"}
+	gotUp, err := decodeMemberMsg(encodeMemberMsg(up))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotUp.Down {
+		t.Fatalf("an up member decoded as down: %+v", gotUp)
+	}
+}
+
 // TestClusterZoneLabels proves failure-domain labels (ADR-0016) flow end to
 // end: -zone at join travels the join protocol, the issuer records it, the
 // leader's reconcile composes a labeled layout, and it surfaces in status —
