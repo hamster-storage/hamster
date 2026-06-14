@@ -63,7 +63,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
 
 	// Node 1: init and run. A fresh single-voter cluster.
-	if err := Init(d1, "testcluster", "n1", freeAddr(t), freeAddr(t), "", now); err != nil {
+	if err := Init(d1, "testcluster", "n1", freeAddr(t), freeAddr(t), "", 0, now); err != nil {
 		t.Fatal(err)
 	}
 	n1, err := Run(d1)
@@ -83,7 +83,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if !strings.HasPrefix(tok, "hamster-join-") {
 		t.Fatalf("token %q has no recognizable prefix", tok)
 	}
-	if err := Join(d2, "n2", freeAddr(t), freeAddr(t), tok, ""); err != nil {
+	if err := Join(d2, "n2", freeAddr(t), freeAddr(t), tok, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	n2, err := Run(d2)
@@ -96,7 +96,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	})
 
 	// The token burned on use: a second join with it is refused.
-	if err := Join(t.TempDir(), "nX", freeAddr(t), freeAddr(t), tok, ""); err == nil {
+	if err := Join(t.TempDir(), "nX", freeAddr(t), freeAddr(t), tok, "", 0); err == nil {
 		t.Fatal("a used join token was accepted")
 	} else if !strings.Contains(err.Error(), "already-used") {
 		t.Fatalf("used token refused for the wrong reason: %v", err)
@@ -107,7 +107,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(t.TempDir(), "n2", freeAddr(t), freeAddr(t), tokDup, ""); err == nil {
+	if err := Join(t.TempDir(), "n2", freeAddr(t), freeAddr(t), tokDup, "", 0); err == nil {
 		t.Fatal("a duplicate node ID was accepted")
 	}
 
@@ -116,7 +116,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(t.TempDir(), "n4", freeAddr(t), freeAddr(t), tokOld, ""); err == nil {
+	if err := Join(t.TempDir(), "n4", freeAddr(t), freeAddr(t), tokOld, "", 0); err == nil {
 		t.Fatal("an expired join token was accepted")
 	}
 
@@ -125,7 +125,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(d3, "n3", freeAddr(t), freeAddr(t), tok3, ""); err != nil {
+	if err := Join(d3, "n3", freeAddr(t), freeAddr(t), tok3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	n3, err := Run(d3)
@@ -167,7 +167,7 @@ func TestRecoverRebuildsSingleVoterCluster(t *testing.T) {
 	now := time.Now()
 	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
 
-	if err := Init(d1, "rec", "n1", freeAddr(t), freeAddr(t), "", now); err != nil {
+	if err := Init(d1, "rec", "n1", freeAddr(t), freeAddr(t), "", 0, now); err != nil {
 		t.Fatal(err)
 	}
 	n1, err := Run(d1)
@@ -179,7 +179,7 @@ func TestRecoverRebuildsSingleVoterCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(d2, "n2", freeAddr(t), freeAddr(t), tok, ""); err != nil {
+	if err := Join(d2, "n2", freeAddr(t), freeAddr(t), tok, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	n2, err := Run(d2)
@@ -221,7 +221,7 @@ func TestRecoverRebuildsSingleVoterCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(d3, "n3", freeAddr(t), freeAddr(t), tok3, ""); err != nil {
+	if err := Join(d3, "n3", freeAddr(t), freeAddr(t), tok3, "", 0); err != nil {
 		t.Fatal(err)
 	}
 	n3, err := Run(d3)
@@ -280,7 +280,7 @@ func TestClusterZoneLabels(t *testing.T) {
 	now := time.Now()
 	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
 
-	if err := Init(d1, "zonetest", "n1", freeAddr(t), freeAddr(t), "za", now); err != nil {
+	if err := Init(d1, "zonetest", "n1", freeAddr(t), freeAddr(t), "za", 0, now); err != nil {
 		t.Fatal(err)
 	}
 	n1, err := Run(d1)
@@ -297,7 +297,7 @@ func TestClusterZoneLabels(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Join(dir, id, freeAddr(t), freeAddr(t), tok, zone); err != nil {
+		if err := Join(dir, id, freeAddr(t), freeAddr(t), tok, zone, 0); err != nil {
 			t.Fatal(err)
 		}
 		n, err := Run(dir)
@@ -331,6 +331,65 @@ func TestClusterZoneLabels(t *testing.T) {
 		}
 		if m.Host == "" {
 			t.Fatalf("node %s has no host label", m.NodeID)
+		}
+	}
+}
+
+// TestClusterCapacityWeights proves capacity weights (ADR-0004) flow end to
+// end: -capacity at init/join travels the join protocol, the issuer records
+// it, the leader's reconcile writes it into the committed layout, and it
+// surfaces in status — read back from that same layout, the weight placement
+// biases by. One heavy node (3) and two equal ones (1).
+func TestClusterCapacityWeights(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "captest", "n1", freeAddr(t), freeAddr(t), "", 3, now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	waitStatus(t, d1, "", "n1 leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].Leader
+	})
+
+	join := func(dir, id string, capacity uint32) *Node {
+		tok, err := MintToken(d1, time.Hour, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Join(dir, id, freeAddr(t), freeAddr(t), tok, "", capacity); err != nil {
+			t.Fatal(err)
+		}
+		n, err := Run(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	n2 := join(d2, "n2", 1)
+	defer n2.Stop()
+	n3 := join(d3, "n3", 1)
+	defer n3.Stop()
+
+	want := map[string]uint32{"n1": 3, "n2": 1, "n3": 1}
+	ms := waitStatus(t, d1, "", "three capacity-weighted members", func(ms []Member) bool {
+		if len(ms) != 3 {
+			return false
+		}
+		for _, m := range ms {
+			if m.Capacity != want[m.NodeID] {
+				return false
+			}
+		}
+		return true
+	})
+	for _, m := range ms {
+		if m.Capacity != want[m.NodeID] {
+			t.Fatalf("node %s capacity = %d, want %d", m.NodeID, m.Capacity, want[m.NodeID])
 		}
 	}
 }

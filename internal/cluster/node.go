@@ -210,7 +210,7 @@ func Run(dataDir string) (*Node, error) {
 				eff := cl.EffectiveNodes()
 				nodes := make([]place.Node, len(eff))
 				for i, e := range eff {
-					nodes[i] = place.Node{ID: seam.NodeID(e.ID), Host: e.Host, Zone: e.Zone}
+					nodes[i] = place.Node{ID: seam.NodeID(e.ID), Host: e.Host, Zone: e.Zone, Weight: e.Weight}
 				}
 				return place.Layout{Version: cl.Version, PartitionCount: cl.PartitionCount, Members: nodes}, true
 			},
@@ -299,7 +299,7 @@ func (n *Node) members() []Member {
 				Learner: m.Learner, Leader: m.ID == lead,
 			}
 			if lbl, ok := labels[string(m.Addr)]; ok {
-				mem.Host, mem.Zone = lbl.Host, lbl.Zone
+				mem.Host, mem.Zone, mem.Capacity = lbl.Host, lbl.Zone, lbl.Weight
 			}
 			ms = append(ms, mem)
 		}
@@ -358,7 +358,7 @@ func (n *Node) reconcileLayout() {
 	n.issueMu.Lock()
 	labels := make(map[string]meta.LayoutNode, len(n.cfg.NodeLabels))
 	for _, m := range n.cfg.NodeLabels {
-		labels[m.NodeID] = meta.LayoutNode{ID: m.NodeID, Host: m.Host, Zone: m.Zone}
+		labels[m.NodeID] = meta.LayoutNode{ID: m.NodeID, Host: m.Host, Zone: m.Zone, Weight: m.Capacity}
 	}
 	n.issueMu.Unlock()
 
@@ -504,7 +504,7 @@ func (n *Node) handleJoin(payload []byte) joinOutcome {
 	if zone == "" {
 		zone = host
 	}
-	n.cfg.NodeLabels = upsertLabel(n.cfg.NodeLabels, Member{NodeID: req.NodeID, Host: host, Zone: zone})
+	n.cfg.NodeLabels = upsertLabel(n.cfg.NodeLabels, Member{NodeID: req.NodeID, Host: host, Zone: zone, Capacity: req.Capacity})
 	if err := saveConfig(n.dir, n.cfg); err != nil {
 		return refuse("recording the new member: %v", err)
 	}

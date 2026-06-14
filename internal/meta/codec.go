@@ -514,6 +514,11 @@ func marshalLayoutNode(n LayoutNode) []byte {
 	b = putString(b, 1, n.ID)
 	b = putString(b, 2, n.Host)
 	b = putString(b, 3, n.Zone)
+	// Field 4 (weight) is additive and written only when nonzero, so an
+	// equal-weight node encodes byte-identically to a pre-weighting one.
+	if n.Weight != 0 {
+		b = putUvarint(b, 4, uint64(n.Weight))
+	}
 	return b
 }
 
@@ -528,6 +533,8 @@ func unmarshalLayoutNode(b []byte) (LayoutNode, error) {
 			n.Host = d.str()
 		case 3:
 			n.Zone = d.str()
+		case 4:
+			n.Weight = uint32(d.uvarint())
 		default:
 			d.skipUnknown(nil)
 		}

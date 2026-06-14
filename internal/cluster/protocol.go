@@ -80,15 +80,17 @@ const maxFrame = 1 << 20
 
 // Member is one cluster member as the protocol reports it. Host and Zone are
 // its failure-domain labels (ADR-0016): the machine identity and the domain
-// above it; placement spreads shards across them.
+// above it; placement spreads shards across them. Capacity is its relative
+// weight (ADR-0004): zero means equal.
 type Member struct {
-	RaftID  uint64
-	NodeID  string
-	Dial    string
-	Learner bool
-	Leader  bool
-	Host    string
-	Zone    string
+	RaftID   uint64
+	NodeID   string
+	Dial     string
+	Learner  bool
+	Leader   bool
+	Host     string
+	Zone     string
+	Capacity uint32
 }
 
 type joinRequest struct {
@@ -97,6 +99,7 @@ type joinRequest struct {
 	ClusterAddr string
 	Host        string
 	Zone        string
+	Capacity    uint32
 }
 
 type joinResponse struct {
@@ -243,7 +246,8 @@ func encodeMemberMsg(m Member) []byte {
 	b = putBool(b, 4, m.Learner)
 	b = putBool(b, 5, m.Leader)
 	b = putString(b, 6, m.Host)
-	return putString(b, 7, m.Zone)
+	b = putString(b, 7, m.Zone)
+	return putUint(b, 8, uint64(m.Capacity))
 }
 
 func decodeMemberMsg(buf []byte) (Member, error) {
@@ -264,6 +268,8 @@ func decodeMemberMsg(buf []byte) (Member, error) {
 			m.Host = string(f.b)
 		case 7:
 			m.Zone = string(f.b)
+		case 8:
+			m.Capacity = uint32(f.u)
 		}
 		return nil
 	})
@@ -276,7 +282,8 @@ func encodeJoinRequest(r joinRequest) []byte {
 	b = putString(b, 3, r.NodeID)
 	b = putString(b, 4, r.ClusterAddr)
 	b = putString(b, 5, r.Host)
-	return putString(b, 6, r.Zone)
+	b = putString(b, 6, r.Zone)
+	return putUint(b, 7, uint64(r.Capacity))
 }
 
 func decodeJoinRequest(buf []byte) (joinRequest, error) {
@@ -293,6 +300,8 @@ func decodeJoinRequest(buf []byte) (joinRequest, error) {
 			r.Host = string(f.b)
 		case 6:
 			r.Zone = string(f.b)
+		case 7:
+			r.Capacity = uint32(f.u)
 		}
 		return nil
 	})
