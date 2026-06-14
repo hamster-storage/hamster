@@ -149,6 +149,13 @@ The takeaway, stated plainly: **if you keep versioned or locked data, do not pla
 - **v0.x** — core PUT and GET, erasure coding with repair, partitioned placement, versioning, object lock, the simulation harness, and the upgrade test suite. On disk and on wire formats may change between v0 releases.
 - **v1.0** — stable formats with a compatibility promise, zero downtime rolling upgrades, and the web console.
 
+## Documentation
+
+- [Glossary](docs/GLOSSARY.md) — the vocabulary (object, version, shard, stripe, partition, node, cluster, layout, …), grouped by layer. Start here if a term is unfamiliar.
+- [Architecture](docs/ARCHITECTURE.md) — the system design narrative: request paths, metadata/data separation, erasure coding, placement, upgrades.
+- [Architecture Decision Records](docs/adr/README.md) — one decision per file, with the reasoning and the rejected alternatives.
+- [Roadmap](docs/ROADMAP.md) — the v0.x and v1.0 milestones.
+
 ## Contributing
 
 Early, but contributions are welcome. Hamster is Apache 2.0 licensed, and contributions are accepted under a Developer Certificate of Origin (DCO). Sign your commits with `git commit -s`.

@@ -69,6 +69,7 @@ The first four must pass before any commit. `e2e` and `compat` are not part of t
 
 ## Where the design lives
 
+- [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — the terminology: object, version, shard, stripe, partition, node, cluster, layout, transition, and the rest, grouped by layer and cross-linked. Start here if a term is unfamiliar.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the system design narrative: request paths, metadata/data separation, erasure coding, placement, upgrades, testing.
 - [`docs/SIMULATION.md`](docs/SIMULATION.md) — the testing strategy design: the deterministic simulation harness, the interface seam, fault model, invariants, and the end to end upgrade suite.
 - [`docs/METADATA.md`](docs/METADATA.md) — the metadata schema design: protobuf records, the BadgerDB keyspace, and how S3 operations map to transactions.
