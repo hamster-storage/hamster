@@ -59,11 +59,12 @@ func clusterInit(args []string) error {
 	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address; peers dial it, so use a reachable one")
 	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address")
 	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
+	capacity := fs.Uint("capacity", 0, "relative storage capacity weight (ADR-0004); 0 means equal — set it proportional to disk size on a heterogeneous cluster")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
 	}
-	if err := cluster.Init(*dataDir, *name, *node, *listenCluster, *listenJoin, *zone, time.Now()); err != nil {
+	if err := cluster.Init(*dataDir, *name, *node, *listenCluster, *listenJoin, *zone, uint32(*capacity), time.Now()); err != nil {
 		return err
 	}
 	log.Printf("cluster %q initialized: node %s, transport %s, join %s", *name, *node, *listenCluster, *listenJoin)
@@ -95,11 +96,12 @@ func clusterJoin(args []string) error {
 	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address")
 	token := fs.String("token", "", "join token from `hamster cluster token` (required)")
 	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
+	capacity := fs.Uint("capacity", 0, "relative storage capacity weight (ADR-0004); 0 means equal — set it proportional to disk size on a heterogeneous cluster")
 	fs.Parse(args)
 	if *dataDir == "" || *node == "" || *token == "" {
 		return fmt.Errorf("-data-dir, -node, and -token are required")
 	}
-	if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone); err != nil {
+	if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone, uint32(*capacity)); err != nil {
 		return err
 	}
 	log.Printf("joined as node %s", *node)
@@ -115,6 +117,7 @@ func clusterRun(args []string) error {
 	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address (first boot with -token only)")
 	token := fs.String("token", "", "join token: an uninitialized data directory joins before running; ignored once joined, so the same command line is restart-safe")
 	zone := fs.String("zone", "", "failure-domain label when joining with -token — a rack or AZ (ADR-0016); defaults to the auto-detected host")
+	capacity := fs.Uint("capacity", 0, "relative storage capacity weight when joining with -token (ADR-0004); 0 means equal")
 	s3 := fs.String("s3", "", "serve the S3 API on this address (host:port); empty disables")
 	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
 	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
@@ -129,7 +132,7 @@ func clusterRun(args []string) error {
 		if *node == "" {
 			return fmt.Errorf("-node is required when joining with -token")
 		}
-		if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone); err != nil {
+		if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone, uint32(*capacity)); err != nil {
 			return err
 		}
 		log.Printf("joined as node %s", *node)
@@ -220,7 +223,7 @@ func clusterStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-8s %-16s %-22s %-16s %-12s %-12s\n", "RAFT-ID", "NODE", "ADDRESS", "ROLE", "HOST", "ZONE")
+	fmt.Printf("%-8s %-16s %-22s %-16s %-12s %-12s %-9s\n", "RAFT-ID", "NODE", "ADDRESS", "ROLE", "HOST", "ZONE", "CAPACITY")
 	hosts, zones := map[string]bool{}, map[string]bool{}
 	for _, m := range members {
 		role := "voter"
@@ -230,7 +233,11 @@ func clusterStatus(args []string) error {
 		if m.Leader {
 			role += " (leader)"
 		}
-		fmt.Printf("%-8d %-16s %-22s %-16s %-12s %-12s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone)
+		capacity := "equal"
+		if m.Capacity != 0 {
+			capacity = fmt.Sprintf("%d", m.Capacity)
+		}
+		fmt.Printf("%-8d %-16s %-22s %-16s %-12s %-12s %-9s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone, capacity)
 		if m.Host != "" {
 			hosts[m.Host] = true
 		}

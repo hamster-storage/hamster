@@ -18,8 +18,6 @@ The current version. Pass 1 (the stored, versioned cluster layout) and pass 2
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Capacity weighting** — balance load *within* the failure-domain spread
-  ([ADR-0004](adr/0004-partitioned-placement.md)).
 - **Node liveness / status registry** — the full `NodeRecord` with DOWN detection
   and draining; PUT skips down nodes instead of paying their write timeout. This is
   also where the failure-domain labels ([ADR-0016](adr/0016-failure-domain-hierarchy.md))

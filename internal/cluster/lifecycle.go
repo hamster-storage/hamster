@@ -35,7 +35,7 @@ func detectHost(nodeID string) string {
 	return nodeID
 }
 
-func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr, zone string, now time.Time) error {
+func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr, zone string, capacity uint32, now time.Time) error {
 	if Initialized(dataDir) {
 		return fmt.Errorf("cluster: %s already holds a cluster identity", Dir(dataDir))
 	}
@@ -77,10 +77,10 @@ func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr, zone string, now 
 	return saveConfig(dir, NodeConfig{
 		Cluster: clusterName, NodeID: nodeID, RaftID: 1,
 		ClusterAddr: clusterAddr, JoinAddr: joinAddr,
-		Members:    []Member{{RaftID: 1, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone}},
+		Members:    []Member{{RaftID: 1, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone, Capacity: capacity}},
 		NextRaftID: 2,
-		Host:       host, Zone: zone,
-		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone}},
+		Host:       host, Zone: zone, Capacity: capacity,
+		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone, Capacity: capacity}},
 	})
 }
 
@@ -103,7 +103,7 @@ func MintToken(dataDir string, ttl time.Duration, now time.Time) (string, error)
 // issuer, authenticate it against the token's pinned CA hash, present the
 // token, and persist the identity it returns. The node is a cluster member
 // once `cluster run` starts it and admission commits.
-func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string) error {
+func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string, capacity uint32) error {
 	if Initialized(dataDir) {
 		return fmt.Errorf("cluster: %s already holds a cluster identity", Dir(dataDir))
 	}
@@ -125,7 +125,7 @@ func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string) error {
 	defer conn.Close()
 	req := encodeRequest(reqJoin, encodeJoinRequest(joinRequest{
 		Token: tokenStr, NodeID: nodeID, ClusterAddr: clusterAddr,
-		Host: host, Zone: zone,
+		Host: host, Zone: zone, Capacity: capacity,
 	}))
 	if err := writeFrame(conn, req); err != nil {
 		return fmt.Errorf("cluster: sending join request: %w", err)
@@ -153,13 +153,13 @@ func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string) error {
 			return fmt.Errorf("cluster: writing %s: %w", name, err)
 		}
 	}
-	members := append(resp.Members, Member{RaftID: resp.RaftID, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone})
+	members := append(resp.Members, Member{RaftID: resp.RaftID, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone, Capacity: capacity})
 	return saveConfig(dir, NodeConfig{
 		Cluster: resp.Cluster, NodeID: nodeID, RaftID: resp.RaftID,
 		ClusterAddr: clusterAddr, JoinAddr: joinAddr,
 		Join: true, Members: members,
-		Host: host, Zone: zone,
-		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone}},
+		Host: host, Zone: zone, Capacity: capacity,
+		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone, Capacity: capacity}},
 	})
 }
 

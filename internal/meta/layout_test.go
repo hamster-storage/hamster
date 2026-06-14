@@ -120,6 +120,38 @@ func TestClusterLayoutNodesGolden(t *testing.T) {
 	}
 }
 
+// TestLayoutNodeWeight: the capacity weight (field 4) round-trips, is omitted
+// when zero (so an equal-weight node encodes exactly as before), and is golden-
+// pinned — additive and backward-compatible (ADR-0004, invariant 2).
+func TestLayoutNodeWeight(t *testing.T) {
+	in := ClusterLayout{
+		FormatVersion: 1, Version: 5, PartitionCount: 4096,
+		Nodes: []LayoutNode{
+			{ID: "n1", Host: "h", Zone: "z", Weight: 3},
+			{ID: "n2", Host: "h", Zone: "z"}, // weight 0 (equal)
+		},
+	}
+	out, err := unmarshalClusterLayout(marshalClusterLayout(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(in, out) {
+		t.Fatalf("round trip:\n in: %+v\nout: %+v", in, out)
+	}
+	// A weight-0 node omits field 4, so it is byte-identical to a pre-weighting
+	// node; a weighted one is longer by exactly the field.
+	zero := marshalLayoutNode(LayoutNode{ID: "n1", Host: "h", Zone: "z"})
+	weighted := marshalLayoutNode(LayoutNode{ID: "n1", Host: "h", Zone: "z", Weight: 5})
+	if len(weighted) <= len(zero) {
+		t.Fatalf("weighted node (%d bytes) should exceed unweighted (%d)", len(weighted), len(zero))
+	}
+	// id n1, host h, zone z, weight 5 (tag 0x20, value 0x05).
+	const want = "0a026e311201681a017a2005"
+	if got := hex.EncodeToString(weighted); got != want {
+		t.Fatalf("weighted node bytes:\n got %s\nwant %s", got, want)
+	}
+}
+
 // TestEffectiveNodes: Nodes when present, else the legacy Members IDs with
 // host and zone defaulted to the ID (a pass-1 layout reads as one node per
 // host and zone, spreading exactly as the bare rendezvous ranking).

@@ -241,10 +241,16 @@ type PartRecord struct {
 // one box share it), and its zone (the domain above the machine, an AZ or a
 // rack, defaulting to the host). Placement spreads shards across zones, then
 // hosts, then nodes. Strings, so meta stays free of the seam.
+//
+// Weight is the node's relative capacity (ADR-0004): a higher-weight node
+// holds proportionally more partitions within the spread. Zero means equal,
+// so a layout written before this field existed reads as an unweighted (equal)
+// cluster — the field is additive (invariant 2) and encoded only when nonzero.
 type LayoutNode struct {
-	ID   string
-	Host string
-	Zone string
+	ID     string
+	Host   string
+	Zone   string
+	Weight uint32
 }
 
 // ClusterLayout is the singleton row under s/layout — the replicated,

@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/fnv"
+	"math/bits"
 	"slices"
 
 	"github.com/hamster-storage/hamster/internal/meta"
@@ -62,10 +63,17 @@ func Partition(id meta.VersionID, count uint32) uint64 {
 // an operator label for the domain above the machine (an AZ, a rack),
 // defaulting to the host. Placement spreads shards across zones, then hosts,
 // then nodes.
+//
+// Weight is the node's relative capacity (ADR-0004): a node with twice the
+// weight holds about twice the partitions, within the failure-domain spread. A
+// zero weight means equal (weight 1), so an unweighted cluster — the default,
+// and every layout written before this field existed — ranks exactly as it did
+// without weighting.
 type Node struct {
-	ID   seam.NodeID
-	Host string
-	Zone string
+	ID     seam.NodeID
+	Host   string
+	Zone   string
+	Weight uint32
 }
 
 // Layout is a resolved snapshot of the stored cluster layout (ADR-0028):
@@ -110,14 +118,32 @@ func spread(partition uint64, members []Node, width int) ([]seam.NodeID, error) 
 	}
 
 	type ranked struct {
-		node  Node
-		score uint64
+		node   Node
+		weight uint64
+		negln  uint64 // -ln(score/2^64), Q32 fixed point; the weighted key's denominator
+		score  uint64 // the bare rendezvous score, the equal-weight tiebreak
 	}
 	rank := make([]ranked, len(members))
 	for i, m := range members {
-		rank[i] = ranked{node: m, score: rendezvousScore(partition, m.ID)}
+		w := uint64(m.Weight)
+		if w == 0 {
+			w = 1
+		}
+		s := rendezvousScore(partition, m.ID)
+		rank[i] = ranked{node: m, weight: w, negln: negLn(s), score: s}
 	}
 	slices.SortFunc(rank, func(a, b ranked) int {
+		// Weighted rendezvous, log method: key = weight / -ln(h), highest
+		// wins. cmpKey compares by cross-multiplying in 128-bit integers, so
+		// it is exact and identical on every node (no float, which could
+		// diverge across the CGO_ENABLED=0 cross-builds a cluster may mix).
+		if c := cmpKey(a.weight, a.negln, b.weight, b.negln); c != 0 {
+			return c
+		}
+		// Equal keys fall back to the bare rendezvous score (descending): the
+		// fixed-point -ln can tie distinct scores, and for an equal-weight
+		// cluster this restores the exact pre-weighting ranking, leaving the
+		// pass-2 goldens intact.
 		switch {
 		case a.score != b.score:
 			if a.score > b.score {
@@ -181,6 +207,73 @@ func rendezvousScore(partition uint64, id seam.NodeID) uint64 {
 	h.Write(key[:])
 	h.Write([]byte(id))
 	return mix(h.Sum64())
+}
+
+// ln2Q32 is ln(2) in Q32 fixed point: round(ln(2) * 2^32).
+const ln2Q32 = 2977044472
+
+// negLn returns -ln(h / 2^64) as a Q32 fixed-point integer (the value times
+// 2^32) — the denominator of the weighted-rendezvous key, weight / -ln(h).
+// Pure integer arithmetic: the bit length gives the integer part of log2 and
+// log2-by-squaring gives the mantissa's fraction, scaled by ln2. No float, so
+// it is bit-identical on every platform — placement, which every node must
+// agree on, depends on that. Monotonic in h (a larger score gives a smaller
+// -ln), so with equal weights the ranking is the bare score order.
+func negLn(h uint64) uint64 {
+	if h == 0 {
+		h = 1
+	}
+	bl := bits.Len64(h) // 1..64; the integer part of log2(h) is bl-1
+	// Normalize the mantissa to Q32, value in [1<<32, 2<<32).
+	var mant uint64
+	if bl-1 <= 32 {
+		mant = h << (32 - (bl - 1))
+	} else {
+		mant = h >> ((bl - 1) - 32)
+	}
+	// Fractional bits of log2(mantissa), MSB first, by repeated squaring.
+	var frac uint64
+	x := mant
+	for i := 0; i < 32; i++ {
+		hi, lo := bits.Mul64(x, x)
+		x = hi<<32 | lo>>32 // (x*x) >> 32, keeping Q32
+		frac <<= 1
+		if x >= 2<<32 {
+			x >>= 1
+			frac |= 1
+		}
+	}
+	// -log2(x) = 64 - log2(h) = (65-bl) - frac, in Q32 (always positive: x<1).
+	negLog2 := uint64(65-bl)<<32 - frac
+	hi, lo := bits.Mul64(negLog2, ln2Q32)
+	res := hi<<32 | lo>>32 // * ln2, back to Q32
+	if res == 0 {
+		res = 1 // keep the key's denominator positive (x≈1 rounds here)
+	}
+	return res
+}
+
+// cmpKey orders two weighted-rendezvous keys for a descending sort: -1 when
+// a's key (wa/na) is larger than b's (so a sorts first), +1 when smaller, 0
+// when equal. It cross-multiplies — wa*nb vs wb*na, both denominators positive
+// — in 128-bit integers, so the comparison is exact and platform-independent.
+func cmpKey(wa, na, wb, nb uint64) int {
+	hiA, loA := bits.Mul64(wa, nb)
+	hiB, loB := bits.Mul64(wb, na)
+	switch {
+	case hiA != hiB:
+		if hiA > hiB {
+			return -1
+		}
+		return 1
+	case loA != loB:
+		if loA > loB {
+			return -1
+		}
+		return 1
+	default:
+		return 0
+	}
 }
 
 // Nodes returns the first width nodes of the partition's rendezvous

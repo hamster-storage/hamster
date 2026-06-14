@@ -28,7 +28,8 @@ import (
 //	  uint64 next_raft_id = 9;   // issuance counter; init node only
 //	  string host = 10;          // this node's machine identity (ADR-0016)
 //	  string zone = 11;          // this node's failure-domain label
-//	  repeated Member node_labels = 12;  // issuer's host/zone registry, by node ID
+//	  repeated Member node_labels = 12;  // issuer's host/zone/capacity registry, by node ID
+//	  uint32 capacity = 13;      // this node's relative capacity weight (ADR-0004)
 //	}
 const configVersion = 1
 
@@ -49,6 +50,7 @@ type NodeConfig struct {
 	Host        string
 	Zone        string
 	NodeLabels  []Member
+	Capacity    uint32
 }
 
 // Dir is the cluster directory under a data directory.
@@ -79,6 +81,7 @@ func encodeConfig(c NodeConfig) []byte {
 	for _, m := range c.NodeLabels {
 		b = putBytes(b, 12, encodeMemberMsg(m))
 	}
+	b = putUint(b, 13, uint64(c.Capacity))
 	return b
 }
 
@@ -116,6 +119,8 @@ func decodeConfig(buf []byte) (NodeConfig, error) {
 				return err
 			}
 			c.NodeLabels = append(c.NodeLabels, m)
+		case 13:
+			c.Capacity = uint32(f.u)
 		}
 		return nil
 	})
