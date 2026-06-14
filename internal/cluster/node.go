@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	mathrand "math/rand/v2"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/certs"
@@ -145,6 +147,9 @@ func Run(dataDir string) (*Node, error) {
 	if err != nil {
 		mdb.Close()
 		loop.Stop()
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return nil, fmt.Errorf("cluster listen address %s is already in use — another node on this machine, or a stale process? choose a free port with -listen: %w", cfg.ClusterAddr, err)
+		}
 		return nil, err
 	}
 	n.transport = transport

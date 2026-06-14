@@ -20,12 +20,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	mathrand "math/rand/v2"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/blob"
@@ -70,10 +72,34 @@ func fullVersion() string {
 	return v + ")"
 }
 
+// usage is the top-level help: what hamster is, then its commands grouped the
+// way an operator reaches for them.
+const usage = `hamster is a self-hosted, S3-compatible object store in a single binary.
+
+Learn more: https://github.com/hamster-storage/hamster
+
+Usage:
+  hamster <command> [flags]
+
+Basic commands:
+  serve              run a single-node S3 endpoint (dev preview; one disk)
+  version            print the version
+
+Cluster commands:
+  cluster init       found a new cluster (mints the cluster CA)
+  cluster token      mint a single-use join token (on the init node)
+  cluster join       join an existing cluster with a token
+  cluster run        run this node (add -s3 <addr> to serve the S3 API)
+  cluster status     show cluster membership
+  cluster recover    rebuild a cluster from a survivor after quorum loss
+
+Use "hamster <command> -h" for a command's flags.
+`
+
 func main() {
-	log.SetFlags(0)
+	setupLogging()
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags] | hamster cluster <command> | hamster version")
+		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
 	var err error
@@ -84,13 +110,41 @@ func main() {
 		err = serve(os.Args[2:])
 	case "cluster":
 		err = clusterCmd(os.Args[2:])
+	case "-h", "--help", "help":
+		fmt.Fprint(os.Stdout, usage)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: hamster serve [flags] | hamster cluster <command> | hamster version")
+		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
 	if err != nil {
 		log.Fatalf("hamster: %v", err)
 	}
+}
+
+// setupLogging configures the process logger. The default is plain, timestamped
+// lines for a human at a terminal; HAMSTER_LOG_FORMAT=json switches to one JSON
+// record per line for log shippers in production. Both carry a timestamp — the
+// previous default carried none.
+func setupLogging() {
+	if strings.EqualFold(os.Getenv("HAMSTER_LOG_FORMAT"), "json") {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+		// Route the standard log package (log.Printf throughout the server)
+		// through slog so every line becomes one JSON record, without
+		// rewriting the call sites.
+		log.SetFlags(0)
+		log.SetOutput(slogLogWriter{})
+		return
+	}
+	log.SetFlags(log.LstdFlags)
+}
+
+// slogLogWriter forwards standard-library log output to slog as Info records,
+// so existing log.Printf calls emit JSON in production mode.
+type slogLogWriter struct{}
+
+func (slogLogWriter) Write(p []byte) (int, error) {
+	slog.Default().Info(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
 }
 
 // logRequests wraps the gateway with one access-log line per request:

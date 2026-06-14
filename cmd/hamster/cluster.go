@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"text/tabwriter"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/cluster"
@@ -133,8 +134,20 @@ func clusterRun(args []string) error {
 			return err
 		}
 		log.Printf("joined as node %s", *node)
-	} else if *token != "" {
-		log.Printf("already a cluster member; ignoring -token")
+	} else {
+		if *token != "" {
+			log.Printf("already a cluster member; ignoring -token")
+		}
+		// An explicit -listen on an already-joined node moves its listen
+		// address on this restart — the local bind/advertise endpoint, not
+		// identity. Without -listen the saved config is used unchanged, so a
+		// plain restart stays restart-safe.
+		if flagSet(fs, "listen") {
+			if err := cluster.UpdateListenAddr(*dataDir, *listen); err != nil {
+				return err
+			}
+			log.Printf("listen address set to %s", *listen)
+		}
 	}
 	n, err := cluster.Run(*dataDir)
 	if err != nil {
@@ -220,7 +233,10 @@ func clusterStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-8s %-16s %-22s %-16s %-12s %-12s %-9s %-6s\n", "RAFT-ID", "NODE", "ADDRESS", "ROLE", "HOST", "ZONE", "CAPACITY", "STATE")
+	// tabwriter sizes each column to its widest cell, so labels like a full
+	// hostname never overrun the next column (stdlib, no dependency).
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "RAFT-ID\tNODE\tADDRESS\tROLE\tHOST\tZONE\tCAPACITY\tSTATE")
 	hosts, zones := map[string]bool{}, map[string]bool{}
 	anyDown := false
 	for _, m := range members {
@@ -240,7 +256,7 @@ func clusterStatus(args []string) error {
 			state = "down"
 			anyDown = true
 		}
-		fmt.Printf("%-8d %-16s %-22s %-16s %-12s %-12s %-9s %-6s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone, capacity, state)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone, capacity, state)
 		if m.Host != "" {
 			hosts[m.Host] = true
 		}
@@ -248,6 +264,7 @@ func clusterStatus(args []string) error {
 			zones[m.Zone] = true
 		}
 	}
+	w.Flush()
 	// Failure-domain topology (ADR-0016): state plainly when a level is
 	// trivial — a single host or zone has no tolerance at that level.
 	if anyDown {
@@ -263,4 +280,17 @@ func clusterStatus(args []string) error {
 		fmt.Println("  note: one zone — no zone-level failure tolerance")
 	}
 	return nil
+}
+
+// flagSet reports whether the named flag was given explicitly on the command
+// line (as opposed to left at its default) — the FlagSet records only the
+// flags the user actually set.
+func flagSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }

@@ -362,6 +362,40 @@ func TestNodeConfigRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpdateListenAddr: an explicit listen address rewrites the persisted
+// cluster/join addresses and the node's own dial entry, so an operator can move
+// a node's port across restarts (e.g. correcting a first boot that failed to
+// bind). An empty or unchanged address is a no-op.
+func TestUpdateListenAddr(t *testing.T) {
+	now := time.Now()
+	d := t.TempDir()
+	if err := Init(d, "movetest", "n1", "127.0.0.1:7946", "", 0, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateListenAddr(d, "127.0.0.1:8001"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(Dir(d))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClusterAddr != "127.0.0.1:8001" || cfg.JoinAddr != "127.0.0.1:8001" {
+		t.Fatalf("listen address not updated: cluster=%q join=%q", cfg.ClusterAddr, cfg.JoinAddr)
+	}
+	for _, m := range cfg.Members {
+		if m.NodeID == "n1" && m.Dial != "127.0.0.1:8001" {
+			t.Fatalf("the node's own dial entry did not follow: %q", m.Dial)
+		}
+	}
+	// An empty address leaves the config untouched.
+	if err := UpdateListenAddr(d, ""); err != nil {
+		t.Fatal(err)
+	}
+	if cfg2, _ := loadConfig(Dir(d)); cfg2.ClusterAddr != "127.0.0.1:8001" {
+		t.Fatalf("empty update changed the address to %q", cfg2.ClusterAddr)
+	}
+}
+
 // TestMemberDownRoundTrip pins the additive STATE field (Member.Down) through
 // the status-protocol member codec: a down member encodes and decodes back
 // down, and a member without field 9 decodes to up — back-compat with any

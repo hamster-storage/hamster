@@ -85,6 +85,37 @@ func Init(dataDir, clusterName, nodeID, listenAddr, zone string, capacity uint32
 	})
 }
 
+// UpdateListenAddr rewrites a node's persisted cluster listen address — the
+// local bind/advertise endpoint, not its identity — so an operator can move a
+// node's port across restarts (chiefly to correct a first boot that failed to
+// bind). The node's own entry in its address book follows. A no-op when the
+// address is empty or unchanged.
+//
+// Caveat (v0.3): a changed advertised address is not propagated to peers, whose
+// address books are frozen at admission ([ADR-0027]); so this reliably moves a
+// port only while peers can still reach the node — a member re-advertise path
+// is future work.
+//
+// [ADR-0027]: ../../docs/adr/0027-v03-distributed-data-path.md
+func UpdateListenAddr(dataDir, listenAddr string) error {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return err
+	}
+	if listenAddr == "" || (cfg.ClusterAddr == listenAddr && cfg.JoinAddr == listenAddr) {
+		return nil
+	}
+	cfg.ClusterAddr = listenAddr
+	cfg.JoinAddr = listenAddr
+	for i := range cfg.Members {
+		if cfg.Members[i].NodeID == cfg.NodeID {
+			cfg.Members[i].Dial = listenAddr
+		}
+	}
+	return saveConfig(dir, cfg)
+}
+
 // MintToken mints a join token on a node holding the CA key, valid for
 // ttl, single-use. The running node (or the next `cluster run`) honors it.
 func MintToken(dataDir string, ttl time.Duration, now time.Time) (string, error) {
