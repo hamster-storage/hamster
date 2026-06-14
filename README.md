@@ -38,12 +38,15 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.1](https://github.com/hamster-storage/hamster/releases/tag/v0.1.0) | <ul><li>Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with <code>aws</code>, <code>rclone</code>, <code>restic</code>, <code>s3cmd</code>)</li><li>Durable single-node store with streaming uploads</li></ul> | ✅ |
 | [v0.2](https://github.com/hamster-storage/hamster/releases/tag/v0.2.0) | Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | ✅ |
 | [v0.3](https://github.com/hamster-storage/hamster/releases/tag/v0.3.0) | Erasure-coded durability with self-healing repair, the S3 endpoint served from the cluster | ✅ |
-| v0.4 | Partitioned placement and online rebalancing | planned |
+| v0.4 | Partitioned placement and online rebalancing | 🚧 in progress |
 | v0.5 | Object versioning | planned |
 | v0.6 | Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned |
-| v0.7 | Encryption at rest (SSE-S3) | planned |
-| v0.8+ | Zero-downtime rolling upgrades | planned |
-| v1.0 | <ul><li>Web console</li><li>Stable formats with a compatibility promise</li></ul> | planned |
+| v0.7 | Encryption at rest (SSE-S3) and key/CA rotation | planned |
+| v0.9 | Zero-downtime rolling upgrades | planned |
+| v0.10 | Observability/Telemetry | planned |
+| v0.11 | Web console | planned |
+| TBD | TBD prior to v1 | planning |
+| v1.0 | Software updates and migrations supported from v1 | planned |
 
 ## Quick start
 
