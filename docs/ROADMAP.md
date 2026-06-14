@@ -33,7 +33,10 @@ Each v0 minor release carries one headline feature, in roughly this order. The o
 | v0.6 | Object lock: GOVERNANCE, COMPLIANCE, legal holds |
 | v0.7 | Encryption at rest and key/CA rotation: envelope encryption over the framed stream, pluggable key source, SSE-S3 surface ([ADR-0021](adr/0021-envelope-encryption-at-rest.md)); CA custody and rotation ([ADR-0022](adr/0022-cluster-mtls.md), [ADR-0029](adr/0029-ca-custody-and-issuance.md)) |
 | v0.8 | Upgrade machinery: feature gates, health interlock, the upgrade test suite |
-| v0.9+ | Hardening and format finalization until v1 feels earned |
+| v0.9 | Zero-downtime rolling upgrades, validated by the upgrade test suite |
+| v0.10 | Observability and telemetry |
+| v0.11 | Web console ([ADR-0020](adr/0020-embedded-htmx-web-console.md): embedded, on the admin port, server-rendered with htmx) |
+| v0.12+ | Hardening and format finalization until v1.0 feels earned |
 
 The simulation harness is not a milestone of its own: it ships in v0.1 and grows with every release, because each new feature must arrive with its failure schedules.
 
@@ -41,12 +44,15 @@ The simulation harness is not a milestone of its own: it ships in v0.1 and grows
 
 **Not yet scheduled:** migrating a single-node `serve` deployment into a cluster. The two are different data paths — `serve` stores single-node blobs, a cluster stores erasure-coded shards — so there is no *in-place* conversion; the cross-path move is a data migration. For ordinary objects that migration is already possible with generic S3 tooling (copy to the new cluster, delete from the source as each object lands — no double storage), which covers the homelab/evaluation case it is meant for. It is deliberately **not** positioned as a path for regulated data: a generic copy does not preserve version history (v0.5) or object-lock state (v0.6), and a COMPLIANCE-locked object cannot be deleted from the source at all, so versioned or regulated workloads are expected to start as a multi-node cluster (mutual TLS is automatic from the first node) rather than grow into one. A native, lock- and version-aware migration tool could close that gap later but is a low-priority convenience, not committed to a minor release. A deployment that is already a cluster needs none of this — it grows by adding nodes.
 
-## v1.0 — the compatibility promise
+## v1.0 — the compatibility line
 
-v1.0 is the line where Hamster asks to be trusted:
+v1.0 is deliberately un-glamorous: not a feature, a commitment. It says we are
+confident in where the software is, and that from here updates are supported with
+backward compatibility for existing clusters — a running v1 cluster upgrades in
+place and keeps reading the data and formats it already wrote, indefinitely. The
+capabilities that earn this promise — stable formats, zero-downtime rolling
+upgrades, the upgrade test suite — ship in the v0.x releases above; v1.0 is the
+point where we commit to holding them, not the point where they first appear.
 
-- Stable formats with a Go style compatibility promise: v1 formats remain readable forever
-- Zero downtime rolling upgrades, validated by the upgrade test suite
-- The web console ([ADR-0020](adr/0020-embedded-htmx-web-console.md): embedded, on the admin port, server-rendered with htmx)
-
-See [ADR-0010](adr/0010-v1-compatibility-policy.md) for what the version numbers promise.
+See [ADR-0010](adr/0010-v1-compatibility-policy.md) for exactly what the version
+numbers promise.
