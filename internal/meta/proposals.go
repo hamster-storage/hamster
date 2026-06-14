@@ -174,4 +174,7 @@ type SetClusterLayout struct {
 	PartitionCount   uint32
 	Members          []string
 	Nodes            []LayoutNode
+	// Previous is the member set the layout is migrating away from (ADR-0004):
+	// set when opening a transition, empty when closing it or in steady state.
+	Previous []LayoutNode
 }

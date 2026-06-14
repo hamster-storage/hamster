@@ -28,6 +28,23 @@ func TestClusterLayoutCodecRoundTrip(t *testing.T) {
 			t.Fatalf("round trip:\n in: %+v\nout: %+v", in, out)
 		}
 	})
+	t.Run("transition", func(t *testing.T) {
+		// A layout mid-rebalance: labeled new set, the prior set as Previous.
+		in := ClusterLayout{
+			FormatVersion:  1,
+			Version:        8,
+			PartitionCount: 4096,
+			Nodes:          []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}},
+			Previous:       []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}, {ID: "n3", Host: "h3", Zone: "z3"}},
+		}
+		out, err := unmarshalClusterLayout(marshalClusterLayout(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(in, out) {
+			t.Fatalf("transition round trip:\n in: %+v\nout: %+v", in, out)
+		}
+	})
 	t.Run("zero", func(t *testing.T) {
 		out, err := unmarshalClusterLayout(marshalClusterLayout(ClusterLayout{}))
 		if err != nil {

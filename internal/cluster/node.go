@@ -216,12 +216,12 @@ func Run(dataDir string) (*Node, error) {
 				if !ok {
 					return place.Layout{}, false
 				}
-				eff := cl.EffectiveNodes()
-				nodes := make([]place.Node, len(eff))
-				for i, e := range eff {
-					nodes[i] = place.Node{ID: seam.NodeID(e.ID), Host: e.Host, Zone: e.Zone, Weight: e.Weight, Draining: e.Draining}
-				}
-				return place.Layout{Version: cl.Version, PartitionCount: cl.PartitionCount, Members: nodes}, true
+				return place.Layout{
+					Version:        cl.Version,
+					PartitionCount: cl.PartitionCount,
+					Members:        placeNodes(cl.EffectiveNodes()),
+					Previous:       placeNodes(cl.Previous), // nil in steady state
+				}, true
 			},
 		})
 		built <- err
@@ -242,6 +242,19 @@ func Run(dataDir string) (*Node, error) {
 	go n.syncPeers()
 
 	return n, nil
+}
+
+// placeNodes maps committed layout members to the placement function's nodes.
+// nil in, nil out — so a steady-state layout (no Previous) yields a nil old set.
+func placeNodes(members []meta.LayoutNode) []place.Node {
+	if len(members) == 0 {
+		return nil
+	}
+	out := make([]place.Node, len(members))
+	for i, e := range members {
+		out[i] = place.Node{ID: seam.NodeID(e.ID), Host: e.Host, Zone: e.Zone, Weight: e.Weight, Draining: e.Draining}
+	}
+	return out
 }
 
 // raftTransport wraps Raft traffic in the channel envelope on its way to

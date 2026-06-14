@@ -301,12 +301,20 @@ type NodeRecord struct {
 // over. Members (field 4) is the original unlabeled form from v0.4 pass 1,
 // kept for decode of older data; EffectiveNodes resolves whichever is
 // present. New writers populate Nodes.
+//
+// Previous (field 6, ADR-0004) is the member set the layout is migrating away
+// from while a rebalance is in flight: empty in steady state, set to the prior
+// Nodes when a transition opens. Because shard addressing is positional and
+// derived from the member set, a change to Nodes relocates shards; carrying the
+// old set lets reads dual-read (place.Locate) and repair migrate shards
+// old→new. The transition closes by installing a layout with Previous empty.
 type ClusterLayout struct {
 	FormatVersion  uint32
 	Version        uint64
 	PartitionCount uint32
 	Members        []string
 	Nodes          []LayoutNode
+	Previous       []LayoutNode
 
 	unknown []byte
 }
