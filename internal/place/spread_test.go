@@ -25,6 +25,39 @@ func layoutOf(nodes []Node) Layout {
 	return Layout{Version: 1, PartitionCount: DefaultPartitionCount, Members: nodes}
 }
 
+// TestLocate: in steady state Locate matches Nodes with no old placement; in a
+// transition it returns both the new placement (over Members) and the old one
+// (over Previous), so a reader can dual-read a shard from wherever it sits.
+func TestLocate(t *testing.T) {
+	full := zoned(6, 1) // six nodes, each its own zone/host
+	// Steady state: no transition.
+	steady := Layout{Version: 1, PartitionCount: DefaultPartitionCount, Members: full}
+	for p := uint64(0); p < 100; p++ {
+		newN, oldN, err := steady.Locate(p, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := steady.Nodes(p, 3)
+		if oldN != nil || !slices.Equal(newN, want) {
+			t.Fatalf("steady Locate(%d): new=%v old=%v, want new=%v old=nil", p, newN, oldN, want)
+		}
+	}
+	// Transition: migrating away from the full set to a five-node subset.
+	subset := full[:5]
+	mid := Layout{Version: 2, PartitionCount: DefaultPartitionCount, Members: subset, Previous: full}
+	for p := uint64(0); p < 100; p++ {
+		newN, oldN, err := mid.Locate(p, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantNew, _ := spread(p, subset, 3)
+		wantOld, _ := spread(p, full, 3)
+		if !slices.Equal(newN, wantNew) || !slices.Equal(oldN, wantOld) {
+			t.Fatalf("transition Locate(%d): new=%v old=%v, want new=%v old=%v", p, newN, oldN, wantNew, wantOld)
+		}
+	}
+}
+
 // TestSpreadGolden pins the exact spread for a fixed labeled topology — the
 // algorithm's selection, locked like every placement choice.
 func TestSpreadGolden(t *testing.T) {
