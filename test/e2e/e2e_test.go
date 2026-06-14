@@ -215,7 +215,7 @@ func TestClusterLifecycle(t *testing.T) {
 	// n1: init and run.
 	dirs["n1"] = filepath.Join(root, "n1")
 	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e", "-node", "n1",
-		"-listen-cluster", freeAddr(t), "-listen-join", freeAddr(t))
+		"-listen", freeAddr(t))
 	procs["n1"] = start(t, nil, "cluster", "run", "-data-dir", dirs["n1"])
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
@@ -226,7 +226,7 @@ func TestClusterLifecycle(t *testing.T) {
 		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		procs[id] = start(t, nil, "cluster", "run", "-data-dir", dirs[id], "-node", id,
-			"-listen-cluster", freeAddr(t), "-listen-join", freeAddr(t), "-token", token)
+			"-listen", freeAddr(t), "-token", token)
 	}
 	waitStatus(t, dirs["n1"], "three voters", func(rows []statusRow) bool {
 		return len(rows) == 3 && voterCount(rows) == 3

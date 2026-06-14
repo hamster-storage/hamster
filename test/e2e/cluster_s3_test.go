@@ -39,7 +39,7 @@ func TestClusterS3(t *testing.T) {
 	dirs["n1"] = filepath.Join(root, "n1")
 	s3Addrs["n1"] = freeAddr(t)
 	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e-s3", "-node", "n1",
-		"-listen-cluster", freeAddr(t), "-listen-join", freeAddr(t))
+		"-listen", freeAddr(t))
 	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
@@ -50,7 +50,7 @@ func TestClusterS3(t *testing.T) {
 		dirs[id] = filepath.Join(root, id)
 		s3Addrs[id] = freeAddr(t)
 		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
-			"-listen-cluster", freeAddr(t), "-listen-join", freeAddr(t), "-token", token,
+			"-listen", freeAddr(t), "-token", token,
 			"-s3", s3Addrs[id])
 	}
 	// Five voters (the cap) plus one learner.

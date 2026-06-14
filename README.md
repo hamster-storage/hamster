@@ -83,19 +83,18 @@ Three terminals, all sharing the credentials the S3 API will accept:
 export HAMSTER_ACCESS_KEY_ID=hamster HAMSTER_SECRET_ACCESS_KEY=keep-this-one-secret
 
 # terminal 1 — found the cluster, serve S3 on :9000
-hamster cluster init -data-dir ./n1 -node n1 \
-  -listen-cluster 127.0.0.1:7946 -listen-join 127.0.0.1:7947
+hamster cluster init -data-dir ./n1 -node n1 -listen 127.0.0.1:7946
 hamster cluster run -data-dir ./n1 -s3 127.0.0.1:9000
 
 # terminal 2 — mint a single-use token and join in one command, serve S3 on :9001
 TOKEN=$(hamster cluster token -data-dir ./n1)
 hamster cluster run -data-dir ./n2 -node n2 \
-  -listen-cluster 127.0.0.1:7956 -listen-join 127.0.0.1:7957 -token "$TOKEN" -s3 127.0.0.1:9001
+  -listen 127.0.0.1:7956 -token "$TOKEN" -s3 127.0.0.1:9001
 
 # terminal 3 — same again, serve S3 on :9002
 TOKEN=$(hamster cluster token -data-dir ./n1)
 hamster cluster run -data-dir ./n3 -node n3 \
-  -listen-cluster 127.0.0.1:7966 -listen-join 127.0.0.1:7967 -token "$TOKEN" -s3 127.0.0.1:9002
+  -listen 127.0.0.1:7966 -token "$TOKEN" -s3 127.0.0.1:9002
 ```
 
 Watch it: `hamster cluster status -data-dir ./n1` shows every member and who leads. Nodes join as learners and are promoted to voters automatically (capped at five voters no matter how large the cluster grows). If a majority of voters is ever permanently lost, `hamster cluster recover` rebuilds a cluster from a survivor — read its warning first.
@@ -123,8 +122,7 @@ hamster serve -data-dir ./data            # one node, S3 on :9000
 **A cluster — durable across machines, and able to grow.** `hamster cluster init` founds a cluster; `cluster init` mints the cluster CA once, automatically, and every node you add reuses it (the [Cluster preview](#cluster-preview) above shows three). Objects are erasure-coded `k+m` across the nodes and reconstructed from any `k`, so you can lose drives or whole machines without losing data. A one-node cluster is a valid starting point — it runs Raft and elects itself leader (a quorum of one), serving S3 just like `serve` but on the path that scales and can admit peers later:
 
 ```sh
-hamster cluster init -data-dir ./n1 -node n1 \
-  -listen-cluster 127.0.0.1:7946 -listen-join 127.0.0.1:7947
+hamster cluster init -data-dir ./n1 -node n1 -listen 127.0.0.1:7946
 hamster cluster run -data-dir ./n1 -s3 127.0.0.1:9000    # one-node cluster, S3 on :9000
 # later: mint a token on n1, then `cluster run -token …` on n2, n3, …
 ```
