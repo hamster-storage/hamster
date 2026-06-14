@@ -48,6 +48,69 @@ tasks:
           exit 1
         fi
 
+  # Local multi-terminal cluster demo. One terminal per node, all sharing
+  # DEMO_DIR (default /tmp/hamster-demo) and the same demo credentials. Ports
+  # are derived from the node number: node N listens on 127.0.0.1:794(N-1)6-ish
+  # (n1=7946, n2=7956, …) and serves S3 on 127.0.0.1:900(N-1) (n1=9000, …).
+  cluster-demo-n1:
+    desc: "Cluster demo, terminal 1: found n1 and serve S3 on :9000 (Ctrl-C to stop)"
+    vars:
+      DEMO_DIR: '{{.DEMO_DIR | default "/tmp/hamster-demo"}}'
+    env:
+      HAMSTER_ACCESS_KEY_ID: '{{.AKID | default "hamster"}}'
+      HAMSTER_SECRET_ACCESS_KEY: '{{.SECRET | default "hamster-demo-secret"}}'
+    cmds:
+      - mkdir -p {{.DEMO_DIR}}
+      - go build -o {{.DEMO_DIR}}/hamster ./cmd/hamster
+      - |
+        BIN={{.DEMO_DIR}}/hamster
+        if [ ! -f {{.DEMO_DIR}}/n1/cluster/node.conf ]; then
+          "$BIN" cluster init -data-dir {{.DEMO_DIR}}/n1 -node n1 -listen 127.0.0.1:7946
+        fi
+        echo "n1 S3 endpoint: http://127.0.0.1:9000  (key: ${HAMSTER_ACCESS_KEY_ID})"
+        exec "$BIN" cluster run -data-dir {{.DEMO_DIR}}/n1 -s3 127.0.0.1:9000
+
+  cluster-demo-join:
+    desc: "Cluster demo, terminal N: join node N (pass N=2, 3, …) and serve S3 — needs n1 running"
+    vars:
+      DEMO_DIR: '{{.DEMO_DIR | default "/tmp/hamster-demo"}}'
+      N: '{{.N | default "2"}}'
+    env:
+      HAMSTER_ACCESS_KEY_ID: '{{.AKID | default "hamster"}}'
+      HAMSTER_SECRET_ACCESS_KEY: '{{.SECRET | default "hamster-demo-secret"}}'
+    cmds:
+      - mkdir -p {{.DEMO_DIR}}
+      - go build -o {{.DEMO_DIR}}/hamster ./cmd/hamster
+      - |
+        BIN={{.DEMO_DIR}}/hamster
+        N={{.N}}
+        listen=127.0.0.1:$((7946 + (N - 1) * 10))
+        s3=127.0.0.1:$((9000 + N - 1))
+        dir={{.DEMO_DIR}}/n$N
+        echo "n$N S3 endpoint: http://$s3  (cluster $listen)"
+        if [ ! -f "$dir/cluster/node.conf" ]; then
+          token=$("$BIN" cluster token -data-dir {{.DEMO_DIR}}/n1)
+          exec "$BIN" cluster run -data-dir "$dir" -node "n$N" -listen "$listen" -s3 "$s3" -token "$token"
+        else
+          exec "$BIN" cluster run -data-dir "$dir" -s3 "$s3"
+        fi
+
+  cluster-demo-status:
+    desc: "Cluster demo: show membership and topology (reads n1's data dir)"
+    vars:
+      DEMO_DIR: '{{.DEMO_DIR | default "/tmp/hamster-demo"}}'
+    cmds:
+      - mkdir -p {{.DEMO_DIR}}
+      - go build -o {{.DEMO_DIR}}/hamster ./cmd/hamster
+      - '{{.DEMO_DIR}}/hamster cluster status -data-dir {{.DEMO_DIR}}/n1'
+
+  cluster-demo-clean:
+    desc: "Cluster demo: remove all demo data (stop the node terminals first)"
+    vars:
+      DEMO_DIR: '{{.DEMO_DIR | default "/tmp/hamster-demo"}}'
+    cmds:
+      - rm -rf {{.DEMO_DIR}}
+
   dist:
     desc: Cross-compile the static, version-stamped release binaries and SHA256SUMS into dist/ (pass VERSION=vX.Y.Z)
     requires:
