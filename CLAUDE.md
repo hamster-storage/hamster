@@ -80,10 +80,12 @@ The first four must pass before any commit. `e2e` and `compat` are not part of t
 
 ## Development workflow
 
-- For now, the design docs are the backlog: the roadmap and each doc's open-questions section say what comes next, and finishing a design means updating the doc and its ADRs. No separate task-tracker files (no TODO lists, no kanban files) — the docs themselves carry the plan. GitHub Issues may take over once code lands.
+- For now, the design docs are the backlog: the roadmap and each doc's open-questions section say what comes next, and finishing a design means updating the affected docs (and writing a new ADR if a decision was made). No separate task-tracker files (no TODO lists, no kanban files) — the docs themselves carry the plan. GitHub Issues may take over once there are outside contributors.
 - Keep pull requests small and focused: one issue, one concern.
 - Sign every commit with `git commit -s` (Developer Certificate of Origin — see [ADR-0001](docs/adr/0001-apache-2-license-dco.md)).
-- When a decision changes, update the relevant ADR (or write a new one superseding it) and any affected doc in the same pull request. Docs that contradict the code are worse than no docs.
+- **Accepted ADRs are immutable.** Once an ADR is Accepted, do not edit its body. A changed or reversed decision is a *new* ADR that names exactly what it supersedes; the only edit permitted to the superseded one is its Status line — `Superseded by ADR-00X` or `Partially superseded by ADR-00X`, with a link. New consequences or rationale learned later also belong in a new ADR, never retrofitted into the old one. Fixing a typo or a dead link is fine; adding reasoning is not.
+- **ADRs record decisions, not implementation status.** "Accepted" means the decision is made, not that the code exists yet — an ADR ahead of the code is normal and is *not* a superseded ADR. Never write "implemented / not yet implemented" into an ADR. Track decided-but-unbuilt work elsewhere: coarse milestones in [docs/ROADMAP.md](docs/ROADMAP.md); a specific behavioral gap as a skipped or failing test that asserts the ADR's behavior and names it (e.g. `TestClusterMetadataPersistsToBadgerDB`) — executable, self-closing, and unable to drift from reality.
+- Keep docs and code in step in the same pull request. A design doc may be *corrected* when it states something factually wrong about the system, but progress tracking stays out of both ADRs and design-doc prose. Docs that contradict the code are worse than no docs.
 
 ## Naming
 

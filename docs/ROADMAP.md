@@ -1,6 +1,6 @@
 # Roadmap
 
-High level milestones only. Day to day work lives in the design docs themselves — each doc's open-questions section is the backlog (GitHub Issues may take over once the code matures).
+High level milestones only. Day to day work lives in the design docs themselves — each doc's open-questions section is the backlog, and a specific behavioral gap is guarded by a skipped or failing test that names the ADR it asserts (GitHub Issues may take over once there are outside contributors).
 
 > Hamster is at v0 and not production ready. Everything below is a goal, not a shipped capability.
 
