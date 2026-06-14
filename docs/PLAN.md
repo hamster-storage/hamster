@@ -18,11 +18,14 @@ The current version. Pass 1 (the stored, versioned cluster layout) and pass 2
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Node liveness / DOWN detection** — PUT skips a known-down node instead of
-  opening a stream to it and paying the datapath retransmit timeout (GET already
-  abandons stragglers). Runtime liveness surfaced in `cluster status`; the
-  replicated `NodeRecord` (ADR-0016, ADR-0004) the registry now lives in is the
-  place a committed status/`DRAINING` flag will hang off.
+- **Node liveness — surface it in `cluster status`** — the passive per-node
+  detector and the PUT skip have landed (`internal/coord`: a known-down node is
+  skipped up front instead of paying its retransmit timeout, floor permitting;
+  `Coordinator.DownNodes` exposes the local view). What remains is wiring that
+  view out through the status protocol so `cluster status` shows it, and feeding
+  the detector from GET/repair outcomes too (today only PUT feeds it). The
+  replicated `NodeRecord` (ADR-0016, ADR-0004) is where a committed status/
+  `DRAINING` flag will hang off.
 - **Draining** — an operator-set drain flag on `NodeRecord`: placement excludes a
   draining node from new writes; repair/rebalance migrate its shards off.
 - **Transition tracking + manual rebalance** — migrate partitions between nodes
