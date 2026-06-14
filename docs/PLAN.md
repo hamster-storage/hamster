@@ -13,20 +13,7 @@ line here is done, delete it.
 
 ## Now / next
 
-1. **Cluster metadata persistence — remaining: simulation coverage.** The model has
-   landed ([ADR-0005](adr/0005-metadata-badgerdb-raft.md)): BadgerDB is the
-   per-replica source of truth on boot, loaded with the applied index it carries
-   atomic with the rows, only the un-applied WAL tail replayed (entries at or below
-   the index skipped, never re-applied); the layered recovery — WAL rebuild on a
-   lost/corrupt store, peer re-sync only if the WAL is gone too — is in the
-   `raftnode` package comment. Guards: `TestClusterMetadataPersistsToBadgerDB` and
-   `TestClusterMetadataRebuildsFromWALAfterStoreLoss`. Still owed: exercise the
-   persister path *under the simulation harness* (a resettable WAL row-log standing
-   in for BadgerDB) so the apply/reset/load logic is sim-covered, not only
-   e2e-covered — including a schedule for the crash between the Badger commit and
-   the WAL append.
-
-2. **CA custody and issuance** — implement the
+1. **CA custody and issuance** — implement the
    [ADR-0029](adr/0029-ca-custody-and-issuance.md) directions: a pluggable issuer so
    an operator can point the CA at an external PKI / bring their own key, the
    self-managed CA staying the default; init-node-loss degradation made explicit
