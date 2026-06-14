@@ -42,6 +42,7 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | v0.5 | Object versioning | planned |
 | v0.6 | Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned |
 | v0.7 | Encryption at rest (SSE-S3) and key/CA rotation | planned |
+| v0.8 | Upgrade machinery: feature gates, health interlock, the upgrade test suite | planned |
 | v0.9 | Zero-downtime rolling upgrades | planned |
 | v0.10 | Observability/Telemetry | planned |
 | v0.11 | Web console | planned |
