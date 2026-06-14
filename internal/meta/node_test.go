@@ -120,6 +120,32 @@ func TestApplyRegisterNode(t *testing.T) {
 	}
 }
 
+// TestApplySetNodeDraining: the drain flag flips on a registered node,
+// preserving its labels; an unknown node is refused; clearing works too.
+func TestApplySetNodeDraining(t *testing.T) {
+	s := NewStore()
+	if err := s.ApplySetNodeDraining(SetNodeDraining{NodeID: "ghost", Draining: true}); err != ErrInvalidNode {
+		t.Fatalf("draining an unregistered node: got %v, want ErrInvalidNode", err)
+	}
+	if err := s.ApplyRegisterNode(RegisterNode{NodeID: "n1", Host: "h1", Zone: "z1", Capacity: 7}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplySetNodeDraining(SetNodeDraining{NodeID: "n1", Draining: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Node("n1")
+	if !got.Draining || got.Host != "h1" || got.Zone != "z1" || got.Capacity != 7 {
+		t.Fatalf("drain flipped but labels/capacity not preserved: %+v", got)
+	}
+	// Clearing it restores an active node, labels intact.
+	if err := s.ApplySetNodeDraining(SetNodeDraining{NodeID: "n1", Draining: false}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Node("n1"); got.Draining || got.Capacity != 7 {
+		t.Fatalf("undrain: %+v", got)
+	}
+}
+
 // TestNodeRecordPersistRoundTrip proves node rows ride the snapshot path
 // (Dump/Restore) byte-identically — what a Raft snapshot ships and a
 // restarting node restores — alongside the layout singleton, with no key

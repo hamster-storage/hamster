@@ -360,6 +360,24 @@ func (s *Store) ApplyRegisterNode(p RegisterNode) (err error) {
 	return nil
 }
 
+// ApplySetNodeDraining flips a registered member's drain flag (ADR-0004),
+// leaving its labels, capacity, and unknown fields intact. Idempotent;
+// refuses an unknown node.
+func (s *Store) ApplySetNodeDraining(p SetNodeDraining) (err error) {
+	defer s.txn(&err)()
+	if p.NodeID == "" {
+		return ErrInvalidNode
+	}
+	v, ok := s.kv.get(nodeRowKey(p.NodeID))
+	if !ok {
+		return ErrInvalidNode
+	}
+	rec := v.(NodeRecord)
+	rec.Draining = p.Draining
+	s.kv.set(nodeRowKey(p.NodeID), rec)
+	return nil
+}
+
 // removeNullVersion deletes the key's null-version entry if one exists, as
 // part of an unversioned or suspended write. The lock check is defense in
 // depth: lock-enabled buckets can never reach this path, but no code path

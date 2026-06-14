@@ -148,6 +148,16 @@ type RegisterNode struct {
 	Capacity         uint32
 }
 
+// SetNodeDraining sets (or clears) the drain flag on an already-registered
+// member (ADR-0004). It mutates only that flag, leaving the node's labels and
+// capacity intact, so an operator can mark a node for removal without knowing
+// its recorded labels. Apply refuses an unknown node ID.
+type SetNodeDraining struct {
+	ProposedAtUnixMS int64
+	NodeID           string
+	Draining         bool
+}
+
 // SetClusterLayout installs a new cluster-layout generation (ADR-0028) —
 // the replicated placement basis, not an object mutation. It is a
 // compare-and-set: apply accepts it only when Version is exactly one

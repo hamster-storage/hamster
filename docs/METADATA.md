@@ -164,9 +164,11 @@ message ClusterLayout {          // s/layout, ADR-0028
 }
 
 message NodeEntry {              // ADR-0016
-  string id   = 1;
-  string host = 2;              // machine identity, auto-detected
-  string zone = 3;              // failure domain above the host, defaults to host
+  string id       = 1;
+  string host     = 2;          // machine identity, auto-detected
+  string zone     = 3;          // failure domain above the host, defaults to host
+  uint32 weight   = 4;          // relative capacity (ADR-0004); 0 = equal
+  bool   draining = 5;          // operator removing this node (ADR-0004); demoted in placement
 }
 
 message ClusterConfig {
@@ -183,9 +185,10 @@ message NodeRecord {             // s/node/<id>, ADR-0016 + ADR-0004
   string host           = 3;   // auto-detected machine identity (ADR-0016)
   string zone           = 4;   // operator failure-domain label, defaults to host
   uint32 capacity       = 5;   // relative weight (ADR-0004); 0 = equal
-  // Liveness and upgrade fields arrive additively in later v0.4+ passes,
-  // field numbers from 6: status (JOINING/ACTIVE/DRAINING/DOWN), control/data
-  // addresses, binary_version (the upgrade interlock), voter (ADR-0017).
+  bool   draining       = 6;   // operator-set removal flag (ADR-0004); set by SetNodeDraining
+  // Further liveness and upgrade fields arrive additively from field 7:
+  // control/data addresses, binary_version (the upgrade interlock), voter
+  // (ADR-0017).
 }
 ```
 
@@ -224,6 +227,7 @@ message Proposal {
     AbortMultipartUpload    abort_multipart_upload    = 14;
     SetClusterLayout        set_layout                = 15;  // cluster layout (ADR-0028)
     RegisterNode            register_node             = 16;  // member registry (ADR-0016, ADR-0004)
+    SetNodeDraining         set_node_draining         = 17;  // member drain flag (ADR-0004)
   }
 }
 ```

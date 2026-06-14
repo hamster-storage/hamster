@@ -47,6 +47,48 @@ func TestSpreadGolden(t *testing.T) {
 	}
 }
 
+// TestSpreadAvoidsDraining: a draining node (ADR-0004) is demoted below every
+// active node — never chosen while active nodes can fill the width, but used as
+// a last resort when the width needs it, so durability is never sacrificed to
+// avoidance.
+func TestSpreadAvoidsDraining(t *testing.T) {
+	nodes := zoned(3, 2) // six nodes
+	drain := seam.NodeID("z1-n0")
+	for i := range nodes {
+		if nodes[i].ID == drain {
+			nodes[i].Draining = true
+		}
+	}
+	l := layoutOf(nodes)
+
+	// Width 5 of 6: five active nodes suffice, so the draining node is never
+	// chosen — new writes steer around it.
+	for p := uint64(0); p < 500; p++ {
+		got, err := l.Nodes(p, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 5 {
+			t.Fatalf("partition %d width 5 returned %d nodes", p, len(got))
+		}
+		if slices.Contains(got, drain) {
+			t.Fatalf("partition %d placed on the draining node while active nodes remained: %v", p, got)
+		}
+	}
+
+	// Width 6 of 6: only the draining node can fill the last slot, so it must
+	// be chosen — better a shard on a draining node than below width.
+	for p := uint64(0); p < 500; p++ {
+		got, err := l.Nodes(p, 6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(got, drain) {
+			t.Fatalf("partition %d width 6 dropped below width avoiding the draining node: %v", p, got)
+		}
+	}
+}
+
 // TestSpreadEvenAcrossZones: shards land on as many distinct zones as the
 // width allows, then balance within. With three zones of two, a width-3
 // object touches three distinct zones; a width-6 object two per zone.

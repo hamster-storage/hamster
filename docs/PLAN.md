@@ -21,8 +21,14 @@ repair outcomes, the PUT skip, and the `cluster status` STATE column) have all
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Draining** — an operator-set drain flag on `NodeRecord`: placement excludes a
-  draining node from new writes; repair/rebalance migrate its shards off.
+- **Draining — operator trigger** — the mechanism has landed: the replicated
+  `NodeRecord.Draining` flag (`SetNodeDraining` proposal), placement demoting a
+  draining node below every active one (new writes steer around it, existing
+  shards stay readable and repair migrates them off, [ADR-0004](adr/0004-partitioned-placement.md)),
+  and `cluster status` showing the `draining` state. What remains is the operator
+  surface: a `cluster drain`/`undrain` command over a control RPC (leader-only,
+  like S3 writes — no proposal forwarding yet), and an end-to-end test that repair
+  empties a drained node.
 - **Transition tracking + manual rebalance** — migrate partitions between nodes
   without re-encoding objects ([ADR-0004](adr/0004-partitioned-placement.md), the
   fixed-partition invariant).

@@ -72,6 +72,7 @@ import (
 //	  string zone = 7;
 //	  uint32 capacity = 8;
 //	  bool down = 9;        // the answering node's local liveness view
+//	  bool draining = 10;   // committed: operator is removing this node
 //	}
 const (
 	protocolVersion = 1
@@ -99,6 +100,10 @@ type Member struct {
 	Zone     string
 	Capacity uint32
 	Down     bool
+	// Draining is a committed cluster fact (ADR-0004): the operator has marked
+	// this node for removal. Unlike Down (a local liveness view), every node
+	// reports the same value, read from the cluster layout.
+	Draining bool
 }
 
 type joinRequest struct {
@@ -256,7 +261,8 @@ func encodeMemberMsg(m Member) []byte {
 	b = putString(b, 6, m.Host)
 	b = putString(b, 7, m.Zone)
 	b = putUint(b, 8, uint64(m.Capacity))
-	return putBool(b, 9, m.Down)
+	b = putBool(b, 9, m.Down)
+	return putBool(b, 10, m.Draining)
 }
 
 func decodeMemberMsg(buf []byte) (Member, error) {
@@ -281,6 +287,8 @@ func decodeMemberMsg(buf []byte) (Member, error) {
 			m.Capacity = uint32(f.u)
 		case 9:
 			m.Down = f.u != 0
+		case 10:
+			m.Draining = f.u != 0
 		}
 		return nil
 	})

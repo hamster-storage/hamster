@@ -519,6 +519,11 @@ func marshalLayoutNode(n LayoutNode) []byte {
 	if n.Weight != 0 {
 		b = putUvarint(b, 4, uint64(n.Weight))
 	}
+	// Field 5 (draining) is additive and written only when true, so a node not
+	// being drained encodes byte-identically to a pre-draining one.
+	if n.Draining {
+		b = putUvarint(b, 5, 1)
+	}
 	return b
 }
 
@@ -535,6 +540,8 @@ func unmarshalLayoutNode(b []byte) (LayoutNode, error) {
 			n.Zone = d.str()
 		case 4:
 			n.Weight = uint32(d.uvarint())
+		case 5:
+			n.Draining = d.uvarint() != 0
 		default:
 			d.skipUnknown(nil)
 		}
@@ -552,6 +559,10 @@ func marshalNodeRecord(n NodeRecord) []byte {
 	b = putString(b, 3, n.Host)
 	b = putString(b, 4, n.Zone)
 	b = putUvarint(b, 5, uint64(n.Capacity))
+	// Field 6 (draining) is additive and written only when true.
+	if n.Draining {
+		b = putUvarint(b, 6, 1)
+	}
 	return append(b, n.unknown...)
 }
 
@@ -570,6 +581,8 @@ func unmarshalNodeRecord(b []byte) (NodeRecord, error) {
 			n.Zone = d.str()
 		case 5:
 			n.Capacity = d.uint32()
+		case 6:
+			n.Draining = d.uvarint() != 0
 		default:
 			d.skipUnknown(&n.unknown)
 		}

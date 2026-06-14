@@ -219,7 +219,7 @@ func Run(dataDir string) (*Node, error) {
 				eff := cl.EffectiveNodes()
 				nodes := make([]place.Node, len(eff))
 				for i, e := range eff {
-					nodes[i] = place.Node{ID: seam.NodeID(e.ID), Host: e.Host, Zone: e.Zone, Weight: e.Weight}
+					nodes[i] = place.Node{ID: seam.NodeID(e.ID), Host: e.Host, Zone: e.Zone, Weight: e.Weight, Draining: e.Draining}
 				}
 				return place.Layout{Version: cl.Version, PartitionCount: cl.PartitionCount, Members: nodes}, true
 			},
@@ -308,7 +308,7 @@ func (n *Node) members() []Member {
 				Down: down[string(m.Addr)],
 			}
 			if lbl, ok := labels[string(m.Addr)]; ok {
-				mem.Host, mem.Zone, mem.Capacity = lbl.Host, lbl.Zone, lbl.Weight
+				mem.Host, mem.Zone, mem.Capacity, mem.Draining = lbl.Host, lbl.Zone, lbl.Weight, lbl.Draining
 			}
 			ms = append(ms, mem)
 		}
@@ -400,7 +400,7 @@ func (n *Node) reconcileLayout() {
 	// Step 2: compose the layout from the replicated registry.
 	labels := make(map[string]meta.LayoutNode)
 	for _, r := range store.Nodes() {
-		labels[r.NodeID] = meta.LayoutNode{ID: r.NodeID, Host: r.Host, Zone: r.Zone, Weight: r.Capacity}
+		labels[r.NodeID] = meta.LayoutNode{ID: r.NodeID, Host: r.Host, Zone: r.Zone, Weight: r.Capacity, Draining: r.Draining}
 	}
 
 	var desired []meta.LayoutNode

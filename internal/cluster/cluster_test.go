@@ -251,6 +251,88 @@ func TestClusterNodeRegistryReplicated(t *testing.T) {
 	}
 }
 
+// proposeTo submits a metadata proposal through whichever node is the leader,
+// retrying through elections — the test stand-in for an operator command that
+// has no proposal-forwarding yet.
+func proposeTo(t *testing.T, nodes []*Node, p any) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, n := range nodes {
+			ch := make(chan error, 1)
+			n.loop.Post(func() { n.raft.Propose(p, func(_ any, e error) { ch <- e }) })
+			select {
+			case err := <-ch:
+				if err == nil {
+					return
+				}
+			case <-time.After(2 * time.Second):
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("proposal %T never committed", p)
+}
+
+// TestClusterNodeDraining proves the drain flag flows end to end: a
+// SetNodeDraining proposal commits, the leader's reconcile folds it into the
+// cluster layout, and every node's status reports the member as draining (a
+// committed fact, unlike the local liveness view). Placement avoidance itself
+// is proven in internal/place; this proves the cluster wiring that feeds it.
+func TestClusterNodeDraining(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "draintest", "n1", freeAddr(t), "", 0, now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	waitStatus(t, d1, "", "n1 leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].Leader
+	})
+
+	join := func(dir, id string) *Node {
+		tok, err := MintToken(d1, time.Hour, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Join(dir, id, freeAddr(t), tok, "", 0); err != nil {
+			t.Fatal(err)
+		}
+		n, err := Run(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	n2 := join(d2, "n2")
+	defer n2.Stop()
+	n3 := join(d3, "n3")
+	defer n3.Stop()
+	waitStatus(t, d1, "", "three members", func(ms []Member) bool { return len(ms) == 3 })
+
+	proposeTo(t, []*Node{n1, n2, n3}, meta.SetNodeDraining{
+		ProposedAtUnixMS: now.UnixMilli(), NodeID: "n3", Draining: true,
+	})
+
+	// Every node reports n3 draining (and only n3) — a committed fact, so the
+	// view is the same whichever node answers.
+	for _, d := range []string{d1, d2, d3} {
+		waitStatus(t, d, "", "n3 draining", func(ms []Member) bool {
+			for _, m := range ms {
+				if m.Draining != (m.NodeID == "n3") {
+					return false
+				}
+			}
+			return len(ms) == 3
+		})
+	}
+}
+
 // TestRecoverRebuildsSingleVoterCluster: a two-node cluster loses n2
 // forever; recover rewrites the stopped n1 into a sole-voter cluster that
 // runs, leads, and grows again with a fresh token.
