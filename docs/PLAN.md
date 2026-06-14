@@ -13,17 +13,18 @@ line here is done, delete it.
 
 ## Now / next
 
-1. **Cluster metadata: make BadgerDB the source of truth on boot** — the mirror
-   has landed: every applied Raft entry now commits to a per-replica BadgerDB store
-   ([ADR-0005](adr/0005-metadata-badgerdb-raft.md)), guarded by
-   `TestClusterMetadataPersistsToBadgerDB`. Today recovery is still log-based — boot
-   resets Badger to empty (or to the snapshot) and replays the log into it. The
-   follow-up makes Badger authoritative: persist the applied index alongside the
-   rows, load the store from Badger on boot, and replay only the un-applied log
-   tail. Needs its own simulation schedules (crash between the Badger commit and the
-   log append; applied-index reconciliation) and a `meta.Persister` exercised under
-   the harness (a resettable WAL row-log so the persister path is sim-covered, not
-   only e2e-covered). Removes the boot-time reset + full replay.
+1. **Cluster metadata persistence — remaining: simulation coverage.** The model has
+   landed ([ADR-0005](adr/0005-metadata-badgerdb-raft.md)): BadgerDB is the
+   per-replica source of truth on boot, loaded with the applied index it carries
+   atomic with the rows, only the un-applied WAL tail replayed (entries at or below
+   the index skipped, never re-applied); the layered recovery — WAL rebuild on a
+   lost/corrupt store, peer re-sync only if the WAL is gone too — is in the
+   `raftnode` package comment. Guards: `TestClusterMetadataPersistsToBadgerDB` and
+   `TestClusterMetadataRebuildsFromWALAfterStoreLoss`. Still owed: exercise the
+   persister path *under the simulation harness* (a resettable WAL row-log standing
+   in for BadgerDB) so the apply/reset/load logic is sim-covered, not only
+   e2e-covered — including a schedule for the crash between the Badger commit and
+   the WAL append.
 
 2. **CA custody and issuance** — implement the
    [ADR-0029](adr/0029-ca-custody-and-issuance.md) directions: a pluggable issuer so

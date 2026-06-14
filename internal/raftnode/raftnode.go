@@ -5,10 +5,18 @@
 // assembly it left to us — the write-ahead log, snapshots, the transport
 // glue, apply, and (ADR-0024) the election timer.
 //
-// The metadata store is rebuilt at boot from the newest snapshot plus the
-// committed log tail: the log is the durability, the store a deterministic
-// function of it. Every SnapshotEntries applied entries, the node dumps
-// the store, hands the dump to raft as the snapshot at that index, and
+// Metadata durability is layered (ADR-0005, docs/PLAN.md). In production each
+// applied entry commits to a per-replica BadgerDB store together with its
+// Raft index, atomically, through the Persister. At boot that durable store is
+// the source of truth: it is loaded and only the un-applied WAL tail is
+// replayed, with entries at or below its index skipped rather than re-applied.
+// If the durable store is missing, behind, or corrupt, boot falls back to the
+// WAL — the newest snapshot (a complete store dump) plus the committed tail
+// rebuild the store and re-materialise the durable copy, so corruption of the
+// durable store costs a rebuild, never the data. The simulator sets no
+// persister and recovers purely from the WAL, proving that path. Every
+// SnapshotEntries applied entries, the node dumps the store, hands the dump to
+// raft as the snapshot at that index, and
 // rotates its log: one new file whose opening frame carries the snapshot,
 // the hard state, and the uncompacted tail — one frame, so a torn rotation
 // is simply an invalid file and boot falls back to the previous one, which
@@ -94,23 +102,37 @@ type Config struct {
 	// nil.
 	OnMembershipChange func(members []Member)
 
-	// Persister, when set, makes every applied metadata change durable in
-	// an embedded key-value store (BadgerDB in production, ADR-0005) in
-	// addition to the WAL that backs recovery. Nil leaves the store purely
-	// log-recovered — the simulator sets it nil, proving recovery against
-	// the deterministic WAL. Recovery still replays the log either way; the
-	// persister is a write-through durable mirror until the source-of-truth
-	// recovery work lands (docs/PLAN.md).
+	// Persister, when set, is the durable metadata store (BadgerDB in
+	// production, ADR-0005) this replica makes authoritative on boot: every
+	// applied entry commits to it together with the entry's Raft index, and
+	// a restart loads it instead of replaying the whole log. Nil leaves the
+	// store purely log-recovered — the simulator sets it nil, proving the WAL
+	// recovery path that is also the corruption fallback.
 	Persister MetaPersister
 }
 
-// MetaPersister is the durable metadata store raftnode mirrors applies into:
-// meta's per-transaction Persister, plus a Reset for the wholesale state
-// replacement a snapshot install performs (a snapshot is the complete state
-// at its index, so the durable copy is replaced, not merged).
+// MetaPersister is the durable, indexed metadata store raftnode commits applies
+// into and loads at boot. CommitAt and ResetAt write the applied index in the
+// same atomic transaction as the rows, so the durable state and the index it
+// reflects never disagree across a crash; ResetAt replaces the whole store (a
+// snapshot install or a rebuild), robustly enough to overwrite a corrupt one.
 type MetaPersister interface {
-	meta.Persister
-	Reset(rows []meta.Row) error
+	CommitAt(appliedIndex uint64, rows []meta.Row) error
+	ResetAt(appliedIndex uint64, rows []meta.Row) error
+	LoadState() (rows []meta.Row, appliedIndex uint64, ok bool, err error)
+}
+
+// indexedPersister bridges meta.Store's per-transaction Persister (which knows
+// only rows) to the durable store's indexed CommitAt, stamping each commit with
+// the Raft index of the entry being applied. index points at the node's
+// applyingIndex, set on the loop just before each apply.
+type indexedPersister struct {
+	db    MetaPersister
+	index *uint64
+}
+
+func (p *indexedPersister) Commit(rows []meta.Row) error {
+	return p.db.CommitAt(*p.index, rows)
 }
 
 const defaultSnapshotEntries = 4096
@@ -134,6 +156,11 @@ type Node struct {
 	log     *wal.Log
 	logSeq  uint64
 	store   *meta.Store
+
+	indexed        *indexedPersister // bridges store applies to the durable indexed commit; nil under the simulator
+	applyingIndex  uint64            // Raft index of the entry currently applying, stamped into its durable commit
+	usePersisted   bool              // boot trusted the durable store (Tier 1); false means a WAL rebuild
+	persistedIndex uint64            // the durable store's applied index; boot replay skips normal entries at or below it
 
 	applied   uint64
 	snapIndex uint64
@@ -170,10 +197,12 @@ func New(cfg Config) (*Node, error) {
 	for id, node := range cfg.Peers {
 		n.peers[id] = peerInfo{node: node, dial: cfg.Dials[id]}
 	}
-	// Attach the durable persister (if any) to the initial store, resetting
-	// it to empty. A restart then refills it from the replayed log; a
-	// snapshot restore re-adopts a fresh store below.
-	n.adoptStore(n.store)
+	// Bring up the durable metadata store and decide whether boot can trust
+	// it (Tier 1) or must rebuild from the WAL (Tier 2). recover then uses
+	// usePersisted/persistedIndex to replay only the un-applied tail.
+	if err := n.openPersistedStore(); err != nil {
+		return nil, err
+	}
 
 	fresh, err := n.recover()
 	if err != nil {
@@ -318,24 +347,66 @@ func (n *Node) replay(records [][]byte) error {
 	return nil
 }
 
-// adoptStore installs store as the replica's metadata state. When a durable
-// persister is configured it is reset to store's contents and attached, so
-// every later apply commits through it — the wholesale-replacement path
-// shared by boot and snapshot install, both of which hand over a complete
-// store. A reset failure is fatal: a replica that cannot make its state
-// durable cannot participate.
-func (n *Node) adoptStore(store *meta.Store) {
-	if n.cfg.Persister != nil {
-		if err := n.cfg.Persister.Reset(store.Dump()); err != nil {
-			panic(fmt.Sprintf("raftnode %d: reset persister: %v", n.cfg.ID, err))
-		}
-		store.SetPersister(n.cfg.Persister)
+// openPersistedStore wires the durable metadata store to the node and decides
+// whether boot can trust it. With a readable, initialised store, that store
+// becomes the source of truth (Tier 1): it is loaded and persistedIndex set,
+// so recovery replays only the un-applied WAL tail. An empty store (fresh or
+// wiped) or an unreadable one (corrupt) leaves usePersisted false, so recovery
+// rebuilds from the WAL and re-materialises the durable copy (Tier 2). The
+// simulator passes no persister and recovers purely from the WAL.
+func (n *Node) openPersistedStore() error {
+	if n.cfg.Persister == nil {
+		return nil
 	}
-	n.store = store
+	n.indexed = &indexedPersister{db: n.cfg.Persister, index: &n.applyingIndex}
+	rows, idx, ok, err := n.cfg.Persister.LoadState()
+	if err == nil && ok {
+		store := meta.NewStore()
+		restoreErr := error(nil)
+		for _, r := range rows {
+			if e := store.Restore(r.Key, r.Value); e != nil {
+				restoreErr = e
+				break
+			}
+		}
+		if restoreErr == nil {
+			store.SetPersister(n.indexed)
+			n.store = store
+			n.usePersisted = true
+			n.persistedIndex = idx
+			return nil
+		}
+	}
+	// Empty, or unreadable/undecodable (corrupt): rebuild from the WAL. The
+	// empty store gets the persister so the rebuild's applies persist; a
+	// snapshot install resets the durable store (ResetAt discards any
+	// corruption), and a no-snapshot rebuild simply re-commits the replayed
+	// log into the empty store.
+	n.store.SetPersister(n.indexed)
+	return nil
 }
 
-// restoreSnapshot resets storage and store to a snapshot — the shared core
-// of boot replay and MsgSnap installation.
+// adoptStore installs store as the replica's metadata state and, when a durable
+// persister is configured, resets it to store's contents at index and attaches
+// it — the wholesale-replacement path for a snapshot install or a WAL rebuild.
+// A reset failure is fatal: a replica that cannot make its state durable cannot
+// participate.
+func (n *Node) adoptStore(store *meta.Store, index uint64) {
+	if n.cfg.Persister != nil {
+		if err := n.cfg.Persister.ResetAt(index, store.Dump()); err != nil {
+			panic(fmt.Sprintf("raftnode %d: reset persister: %v", n.cfg.ID, err))
+		}
+		store.SetPersister(n.indexed)
+	}
+	n.store = store
+	n.persistedIndex = index
+}
+
+// restoreSnapshot resets storage to a snapshot — the shared core of boot replay
+// and MsgSnap installation. The store itself is replaced from the snapshot
+// (resetting the durable copy) unless the durable store is already trusted and
+// at or beyond this snapshot's index, in which case it is kept as-is and the
+// tail above it is replayed.
 func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
 	store, members, err := decodeSnapshotData(snap.Data)
 	if err != nil {
@@ -344,10 +415,15 @@ func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
 	if err := n.storage.ApplySnapshot(snap); err != nil {
 		return fmt.Errorf("apply snapshot: %w", err)
 	}
-	n.adoptStore(store)
+	s := snap.Metadata.Index
+	if !(n.usePersisted && n.persistedIndex >= s) {
+		// The snapshot is the source of truth: a WAL rebuild, or a leader's
+		// stream to a follower that had fallen behind it.
+		n.adoptStore(store, s)
+	}
 	maps.Copy(n.peers, members)
-	n.applied = snap.Metadata.Index
-	n.snapIndex = snap.Metadata.Index
+	n.applied = s
+	n.snapIndex = s
 	n.confState = snap.Metadata.ConfState
 	n.notifyMembership()
 	return nil
@@ -798,6 +874,13 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 		if len(e.Data) == 0 {
 			return // the leader's commit-barrier no-op
 		}
+		if e.Index <= n.persistedIndex {
+			// The durable store, loaded at boot, already holds this entry's
+			// effect. Re-applying would redo work and could raise a spurious
+			// validation error (e.g. "bucket exists"). Membership conf-changes
+			// are not skipped — only normal metadata entries reach here.
+			return
+		}
 		p, err := meta.DecodeProposal(e.Data)
 		if err != nil {
 			// An undecodable committed entry means a newer node proposed
@@ -805,6 +888,9 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 			// rather than diverge (METADATA.md).
 			panic(fmt.Sprintf("raftnode %d: entry %d: %v", n.cfg.ID, e.Index, err))
 		}
+		// Stamp the index this apply commits at, so the persister writes it
+		// atomically with the rows (the bridge reads applyingIndex).
+		n.applyingIndex = e.Index
 		res, err := n.store.Apply(p)
 		if errors.Is(err, meta.ErrPersist) {
 			// The entry committed cluster-wide but this replica could not
