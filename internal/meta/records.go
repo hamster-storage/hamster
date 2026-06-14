@@ -246,11 +246,16 @@ type PartRecord struct {
 // holds proportionally more partitions within the spread. Zero means equal,
 // so a layout written before this field existed reads as an unweighted (equal)
 // cluster — the field is additive (invariant 2) and encoded only when nonzero.
+// Draining marks a node the operator is removing (ADR-0004): placement demotes
+// it below every active node, so new writes avoid it while existing shards stay
+// readable (reconstructed from survivors) until repair migrates them off.
+// Additive (invariant 2), encoded only when true.
 type LayoutNode struct {
-	ID     string
-	Host   string
-	Zone   string
-	Weight uint32
+	ID       string
+	Host     string
+	Zone     string
+	Weight   uint32
+	Draining bool
 }
 
 // NodeRecord is one row under s/node/<id> — a cluster member's replicated
@@ -270,6 +275,10 @@ type NodeRecord struct {
 	Host          string
 	Zone          string
 	Capacity      uint32
+	// Draining is operator-set (ADR-0004): the node is being removed, so
+	// placement steers new writes away from it and repair migrates its shards
+	// off. Additive (invariant 2), encoded only when true.
+	Draining bool
 
 	unknown []byte
 }

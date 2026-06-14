@@ -37,6 +37,8 @@ func (s *Store) Apply(p any) (any, error) {
 		return nil, s.ApplySetClusterLayout(c)
 	case RegisterNode:
 		return nil, s.ApplyRegisterNode(c)
+	case SetNodeDraining:
+		return nil, s.ApplySetNodeDraining(c)
 	default:
 		return nil, fmt.Errorf("meta: Apply on unknown proposal type %T", p)
 	}

@@ -251,7 +251,12 @@ func clusterStatus(args []string) error {
 		if m.Capacity != 0 {
 			capacity = fmt.Sprintf("%d", m.Capacity)
 		}
+		// down (local liveness) takes precedence over draining (a committed
+		// fact) — an unreachable node is the more urgent thing to surface.
 		state := "up"
+		if m.Draining {
+			state = "draining"
+		}
 		if m.Down {
 			state = "down"
 			anyDown = true

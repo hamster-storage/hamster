@@ -69,11 +69,17 @@ func Partition(id meta.VersionID, count uint32) uint64 {
 // zero weight means equal (weight 1), so an unweighted cluster — the default,
 // and every layout written before this field existed — ranks exactly as it did
 // without weighting.
+// Draining marks a node the operator is removing (ADR-0004): placement demotes
+// it below every active node, so it is chosen only to fill width when too few
+// active nodes remain. New writes thus avoid a draining node while its existing
+// shards stay readable (any k of the width survive) until repair migrates them.
+// A cluster with no draining node ranks exactly as it did before this field.
 type Node struct {
-	ID     seam.NodeID
-	Host   string
-	Zone   string
-	Weight uint32
+	ID       seam.NodeID
+	Host     string
+	Zone     string
+	Weight   uint32
+	Draining bool
 }
 
 // Layout is a resolved snapshot of the stored cluster layout (ADR-0028):
@@ -180,6 +186,17 @@ func spread(partition uint64, members []Node, width int) ([]seam.NodeID, error) 
 			}
 			if best == -1 {
 				best = i
+				continue
+			}
+			// A draining node is demoted below every active one (ADR-0004): an
+			// active candidate always beats a draining best, regardless of
+			// domain load, so draining nodes fill width only as a last resort.
+			// Among nodes of equal drain status the spread is unchanged.
+			bd, cd := rank[best].node.Draining, rank[i].node.Draining
+			if cd != bd {
+				if !cd {
+					best = i
+				}
 				continue
 			}
 			bz, bh := zoneLoad[rank[best].node.Zone], hostLoad[rank[best].node.Host]
