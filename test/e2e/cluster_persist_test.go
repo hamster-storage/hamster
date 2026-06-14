@@ -12,22 +12,17 @@ import (
 )
 
 // TestClusterMetadataPersistsToBadgerDB is a normal-usage regression guard
-// for an ADR-0005 implementation gap. The design (ADR-0005, METADATA.md) is
-// that every cluster replica applies each metadata change into BadgerDB. In
-// fact only single-node `serve` wires BadgerDB; the clustered metadata plane
-// (internal/raftnode) attaches no persister and recovers from the Raft
-// write-ahead log plus snapshots, so a cluster node never writes BadgerDB at
-// all. The simulation harness never caught this because it substitutes the
-// WAL row-log persister for BadgerDB; this is the kind of thing only a test
-// of the real production composition surfaces.
+// for ADR-0005: every cluster replica must apply each metadata change into a
+// durable BadgerDB store, not just single-node `serve`. The clustered
+// metadata plane (internal/raftnode) mirrors every applied entry through a
+// BadgerDB persister alongside the Raft WAL that backs recovery. The
+// simulation harness cannot catch a regression here because it substitutes
+// the WAL row-log persister for BadgerDB, so this test exercises the real
+// production composition instead.
 //
-// The test asserts the design: a metadata write on a running cluster node
-// lands in a durable BadgerDB store on disk (1), and survives a real
-// stop/start (2). It is SKIPPED until the gap is closed — remove the skip to
-// drive the fix red→green.
+// It asserts the design: a metadata write on a running cluster node lands in
+// a durable BadgerDB store on disk (1), and survives a real stop/start (2).
 func TestClusterMetadataPersistsToBadgerDB(t *testing.T) {
-	t.Skip("RED: cluster metadata is not persisted to BadgerDB — ADR-0005 gap; remove this skip to drive the fix")
-
 	const (
 		akid   = "e2e-persist"
 		secret = "e2e-persist-secret"

@@ -45,6 +45,39 @@ func (m *MetaDB) Commit(rows []meta.Row) error {
 	})
 }
 
+// Reset atomically replaces the database's entire contents with rows: it
+// deletes every existing key, then writes rows. A Raft replica calls it on
+// snapshot install, where the whole metadata state is supplied at once and
+// any prior rows are stale. Metadata is small, so one transaction suffices;
+// a state large enough to exceed badger's per-transaction limit would need
+// batching, which the source-of-truth recovery work will revisit.
+func (m *MetaDB) Reset(rows []meta.Row) error {
+	return m.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		var keys [][]byte
+		for it.Rewind(); it.Valid(); it.Next() {
+			keys = append(keys, it.Item().KeyCopy(nil))
+		}
+		it.Close()
+		for _, k := range keys {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		for _, r := range rows {
+			if r.Value == nil {
+				continue
+			}
+			if err := txn.Set([]byte(r.Key), r.Value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // Load visits every persisted row — the startup replay into meta.Store.
 func (m *MetaDB) Load(fn func(key string, value []byte) error) error {
 	return m.db.View(func(txn *badger.Txn) error {

@@ -39,10 +39,11 @@ var (
 // this is the whole node — the S3 gateway joins it when the data path
 // can replicate (v0.3).
 type Node struct {
-	cfg  NodeConfig
-	dir  string
-	ca   *certs.CA // nil on nodes that cannot issue
-	loop *sys.Loop
+	cfg    NodeConfig
+	dir    string
+	ca     *certs.CA // nil on nodes that cannot issue
+	loop   *sys.Loop
+	metadb *sys.MetaDB // durable metadata store mirrored under Raft (ADR-0005)
 
 	transport *sys.Transport
 	raft      *raftnode.Node
@@ -83,8 +84,14 @@ func Run(dataDir string) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The metadata store: BadgerDB on this replica (ADR-0005), the durable
+	// target every applied Raft entry commits to alongside the WAL.
+	mdb, err := sys.OpenMetaDB(filepath.Join(dataDir, "meta"))
+	if err != nil {
+		return nil, err
+	}
 	loop := sys.NewLoop()
-	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, stopSync: make(chan struct{})}
+	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, stopSync: make(chan struct{})}
 
 	peers := make(map[seam.NodeID]string)
 	raftPeers := make(map[uint64]seam.NodeID)
@@ -122,6 +129,7 @@ func Run(dataDir string) (*Node, error) {
 		},
 	})
 	if err != nil {
+		mdb.Close()
 		loop.Stop()
 		return nil, err
 	}
@@ -169,6 +177,7 @@ func Run(dataDir string) (*Node, error) {
 			Rand:         rng,
 			TickInterval: tickInterval, ElectionTicks: electionTicks,
 			OnMembershipChange: onMembership,
+			Persister:          mdb,
 		})
 		n.raft = rn
 		// Every cluster node is a shard holder: the data-plane service
@@ -200,6 +209,7 @@ func Run(dataDir string) (*Node, error) {
 	})
 	if err := <-built; err != nil {
 		transport.Close()
+		mdb.Close()
 		loop.Stop()
 		return nil, err
 	}
@@ -247,6 +257,11 @@ func (n *Node) Stop() {
 		}
 		n.transport.Close()
 		n.loop.Stop()
+		// After the loop has stopped, no apply can touch the store; the
+		// durable metadata mirror is safe to close.
+		if n.metadb != nil {
+			n.metadb.Close()
+		}
 	})
 }
 
