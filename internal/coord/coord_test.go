@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -238,6 +239,44 @@ func (c *cluster) putTimed(key string, body []byte) (coord.PutResult, error, tim
 	}
 	c.t.Fatal("put never finished")
 	return res, perr, 0
+}
+
+// repair drives one RepairSweep through node id's coordinator to completion.
+func (c *cluster) repair(id seam.NodeID) (coord.RepairReport, error) {
+	c.t.Helper()
+	var rep coord.RepairReport
+	var rerr error
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.RepairSweep(func(r coord.RepairReport, e error) {
+			rep, rerr, done = r, e, true
+		})
+	})
+	for range 8000 {
+		c.s.Run(tick)
+		if done {
+			return rep, rerr
+		}
+	}
+	c.t.Fatal("repair never finished")
+	return rep, rerr
+}
+
+// downNodes reads node id's coordinator liveness view on its loop.
+func (c *cluster) downNodes(id seam.NodeID) []seam.NodeID {
+	c.t.Helper()
+	var out []seam.NodeID
+	c.worlds[id].Loop.Post(func() { out = c.nodes[id].co.DownNodes() })
+	c.s.Run(0) // single-threaded sim: dispatch the posted read now
+	return out
+}
+
+// idle advances the simulation by n ticks with no new work posted — long
+// enough for an outstanding operation's retransmit budget to lapse.
+func (c *cluster) idle(n int) {
+	for range n {
+		c.s.Run(tick)
+	}
 }
 
 // entry reads a key's current version entry from the leader's store.
@@ -498,6 +537,72 @@ func TestPutSkipsDownNode(t *testing.T) {
 		if got, err := c.readObject(name); err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("%s read back: equal=%v err=%v", name, bytes.Equal(got, want), err)
 		}
+	}
+}
+
+// TestGetFeedsLiveness: a GET learns a holder is down from its own fetch
+// outcomes, not just a PUT. The read still returns fast off the five live
+// shards (it abandons the straggler); the crashed holder's header fetch times
+// out a little later and feeds the detector, so a subsequent PUT would skip
+// it. A live holder touched by the same read is never marked down.
+func TestGetFeedsLiveness(t *testing.T) {
+	c := newCluster(t, 8, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	body := randomBody(80, 1<<20)
+	if _, err := c.put("obj", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	lead := c.leader()
+	if d := c.downNodes(lead); len(d) != 0 {
+		t.Fatalf("detector recorded a node down before any failure: %v", d)
+	}
+	c.crash("n6") // a data-plane holder; the metadata quorum is untouched
+
+	got, err := c.get("obj", 0, -1)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("degraded get: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+	// The read is done, but n6's header fetch is still retrying; advance past
+	// its retransmit budget (maxAttempts*rto = 10s) so it gives up and the
+	// outcome reaches the detector.
+	c.idle(1500)
+
+	d := c.downNodes(lead)
+	if !slices.Contains(d, seam.NodeID("n6")) {
+		t.Fatalf("GET did not record the crashed holder n6 down: %v", d)
+	}
+	if slices.Contains(d, seam.NodeID("n1")) {
+		t.Fatalf("GET marked a live holder down: %v", d)
+	}
+}
+
+// TestRepairFeedsLiveness: a repair sweep's scrub touches every holder, so a
+// node that never answers its verify is learned down — repair feeds the same
+// detector PUT and GET do.
+func TestRepairFeedsLiveness(t *testing.T) {
+	c := newCluster(t, 9, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	if _, err := c.put("obj", randomBody(90, 1<<20)); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	lead := c.leader()
+	c.crash("n6")
+	if d := c.downNodes(lead); len(d) != 0 {
+		t.Fatalf("detector recorded a node down before the sweep: %v", d)
+	}
+
+	// The sweep verifies all six holders; n6 never answers (it rebuilds onto
+	// the live cluster, but the down node's own shard cannot be reinstalled
+	// while it is gone — that is the next sweep's job). We assert only that
+	// the unreachable holder reached the detector.
+	if _, err := c.repair(lead); err != nil {
+		t.Fatalf("repair sweep: %v", err)
+	}
+	d := c.downNodes(lead)
+	if !slices.Contains(d, seam.NodeID("n6")) {
+		t.Fatalf("repair did not record the crashed holder n6 down: %v", d)
 	}
 }
 

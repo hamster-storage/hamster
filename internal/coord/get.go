@@ -114,6 +114,11 @@ func (op *getOp) fetchHeaders() {
 	for i := range op.nodes {
 		i := i
 		op.c.cfg.Data.Fetch(op.nodes[i], op.entry.DataID, uint32(i), 0, headerPrefix, func(b []byte, err error) {
+			// Feed liveness before the straggler guard: this phase touches
+			// every shard's holder, so a header fetch that times out is the
+			// cleanest down signal a read can give — and it lands after k have
+			// already answered, exactly when the guard below would drop it.
+			op.c.observe(op.nodes[i], err)
 			if op.finished || op.planned {
 				return
 			}
@@ -216,6 +221,7 @@ func (op *getOp) planSlices() {
 	for _, r := range reqs {
 		r := r
 		op.c.cfg.Data.Fetch(op.nodes[r.shard], op.entry.DataID, uint32(r.shard), r.off, int(r.length), func(b []byte, err error) {
+			op.c.observe(op.nodes[r.shard], err)
 			if op.finished {
 				return
 			}

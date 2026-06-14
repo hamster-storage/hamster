@@ -13,19 +13,14 @@ line here is done, delete it.
 
 ## Now / next — v0.4 partitioned placement
 
-The current version. Pass 1 (the stored, versioned cluster layout) and pass 2
-(failure-domain spread, [ADR-0016](adr/0016-failure-domain-hierarchy.md)) have
+The current version. The stored, versioned cluster layout; failure-domain
+spread ([ADR-0016](adr/0016-failure-domain-hierarchy.md)); capacity weighting
+([ADR-0004](adr/0004-partitioned-placement.md)); the replicated node registry
+(`meta.NodeRecord`); and node liveness (the passive detector fed by PUT/GET/
+repair outcomes, the PUT skip, and the `cluster status` STATE column) have all
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Node liveness — feed the detector from GET/repair too** — the passive
-  per-node detector, the PUT skip, and the `cluster status` STATE column have
-  landed (`internal/coord`: a known-down node is skipped up front instead of
-  paying its retransmit timeout, floor permitting; `Coordinator.DownNodes`
-  exposes the local view, surfaced through the status protocol). What remains is
-  feeding the detector from GET/repair outcomes too — today only PUT does. The
-  replicated `NodeRecord` (ADR-0016, ADR-0004) is where a committed status/
-  `DRAINING` flag will hang off.
 - **Draining** — an operator-set drain flag on `NodeRecord`: placement excludes a
   draining node from new writes; repair/rebalance migrate its shards off.
 - **Transition tracking + manual rebalance** — migrate partitions between nodes

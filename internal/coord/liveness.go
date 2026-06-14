@@ -1,9 +1,11 @@
 package coord
 
 import (
+	"errors"
 	"slices"
 	"time"
 
+	"github.com/hamster-storage/hamster/internal/datapath"
 	"github.com/hamster-storage/hamster/internal/seam"
 )
 
@@ -56,6 +58,28 @@ func (l *liveness) isDown(id seam.NodeID, now time.Time) bool {
 	}
 	delete(l.downUntil, id)
 	return false
+}
+
+// observe folds one data-plane outcome into the detector, from any operation —
+// PUT, GET, or repair. The rule turns on whether the peer answered at all, not
+// on whether the operation succeeded:
+//
+//   - success: the peer answered and served; clear any down mark.
+//   - datapath.ErrUnreachable: the peer never answered within the retransmit
+//     budget; arm the cooldown — this is the only outcome that costs a timeout
+//     and so the only one worth skipping.
+//   - any other error: the peer answered with an error (a present holder that
+//     simply lacks this shard, say). It is up, but this is not a clean success
+//     either, so leave the view unchanged — never mark such a node down.
+//
+// Loop-owned; reads the loop clock.
+func (c *Coordinator) observe(id seam.NodeID, err error) {
+	switch {
+	case err == nil:
+		c.liveness.record(id, true, c.cfg.Clock.Now())
+	case errors.Is(err, datapath.ErrUnreachable):
+		c.liveness.record(id, false, c.cfg.Clock.Now())
+	}
 }
 
 // down returns the node IDs currently considered down, in ID order — the

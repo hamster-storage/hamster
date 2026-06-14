@@ -31,6 +31,14 @@ var (
 	maxAttempts = 20
 )
 
+// ErrUnreachable wraps every operation that failed because the peer never
+// answered within the retransmit budget — a timeout, not a refusal. It is the
+// one outcome that distinguishes a down node from one that answered with an
+// error (a present holder that simply lacks the shard, say): only a timeout
+// costs the retransmit wait, so only a timeout is worth skipping. The
+// coordinator's passive liveness detector keys on errors.Is(err, ErrUnreachable).
+var ErrUnreachable = errors.New("datapath: peer did not respond within the retransmit budget")
+
 // Config carries a Service's world: the node's clock, transport, and disk.
 type Config struct {
 	Clock     seam.Clock

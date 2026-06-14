@@ -124,6 +124,11 @@ func (op *sweepOp) nextItem() {
 	for i := range op.nodes {
 		i := i
 		op.c.cfg.Data.Verify(op.nodes[i], e.DataID, uint32(i), func(r datapath.VerifyResult, err error) {
+			// Scrub touches every holder, so its verify outcomes are the
+			// repair path's liveness signal: a node that never answers is
+			// down (a PUT will skip it), one that answers — even "I hold
+			// nothing" — is up.
+			op.c.observe(op.nodes[i], err)
 			op.results[i] = shardState{verified: r, err: err}
 			op.pending--
 			if op.pending == 0 {
@@ -196,6 +201,7 @@ func (op *sweepOp) fetchSources() {
 	for _, p := range pieces {
 		p := p
 		op.c.cfg.Data.Fetch(op.nodes[p.shard], op.item.entry.DataID, uint32(p.shard), p.off, int(p.length), func(b []byte, err error) {
+			op.c.observe(op.nodes[p.shard], err)
 			if err != nil || int64(len(b)) != p.length {
 				fail = true
 			} else {
