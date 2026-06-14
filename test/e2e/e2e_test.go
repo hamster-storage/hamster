@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,6 +138,7 @@ type statusRow struct {
 	node   string
 	role   string // "voter", "learner"
 	leader bool
+	down   bool // the answering node's STATE column for this member
 }
 
 func parseStatus(out string) []statusRow {
@@ -155,6 +157,8 @@ func parseStatus(out string) []statusRow {
 			node:   fields[1],
 			role:   fields[3],
 			leader: strings.Contains(line, "(leader)"),
+			// STATE is the last column; "down" appears only there.
+			down: slices.Contains(fields, "down"),
 		})
 	}
 	return rows

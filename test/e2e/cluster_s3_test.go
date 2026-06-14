@@ -111,6 +111,19 @@ func TestClusterS3(t *testing.T) {
 	c.mutate(alive(), "PUT", "/vault/degraded", degraded, http.StatusOK)
 	c.getEventually(alive(), "/vault/degraded", degraded)
 
+	// The write went to the leader (leader-only in v0.3), whose PUT paid the
+	// dead holder's timeout and recorded it down — so the leader's own
+	// `cluster status` now surfaces the victim as down (ADR-0027 liveness).
+	leadDir := dirs[leaderOf(rows)]
+	waitStatus(t, leadDir, "the leader's status to show "+victim+" down", func(rows []statusRow) bool {
+		for _, r := range rows {
+			if r.node == victim {
+				return r.down
+			}
+		}
+		return false
+	})
+
 	// A second death puts the cluster below the floor: writes refuse
 	// with SlowDown, reads keep serving at exactly k.
 	rows = waitStatus(t, dirs["n1"], "a leader after the loss", func(rows []statusRow) bool {

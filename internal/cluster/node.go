@@ -292,11 +292,21 @@ func (n *Node) members() []Member {
 				labels[e.ID] = e
 			}
 		}
+		// This node's local, best-effort liveness view (ADR-0027): peers a
+		// PUT currently skips to avoid their write timeout. Reported as-is —
+		// a different node may see a different set.
+		down := map[string]bool{}
+		if n.coord != nil {
+			for _, id := range n.coord.DownNodes() {
+				down[string(id)] = true
+			}
+		}
 		var ms []Member
 		for _, m := range n.raft.Members() {
 			mem := Member{
 				RaftID: m.ID, NodeID: string(m.Addr), Dial: m.Dial,
 				Learner: m.Learner, Leader: m.ID == lead,
+				Down: down[string(m.Addr)],
 			}
 			if lbl, ok := labels[string(m.Addr)]; ok {
 				mem.Host, mem.Zone, mem.Capacity = lbl.Host, lbl.Zone, lbl.Weight

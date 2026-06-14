@@ -223,8 +223,9 @@ func clusterStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%-8s %-16s %-22s %-16s %-12s %-12s %-9s\n", "RAFT-ID", "NODE", "ADDRESS", "ROLE", "HOST", "ZONE", "CAPACITY")
+	fmt.Printf("%-8s %-16s %-22s %-16s %-12s %-12s %-9s %-6s\n", "RAFT-ID", "NODE", "ADDRESS", "ROLE", "HOST", "ZONE", "CAPACITY", "STATE")
 	hosts, zones := map[string]bool{}, map[string]bool{}
+	anyDown := false
 	for _, m := range members {
 		role := "voter"
 		if m.Learner {
@@ -237,7 +238,12 @@ func clusterStatus(args []string) error {
 		if m.Capacity != 0 {
 			capacity = fmt.Sprintf("%d", m.Capacity)
 		}
-		fmt.Printf("%-8d %-16s %-22s %-16s %-12s %-12s %-9s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone, capacity)
+		state := "up"
+		if m.Down {
+			state = "down"
+			anyDown = true
+		}
+		fmt.Printf("%-8d %-16s %-22s %-16s %-12s %-12s %-9s %-6s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone, capacity, state)
 		if m.Host != "" {
 			hosts[m.Host] = true
 		}
@@ -247,6 +253,11 @@ func clusterStatus(args []string) error {
 	}
 	// Failure-domain topology (ADR-0016): state plainly when a level is
 	// trivial — a single host or zone has no tolerance at that level.
+	if anyDown {
+		// STATE is the answering node's local, best-effort view (ADR-0027):
+		// a peer it currently treats as down, not a committed cluster fact.
+		fmt.Println("  note: STATE is this node's local liveness view; another node may differ")
+	}
 	fmt.Printf("\ntopology: %d node(s), %d host(s), %d zone(s)\n", len(members), len(hosts), len(zones))
 	if len(hosts) <= 1 {
 		fmt.Println("  note: one host — no host-level failure tolerance (shards can share a machine)")
