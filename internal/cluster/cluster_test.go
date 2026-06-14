@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hamster-storage/hamster/internal/meta"
 )
 
 // The cluster package test: a real three-node metadata cluster on
@@ -157,6 +159,95 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	// Tokens come only from the CA holder.
 	if _, err := MintToken(d2, time.Hour, now); err == nil {
 		t.Fatal("a node without the CA key minted a token")
+	}
+}
+
+// nodeRecords snapshots a node's replicated member registry (ADR-0016) off
+// its loop — the s/node/* rows reconcileLayout composes the layout from.
+func nodeRecords(n *Node) map[string]meta.NodeRecord {
+	done := make(chan map[string]meta.NodeRecord, 1)
+	n.loop.Post(func() {
+		out := map[string]meta.NodeRecord{}
+		for _, r := range n.raft.Store().Nodes() {
+			out[r.NodeID] = r
+		}
+		done <- out
+	})
+	select {
+	case m := <-done:
+		return m
+	case <-time.After(5 * time.Second):
+		return nil
+	}
+}
+
+// TestClusterNodeRegistryReplicated proves the member registry (the
+// failure-domain/capacity labels) is replicated, not issuer-local: every
+// node's own committed store holds a NodeRecord for every member, with the
+// right labels. Before this, the registry lived only on the issuer's disk, so
+// only the issuer could compose a complete layout; now any leader can — which
+// is what this replication buys. n1 (issuer) zone za cap 3, n2 zone zb cap 1,
+// n3 zone zc cap 2.
+func TestClusterNodeRegistryReplicated(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "regtest", "n1", freeAddr(t), freeAddr(t), "za", 3, now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	waitStatus(t, d1, "", "n1 leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].Leader
+	})
+
+	join := func(dir, id, zone string, capacity uint32) *Node {
+		tok, err := MintToken(d1, time.Hour, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Join(dir, id, freeAddr(t), freeAddr(t), tok, zone, capacity); err != nil {
+			t.Fatal(err)
+		}
+		n, err := Run(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	n2 := join(d2, "n2", "zb", 1)
+	defer n2.Stop()
+	n3 := join(d3, "n3", "zc", 2)
+	defer n3.Stop()
+
+	waitStatus(t, d1, "", "three members", func(ms []Member) bool { return len(ms) == 3 })
+
+	wantZone := map[string]string{"n1": "za", "n2": "zb", "n3": "zc"}
+	wantCap := map[string]uint32{"n1": 3, "n2": 1, "n3": 2}
+	// Each node — issuer and non-issuers alike — must converge to a registry
+	// holding all three members with the right labels.
+	deadline := time.Now().Add(30 * time.Second)
+	for _, n := range []*Node{n1, n2, n3} {
+		for {
+			recs := nodeRecords(n)
+			ok := len(recs) == 3
+			for id, z := range wantZone {
+				r, present := recs[id]
+				if !present || r.Zone != z || r.Capacity != wantCap[id] {
+					ok = false
+				}
+			}
+			if ok {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("node %s registry did not converge: %+v", n.cfg.NodeID, recs)
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
 	}
 }
 

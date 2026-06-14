@@ -41,6 +41,7 @@ var (
 	ErrPartTooSmall           = errors.New("part below the minimum size")
 	ErrStaleLayout            = errors.New("cluster layout version is not the next generation")
 	ErrInvalidLayout          = errors.New("invalid cluster layout")
+	ErrInvalidNode            = errors.New("invalid node record")
 )
 
 // Multipart limits, S3 parity (docs/S3-API.md). Apply enforces both: the

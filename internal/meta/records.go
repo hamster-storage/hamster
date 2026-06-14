@@ -253,6 +253,27 @@ type LayoutNode struct {
 	Weight uint32
 }
 
+// NodeRecord is one row under s/node/<id> — a cluster member's replicated
+// registration: its failure-domain labels (ADR-0016) and capacity weight
+// (ADR-0004), committed through Raft. It is the registry the layout reconcile
+// composes from. Before this record the registry lived only on the join
+// issuer's local disk, so only that node could build a complete labeled
+// layout; replicating it lets any leader compose one. The issuer proposes a
+// member's record as part of admission; the row then persists like any
+// committed state.
+//
+// Strings, so meta stays free of the seam. Idempotent by node ID — a
+// re-registration with changed labels replaces the row.
+type NodeRecord struct {
+	FormatVersion uint32
+	NodeID        string
+	Host          string
+	Zone          string
+	Capacity      uint32
+
+	unknown []byte
+}
+
 // ClusterLayout is the singleton row under s/layout — the replicated,
 // versioned placement basis (ADR-0004, ADR-0028). It names the ordered
 // member set that the placement function ranks over, so every node and

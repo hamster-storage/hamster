@@ -18,12 +18,13 @@ The current version. Pass 1 (the stored, versioned cluster layout) and pass 2
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Node liveness / status registry** — the full `NodeRecord` with DOWN detection
-  and draining; PUT skips down nodes instead of paying their write timeout. This is
-  also where the failure-domain labels ([ADR-0016](adr/0016-failure-domain-hierarchy.md))
-  move into a *replicated* registry: today the composed layout is replicated but the
-  raw label registry it is built from lives only on the issuing node's disk, so any
-  leader can compose a complete layout only once the labels are in the `NodeRecord`.
+- **Node liveness / DOWN detection** — PUT skips a known-down node instead of
+  opening a stream to it and paying the datapath retransmit timeout (GET already
+  abandons stragglers). Runtime liveness surfaced in `cluster status`; the
+  replicated `NodeRecord` (ADR-0016, ADR-0004) the registry now lives in is the
+  place a committed status/`DRAINING` flag will hang off.
+- **Draining** — an operator-set drain flag on `NodeRecord`: placement excludes a
+  draining node from new writes; repair/rebalance migrate its shards off.
 - **Transition tracking + manual rebalance** — migrate partitions between nodes
   without re-encoding objects ([ADR-0004](adr/0004-partitioned-placement.md), the
   fixed-partition invariant).

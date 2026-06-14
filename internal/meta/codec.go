@@ -542,6 +542,41 @@ func unmarshalLayoutNode(b []byte) (LayoutNode, error) {
 	return n, d.err
 }
 
+// marshalNodeRecord encodes one member registration (s/node/<id>). Unlike
+// the layout, a node row is rewritten in place on re-registration, so it
+// preserves unknown fields like the object records do.
+func marshalNodeRecord(n NodeRecord) []byte {
+	var b []byte
+	b = putUvarint(b, 1, uint64(n.FormatVersion))
+	b = putString(b, 2, n.NodeID)
+	b = putString(b, 3, n.Host)
+	b = putString(b, 4, n.Zone)
+	b = putUvarint(b, 5, uint64(n.Capacity))
+	return append(b, n.unknown...)
+}
+
+func unmarshalNodeRecord(b []byte) (NodeRecord, error) {
+	var n NodeRecord
+	d := &dec{b: b}
+	for d.next() {
+		switch d.num {
+		case 1:
+			n.FormatVersion = d.uint32()
+		case 2:
+			n.NodeID = d.str()
+		case 3:
+			n.Host = d.str()
+		case 4:
+			n.Zone = d.str()
+		case 5:
+			n.Capacity = d.uint32()
+		default:
+			d.skipUnknown(&n.unknown)
+		}
+	}
+	return n, d.err
+}
+
 // --- row dispatch: a key's shape names its record type ---
 
 // marshalRecord encodes any keyspace record value.
@@ -559,6 +594,8 @@ func marshalRecord(v any) []byte {
 		return marshalPartRecord(r)
 	case ClusterLayout:
 		return marshalClusterLayout(r)
+	case NodeRecord:
+		return marshalNodeRecord(r)
 	default:
 		panic(fmt.Sprintf("meta: unencodable record type %T", v))
 	}
@@ -571,6 +608,8 @@ func decodeRow(key string, value []byte) (any, error) {
 	switch {
 	case key == clusterLayoutKey:
 		return unmarshalClusterLayout(value)
+	case strings.HasPrefix(key, nodeScanPrefix):
+		return unmarshalNodeRecord(value)
 	case strings.HasPrefix(key, bucketScanPrefix):
 		return unmarshalBucketConfig(value)
 	case strings.HasPrefix(key, "v/"):
