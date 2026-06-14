@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	mathrand "math/rand/v2"
-	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -34,10 +33,11 @@ var (
 	peerSyncEvery = time.Second
 )
 
-// Node is one running cluster node: the Raft-replicated metadata plane
-// over the production adapters, plus the join/status listener. In v0.2
-// this is the whole node — the S3 gateway joins it when the data path
-// can replicate (v0.3).
+// Node is one running cluster node: the Raft-replicated metadata plane over
+// the production adapters. The join/status protocol shares the peer transport's
+// port (ADR-0030), so a node binds one cluster address, not two. In v0.2 this
+// is the whole node — the S3 gateway joins it when the data path can replicate
+// (v0.3).
 type Node struct {
 	cfg    NodeConfig
 	dir    string
@@ -51,8 +51,8 @@ type Node struct {
 	clock     seam.Clock     // loop-owned; stamps layout-reconcile proposals
 	data      *datapath.Service
 	coord     *coord.Coordinator
-	s3        *s3Server // nil unless ServeS3 was asked for
-	joinLn    net.Listener
+	s3        *s3Server     // nil unless ServeS3 was asked for
+	ready     chan struct{} // closed once the node is built; gates control conns
 	stopSync  chan struct{}
 
 	issueMu sync.Mutex // serializes joins: ID allocation and its durable record
@@ -101,7 +101,7 @@ func Run(dataDir string) (*Node, error) {
 		}
 	}
 	loop := sys.NewLoop()
-	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, stopSync: make(chan struct{})}
+	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, ready: make(chan struct{}), stopSync: make(chan struct{})}
 
 	peers := make(map[seam.NodeID]string)
 	raftPeers := make(map[uint64]seam.NodeID)
@@ -137,6 +137,10 @@ func Run(dataDir string) (*Node, error) {
 				}
 			})
 		},
+		// The join/status protocol shares this port (ADR-0030): a client that
+		// does not negotiate the peer ALPN lands here. One listen address per
+		// node, not two.
+		OnControl: func(conn *tls.Conn) { n.handleConn(conn) },
 	})
 	if err != nil {
 		mdb.Close()
@@ -223,25 +227,15 @@ func Run(dataDir string) (*Node, error) {
 		loop.Stop()
 		return nil, err
 	}
+	// The node is built: raft and the handlers exist, so control connections
+	// (join/status) the shared listener has been accepting since NewTransport
+	// can now be served. handleConn waits on this.
+	close(n.ready)
 
 	// Membership grows the transport's address book: joined members appear
 	// in the replicated state, the transport learns where they dial.
 	go n.syncPeers()
 
-	ln, err := tls.Listen("tcp", cfg.JoinAddr, &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
-		// Join requests arrive without a certificate (that is the point);
-		// status requires one, checked per request.
-		ClientAuth: tls.VerifyClientCertIfGiven,
-		ClientCAs:  pool,
-	})
-	if err != nil {
-		n.Stop()
-		return nil, fmt.Errorf("cluster: join listener on %s: %w", cfg.JoinAddr, err)
-	}
-	n.joinLn = ln
-	go n.acceptLoop()
 	return n, nil
 }
 
@@ -253,18 +247,15 @@ func (rt raftTransport) Send(to seam.NodeID, msg []byte) {
 	rt.t.Send(to, datapath.Wrap(datapath.ChannelRaft, msg))
 }
 
-// Stop shuts the node down: S3 listener, join listener, peer sync,
-// transport, loop — HTTP before the loop, per the gateway contract.
-// Stopping twice is fine.
+// Stop shuts the node down: S3 listener, peer sync, transport (which also
+// carries join/status), loop — HTTP before the loop, per the gateway
+// contract. Stopping twice is fine.
 func (n *Node) Stop() {
 	n.stopped.Do(func() {
 		if n.s3 != nil {
 			n.s3.stop()
 		}
 		close(n.stopSync)
-		if n.joinLn != nil {
-			n.joinLn.Close()
-		}
 		n.transport.Close()
 		n.loop.Stop()
 		// After the loop has stopped, no apply can touch the store; the
@@ -276,8 +267,11 @@ func (n *Node) Stop() {
 }
 
 // Addr is the transport address; JoinAddr the join/status listener's.
-func (n *Node) Addr() string     { return n.transport.Addr() }
-func (n *Node) JoinAddr() string { return n.joinLn.Addr().String() }
+func (n *Node) Addr() string { return n.transport.Addr() }
+
+// JoinAddr is where join and status clients connect — the same shared port as
+// the peer transport (ADR-0030); join/status is routed off it by ALPN.
+func (n *Node) JoinAddr() string { return n.transport.Addr() }
 
 // members snapshots membership and leadership from the loop, labeling each
 // member with its failure-domain host/zone from the replicated layout (so
@@ -447,19 +441,21 @@ func upsertLabel(labels []Member, m Member) []Member {
 	return append(labels, m)
 }
 
-func (n *Node) acceptLoop() {
-	for {
-		conn, err := n.joinLn.Accept()
-		if err != nil {
-			return // closed
-		}
-		go n.handleConn(conn.(*tls.Conn))
-	}
-}
-
-// handleConn serves one request — join or status — and closes.
+// handleConn serves one control request — join or status — and closes. It is
+// the transport's OnControl handler: the connection arrived on the shared
+// cluster port without the peer ALPN, its handshake already complete. It waits
+// for the node to finish building (the listener accepts from the moment the
+// transport exists, which can precede raft/handler construction), bounded so a
+// pre-build connection cannot pin a goroutine.
 func (n *Node) handleConn(conn *tls.Conn) {
 	defer conn.Close()
+	select {
+	case <-n.ready:
+	case <-n.stopSync:
+		return
+	case <-time.After(10 * time.Second):
+		return
+	}
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.Handshake(); err != nil {
 		return

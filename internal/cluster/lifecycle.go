@@ -18,10 +18,6 @@ import (
 	"github.com/hamster-storage/hamster/internal/sys"
 )
 
-// Init creates a new cluster: the CA, the founding node's certificate and
-// identity, all under <data-dir>/cluster. The node becomes a running
-// cluster the first time `cluster run` starts it (a fresh Raft log
-// bootstraps a single-voter configuration).
 // detectHost returns this machine's identity for failure-domain placement
 // (ADR-0016): the OS hostname, lowercased and trimmed. Processes on one box
 // share it with zero configuration. Falls back to the node ID when the OS
@@ -35,7 +31,12 @@ func detectHost(nodeID string) string {
 	return nodeID
 }
 
-func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr, zone string, capacity uint32, now time.Time) error {
+// Init creates a new cluster: the CA, the founding node's certificate and
+// identity, all under <data-dir>/cluster. The node becomes a running cluster
+// the first time `cluster run` starts it (a fresh Raft log bootstraps a
+// single-voter configuration). listenAddr is the node's one cluster port: the
+// mTLS peer transport and the join/status protocol share it (ADR-0030).
+func Init(dataDir, clusterName, nodeID, listenAddr, zone string, capacity uint32, now time.Time) error {
 	if Initialized(dataDir) {
 		return fmt.Errorf("cluster: %s already holds a cluster identity", Dir(dataDir))
 	}
@@ -76,8 +77,8 @@ func Init(dataDir, clusterName, nodeID, clusterAddr, joinAddr, zone string, capa
 	}
 	return saveConfig(dir, NodeConfig{
 		Cluster: clusterName, NodeID: nodeID, RaftID: 1,
-		ClusterAddr: clusterAddr, JoinAddr: joinAddr,
-		Members:    []Member{{RaftID: 1, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone, Capacity: capacity}},
+		ClusterAddr: listenAddr, JoinAddr: listenAddr,
+		Members:    []Member{{RaftID: 1, NodeID: nodeID, Dial: listenAddr, Host: host, Zone: zone, Capacity: capacity}},
 		NextRaftID: 2,
 		Host:       host, Zone: zone, Capacity: capacity,
 		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone, Capacity: capacity}},
@@ -103,7 +104,10 @@ func MintToken(dataDir string, ttl time.Duration, now time.Time) (string, error)
 // issuer, authenticate it against the token's pinned CA hash, present the
 // token, and persist the identity it returns. The node is a cluster member
 // once `cluster run` starts it and admission commits.
-func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string, capacity uint32) error {
+// Join performs the joining side of the join protocol. listenAddr is the
+// node's one cluster port — peer transport and join/status share it (ADR-0030)
+// — advertised to the cluster as this node's dial address.
+func Join(dataDir, nodeID, listenAddr, tokenStr, zone string, capacity uint32) error {
 	if Initialized(dataDir) {
 		return fmt.Errorf("cluster: %s already holds a cluster identity", Dir(dataDir))
 	}
@@ -124,7 +128,7 @@ func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string, capacit
 	}
 	defer conn.Close()
 	req := encodeRequest(reqJoin, encodeJoinRequest(joinRequest{
-		Token: tokenStr, NodeID: nodeID, ClusterAddr: clusterAddr,
+		Token: tokenStr, NodeID: nodeID, ClusterAddr: listenAddr,
 		Host: host, Zone: zone, Capacity: capacity,
 	}))
 	if err := writeFrame(conn, req); err != nil {
@@ -153,10 +157,10 @@ func Join(dataDir, nodeID, clusterAddr, joinAddr, tokenStr, zone string, capacit
 			return fmt.Errorf("cluster: writing %s: %w", name, err)
 		}
 	}
-	members := append(resp.Members, Member{RaftID: resp.RaftID, NodeID: nodeID, Dial: clusterAddr, Host: host, Zone: zone, Capacity: capacity})
+	members := append(resp.Members, Member{RaftID: resp.RaftID, NodeID: nodeID, Dial: listenAddr, Host: host, Zone: zone, Capacity: capacity})
 	return saveConfig(dir, NodeConfig{
 		Cluster: resp.Cluster, NodeID: nodeID, RaftID: resp.RaftID,
-		ClusterAddr: clusterAddr, JoinAddr: joinAddr,
+		ClusterAddr: listenAddr, JoinAddr: listenAddr,
 		Join: true, Members: members,
 		Host: host, Zone: zone, Capacity: capacity,
 		NodeLabels: []Member{{NodeID: nodeID, Host: host, Zone: zone, Capacity: capacity}},

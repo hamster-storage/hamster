@@ -35,7 +35,7 @@ func TestClusterMetadataPersistsToBadgerDB(t *testing.T) {
 	// A one-node cluster — the simplest deployment that runs the *cluster*
 	// metadata path (Raft + coordinator), as opposed to single-node `serve`.
 	run(t, "cluster", "init", "-data-dir", dir, "-cluster", "e2e-persist", "-node", "n1",
-		"-listen-cluster", freeAddr(t), "-listen-join", freeAddr(t))
+		"-listen", freeAddr(t))
 	p := start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
 	waitStatus(t, dir, "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
@@ -94,7 +94,7 @@ func TestClusterMetadataRebuildsFromWALAfterStoreLoss(t *testing.T) {
 	s3 := freeAddr(t)
 
 	run(t, "cluster", "init", "-data-dir", dir, "-cluster", "e2e-rebuild", "-node", "n1",
-		"-listen-cluster", freeAddr(t), "-listen-join", freeAddr(t))
+		"-listen", freeAddr(t))
 	p := start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
 	waitStatus(t, dir, "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader

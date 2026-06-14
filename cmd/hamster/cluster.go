@@ -56,18 +56,17 @@ func clusterInit(args []string) error {
 	dataDir := fs.String("data-dir", "", "directory for this node's data (required)")
 	name := fs.String("cluster", "hamster", "cluster name")
 	node := fs.String("node", "n1", "this node's ID")
-	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address; peers dial it, so use a reachable one")
-	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address")
+	listen := fs.String("listen", "127.0.0.1:7946", "cluster listen address (mTLS peer transport + join/status); peers dial it, so use a reachable one")
 	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight (ADR-0004); 0 means equal — set it proportional to disk size on a heterogeneous cluster")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
 	}
-	if err := cluster.Init(*dataDir, *name, *node, *listenCluster, *listenJoin, *zone, uint32(*capacity), time.Now()); err != nil {
+	if err := cluster.Init(*dataDir, *name, *node, *listen, *zone, uint32(*capacity), time.Now()); err != nil {
 		return err
 	}
-	log.Printf("cluster %q initialized: node %s, transport %s, join %s", *name, *node, *listenCluster, *listenJoin)
+	log.Printf("cluster %q initialized: node %s, listen %s", *name, *node, *listen)
 	log.Printf("next: hamster cluster run -data-dir %s", *dataDir)
 	return nil
 }
@@ -92,8 +91,7 @@ func clusterJoin(args []string) error {
 	fs := flag.NewFlagSet("cluster join", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "directory for this node's data (required)")
 	node := fs.String("node", "", "this node's ID (required, unique in the cluster)")
-	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address; peers dial it, so use a reachable one")
-	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address")
+	listen := fs.String("listen", "127.0.0.1:7946", "cluster listen address (mTLS peer transport + join/status); peers dial it, so use a reachable one")
 	token := fs.String("token", "", "join token from `hamster cluster token` (required)")
 	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight (ADR-0004); 0 means equal — set it proportional to disk size on a heterogeneous cluster")
@@ -101,7 +99,7 @@ func clusterJoin(args []string) error {
 	if *dataDir == "" || *node == "" || *token == "" {
 		return fmt.Errorf("-data-dir, -node, and -token are required")
 	}
-	if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone, uint32(*capacity)); err != nil {
+	if err := cluster.Join(*dataDir, *node, *listen, *token, *zone, uint32(*capacity)); err != nil {
 		return err
 	}
 	log.Printf("joined as node %s", *node)
@@ -113,8 +111,7 @@ func clusterRun(args []string) error {
 	fs := flag.NewFlagSet("cluster run", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	node := fs.String("node", "", "this node's ID (first boot with -token only)")
-	listenCluster := fs.String("listen-cluster", "127.0.0.1:7946", "inter-node (mTLS) listen address (first boot with -token only)")
-	listenJoin := fs.String("listen-join", "127.0.0.1:7947", "join/status listen address (first boot with -token only)")
+	listen := fs.String("listen", "127.0.0.1:7946", "cluster listen address — mTLS peer transport + join/status (first boot with -token only)")
 	token := fs.String("token", "", "join token: an uninitialized data directory joins before running; ignored once joined, so the same command line is restart-safe")
 	zone := fs.String("zone", "", "failure-domain label when joining with -token — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight when joining with -token (ADR-0004); 0 means equal")
@@ -132,7 +129,7 @@ func clusterRun(args []string) error {
 		if *node == "" {
 			return fmt.Errorf("-node is required when joining with -token")
 		}
-		if err := cluster.Join(*dataDir, *node, *listenCluster, *listenJoin, *token, *zone, uint32(*capacity)); err != nil {
+		if err := cluster.Join(*dataDir, *node, *listen, *token, *zone, uint32(*capacity)); err != nil {
 			return err
 		}
 		log.Printf("joined as node %s", *node)
@@ -143,7 +140,7 @@ func clusterRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("hamster cluster node: %s — transport %s, join/status %s", fullVersion(), n.Addr(), n.JoinAddr())
+	log.Printf("hamster cluster node: %s — listen %s (peer transport + join/status)", fullVersion(), n.Addr())
 	if *s3 != "" {
 		accessKey, secretKey := os.Getenv("HAMSTER_ACCESS_KEY_ID"), os.Getenv("HAMSTER_SECRET_ACCESS_KEY")
 		if accessKey == "" || secretKey == "" {
@@ -214,7 +211,7 @@ re-form on its own. To proceed, rerun with -force.`)
 func clusterStatus(args []string) error {
 	fs := flag.NewFlagSet("cluster status", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
-	addr := fs.String("addr", "", "join/status address of the node to ask (default: this node's own)")
+	addr := fs.String("addr", "", "cluster listen address of the node to ask (default: this node's own)")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")

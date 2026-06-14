@@ -154,6 +154,55 @@ func TestTransportAuthenticatesPeers(t *testing.T) {
 	}
 }
 
+// TestTransportControlConnRouted: a client that does not negotiate the peer
+// ALPN — the shape of a join/status client, certless and protocol-less — is
+// handed to OnControl, not the peer delivery path. This is what lets one port
+// serve both the transport and the join/status protocol.
+func TestTransportControlConnRouted(t *testing.T) {
+	now := time.Now()
+	ca, err := certs.NewCA("test", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := ca.Issue("n1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control := make(chan struct{}, 1)
+	delivered := make(chan struct{}, 1)
+	tr, err := NewTransport(TransportConfig{
+		NodeID: "n1", Listen: "127.0.0.1:0", Peers: map[seam.NodeID]string{},
+		Cert: cert, CA: ca.Pool(),
+		Deliver:   func(seam.NodeID, []byte) { delivered <- struct{}{} },
+		OnControl: func(c *tls.Conn) { control <- struct{}{}; c.Close() },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+
+	conn, err := tls.Dial("tcp", tr.Addr(), &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		RootCAs:    ca.Pool(),
+		ServerName: "n1", // verify the server; present no client cert, no ALPN
+	})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	select {
+	case <-control:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a non-peer connection was not routed to OnControl")
+	}
+	select {
+	case <-delivered:
+		t.Fatal("a control connection reached the peer delivery path")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 // TestTransportPlaintextRefused: the constructor enforces ADR-0022.
 func TestTransportPlaintextRefused(t *testing.T) {
 	_, err := NewTransport(TransportConfig{
