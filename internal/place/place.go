@@ -91,13 +91,41 @@ type Layout struct {
 	Version        uint64
 	PartitionCount uint32
 	Members        []Node
+	// Previous, when non-empty, is the member set a rebalance is migrating away
+	// from (ADR-0004): the layout is mid-transition. Shard addressing is
+	// positional and derived from the member set, so changing the set relocates
+	// where a shard lives; Previous lets a reader dual-read every shard from
+	// wherever it currently sits (its new home, or its old one if repair has not
+	// migrated it yet). Empty in steady state.
+	Previous []Node
 }
 
 // Nodes returns this layout's placement for the partition at the given
 // width: the rendezvous ranking spread across zones, then hosts, then nodes
-// (ADR-0016), with the node-distinct floor held by construction. See spread.
+// (ADR-0016), with the node-distinct floor held by construction. It resolves
+// the new (target) member set — where new writes go and shards migrate to.
+// See spread.
 func (l Layout) Nodes(partition uint64, width int) ([]seam.NodeID, error) {
 	return spread(partition, l.Members, width)
+}
+
+// Locate resolves a partition's placement for a read during a possible
+// transition (ADR-0004): newNodes is the target placement (Members), and
+// oldNodes is the prior placement (Previous) when a transition is open, else
+// nil. A reader fetches shard i from newNodes[i], falling back to oldNodes[i] —
+// so an object written before the transition is found at its old home until
+// repair migrates it, and one written after at its new home. In steady state
+// (no Previous) this is exactly Nodes with a nil oldNodes.
+func (l Layout) Locate(partition uint64, width int) (newNodes, oldNodes []seam.NodeID, err error) {
+	newNodes, err = spread(partition, l.Members, width)
+	if err != nil || len(l.Previous) == 0 {
+		return newNodes, nil, err
+	}
+	oldNodes, err = spread(partition, l.Previous, width)
+	if err != nil {
+		return nil, nil, err
+	}
+	return newNodes, oldNodes, nil
 }
 
 // spread selects width nodes for a partition: the rendezvous ranking

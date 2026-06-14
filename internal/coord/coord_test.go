@@ -75,6 +75,13 @@ type cluster struct {
 	worlds  map[seam.NodeID]*sim.World
 	down    map[seam.NodeID]bool
 	profile ec.Profile
+
+	// Layout override for transition tests: when active is non-nil the layout's
+	// member set is active (the new placement) and previous is the prior set, so
+	// the getter resolves a mid-rebalance transition. Both nil = steady state
+	// over members.
+	active   []seam.NodeID
+	previous []seam.NodeID
 }
 
 // newCluster builds n nodes; the first min(n, 3) are Raft voters.
@@ -122,16 +129,21 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 				Clock: w.Clock, Rand: w.Rand, Data: n.data, Raft: rn,
 				Layout: func() (place.Layout, bool) {
 					// Distinct host/zone per node: spread collapses to the
-					// bare rendezvous ranking readObject verifies against.
-					nodes := make([]place.Node, len(c.members))
-					for i, id := range c.members {
-						nodes[i] = place.Node{ID: id, Host: string(id), Zone: string(id)}
+					// bare rendezvous ranking readObject verifies against. The
+					// active/previous override drives transition tests.
+					members := c.members
+					if c.active != nil {
+						members = c.active
 					}
-					return place.Layout{
+					l := place.Layout{
 						Version:        1,
 						PartitionCount: place.DefaultPartitionCount,
-						Members:        nodes,
-					}, true
+						Members:        placeNodes(members),
+					}
+					if c.previous != nil {
+						l.Previous = placeNodes(c.previous)
+					}
+					return l, true
 				},
 			})
 		}
@@ -348,6 +360,16 @@ func (c *cluster) readObject(key string) ([]byte, error) {
 func (c *cluster) crash(id seam.NodeID) {
 	c.s.Crash(id)
 	c.down[id] = true
+}
+
+// placeNodes labels each ID with a distinct host/zone (own ID), so spread
+// collapses to the bare rendezvous ranking the tests reason about.
+func placeNodes(ids []seam.NodeID) []place.Node {
+	out := make([]place.Node, len(ids))
+	for i, id := range ids {
+		out[i] = place.Node{ID: id, Host: string(id), Zone: string(id)}
+	}
+	return out
 }
 
 func randomBody(seed uint64, n int) []byte {
@@ -768,6 +790,53 @@ func TestGetOverNetwork(t *testing.T) {
 	}
 	if _, err := c.get("never-put", 0, -1); err == nil {
 		t.Fatal("get of a missing key succeeded")
+	}
+}
+
+// TestGetDualReadAcrossTransition: a layout change relocates shards (placement
+// is positional and derived from the member set), which would make existing
+// objects unreadable — unless GET dual-reads. With the prior member set carried
+// as the transition's Previous, every object written before the change still
+// reads, fetched from its old home until repair migrates it. The control shows
+// the hazard is real: drop Previous and reads fail.
+func TestGetDualReadAcrossTransition(t *testing.T) {
+	c := newCluster(t, 41, sim.NetConfig{}, 4, profile(t, "2+1")) // width 3 of 4 nodes
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	bodies := map[string][]byte{}
+	for i := 0; i < 8; i++ {
+		key := fmt.Sprintf("obj-%d", i)
+		body := randomBody(uint64(100+i), 200<<10)
+		if _, err := c.put(key, body); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		bodies[key] = body
+	}
+
+	// Open a transition draining n4: the new placement is the three remaining
+	// nodes, the old placement the full four. Dual-read must keep every object
+	// readable — found at its old home, which repair has not yet migrated.
+	c.active = []seam.NodeID{"n1", "n2", "n3"}
+	c.previous = c.members // {n1,n2,n3,n4}
+	for key, body := range bodies {
+		got, err := c.get(key, 0, -1)
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("dual-read %s across transition: equal=%v err=%v", key, bytes.Equal(got, body), err)
+		}
+	}
+
+	// Control: the same new placement without the transition. Positional
+	// addressing now points at the wrong nodes, so reads fail — this is exactly
+	// the hazard dual-read removes.
+	c.previous = nil
+	failed := 0
+	for key := range bodies {
+		if _, err := c.get(key, 0, -1); err != nil {
+			failed++
+		}
+	}
+	if failed == 0 {
+		t.Fatal("expected objects to be unreadable without dual-read (the hazard); none were")
 	}
 }
 

@@ -60,7 +60,7 @@ func (c *Coordinator) Get(bucket, key string, off, length int64, done func([]byt
 		done(nil, fmt.Errorf("coord: no cluster layout: %w", ErrUnreadable))
 		return
 	}
-	nodes, err := layout.Nodes(entry.Partition, width)
+	nodes, oldNodes, err := layout.Locate(entry.Partition, width)
 	if err != nil {
 		done(nil, fmt.Errorf("coord: resolving partition %d: %w", entry.Partition, err))
 		return
@@ -68,11 +68,12 @@ func (c *Coordinator) Get(bucket, key string, off, length int64, done func([]byt
 
 	op := &getOp{
 		c: c, done: done,
-		entry: entry, nodes: nodes,
+		entry: entry, nodes: nodes, oldNodes: oldNodes,
 		k: int(entry.ECDataShards), width: width,
 		off: off, length: end - off,
 		prefixes: make([][]byte, width),
 		extents:  make([][]extent, width),
+		source:   make([]seam.NodeID, width),
 		failed:   make([]bool, width),
 	}
 	op.fetchHeaders()
@@ -88,19 +89,33 @@ type getOp struct {
 	c    *Coordinator
 	done func([]byte, error)
 
-	entry meta.VersionEntry
-	nodes []seam.NodeID
-	k     int
-	width int
+	entry    meta.VersionEntry
+	nodes    []seam.NodeID // new (target) placement, per shard index
+	oldNodes []seam.NodeID // prior placement during a transition, else nil
+	k        int
+	width    int
 
 	off, length int64
 
-	prefixes [][]byte   // phase A: shard file fronts
-	extents  [][]extent // phase B: covering slice ranges
+	prefixes [][]byte      // phase A: shard file fronts
+	extents  [][]extent    // phase B: covering slice ranges
+	source   []seam.NodeID // the node a shard's header actually came from
 	failed   []bool
 	pending  int
 	planned  bool // phase B started; straggling header answers ignored
 	finished bool
+}
+
+// candidates lists where shard i may live: its new home, and — during a
+// transition — its old home when that differs. A shard mid-migration sits at
+// exactly one of them (the Fetch is keyed by (DataID, index), so a node answers
+// only if it physically holds that shard), so the first non-empty answer wins.
+func (op *getOp) candidates(i int) []seam.NodeID {
+	cands := []seam.NodeID{op.nodes[i]}
+	if op.oldNodes != nil && op.oldNodes[i] != op.nodes[i] {
+		cands = append(cands, op.oldNodes[i])
+	}
+	return cands
 }
 
 // fetchHeaders is phase A: the file front of every shard, in parallel.
@@ -110,22 +125,35 @@ type getOp struct {
 // failing on one of the chosen k refuses a read that a straggler could
 // have served; the client's retry chooses fresh responders.
 func (op *getOp) fetchHeaders() {
-	op.pending = op.width
+	// One fetch per (shard index, candidate node): during a transition a shard
+	// is probed at both its new and old home.
+	type probe struct {
+		i    int
+		node seam.NodeID
+	}
+	var probes []probe
 	for i := range op.nodes {
-		i := i
-		op.c.cfg.Data.Fetch(op.nodes[i], op.entry.DataID, uint32(i), 0, headerPrefix, func(b []byte, err error) {
+		for _, node := range op.candidates(i) {
+			probes = append(probes, probe{i, node})
+		}
+	}
+	op.pending = len(probes)
+	for _, p := range probes {
+		p := p
+		op.c.cfg.Data.Fetch(p.node, op.entry.DataID, uint32(p.i), 0, headerPrefix, func(b []byte, err error) {
 			// Feed liveness before the straggler guard: this phase touches
 			// every shard's holder, so a header fetch that times out is the
 			// cleanest down signal a read can give — and it lands after k have
 			// already answered, exactly when the guard below would drop it.
-			op.c.observe(op.nodes[i], err)
+			op.c.observe(p.node, err)
 			if op.finished || op.planned {
 				return
 			}
-			if err != nil || len(b) == 0 {
-				op.failed[i] = true
-			} else {
-				op.prefixes[i] = b
+			// First non-empty answer for a shard index wins and pins the node
+			// the slice phase will read from (its new home, or its old one).
+			if err == nil && len(b) > 0 && op.prefixes[p.i] == nil {
+				op.prefixes[p.i] = b
+				op.source[p.i] = p.node
 			}
 			op.pending--
 			have := 0
@@ -220,8 +248,8 @@ func (op *getOp) planSlices() {
 	op.pending = len(reqs)
 	for _, r := range reqs {
 		r := r
-		op.c.cfg.Data.Fetch(op.nodes[r.shard], op.entry.DataID, uint32(r.shard), r.off, int(r.length), func(b []byte, err error) {
-			op.c.observe(op.nodes[r.shard], err)
+		op.c.cfg.Data.Fetch(op.source[r.shard], op.entry.DataID, uint32(r.shard), r.off, int(r.length), func(b []byte, err error) {
+			op.c.observe(op.source[r.shard], err)
 			if op.finished {
 				return
 			}
