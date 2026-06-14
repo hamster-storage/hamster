@@ -37,7 +37,11 @@ in order — each its own focused change, all building on the labeled layout:
 - **Capacity weighting** — balance load *within* the failure-domain spread
   ([ADR-0004](adr/0004-partitioned-placement.md)).
 - **Node liveness / status registry** — the full `NodeRecord` with DOWN detection
-  and draining; PUT skips down nodes instead of paying their write timeout.
+  and draining; PUT skips down nodes instead of paying their write timeout. This is
+  also where the failure-domain labels ([ADR-0016](adr/0016-failure-domain-hierarchy.md))
+  move into a *replicated* registry: today the composed layout is replicated but the
+  raw label registry it is built from lives only on the issuing node's disk, so any
+  leader can compose a complete layout only once the labels are in the `NodeRecord`.
 - **Transition tracking + manual rebalance** — migrate partitions between nodes
   without re-encoding objects ([ADR-0004](adr/0004-partitioned-placement.md), the
   fixed-partition invariant).
