@@ -243,10 +243,12 @@ func (op *putOp) streamDone(i int, err error) {
 	if op.finished {
 		return
 	}
-	// Fold the outcome into the liveness detector: a terminal stream failure
-	// marks the node down (later PUTs skip it), a success clears it. Skipped
-	// shards never reach here, so their down mark persists until it lapses.
-	op.c.liveness.record(op.nodes[i], err == nil, op.c.cfg.Clock.Now())
+	// Fold the outcome into the liveness detector: a write that timed out
+	// marks the node down (later PUTs skip it), a success clears it, a
+	// receiver that answered with an error leaves the view unchanged (it is up,
+	// just unable). Skipped shards never reach here, so their down mark
+	// persists until it lapses.
+	op.c.observe(op.nodes[i], err)
 	if err != nil {
 		op.failed[i] = true
 		op.failures++

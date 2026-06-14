@@ -179,7 +179,7 @@ func (w *WriteStream) onTimer() {
 	}
 	w.attempts++
 	if w.attempts >= maxAttempts {
-		w.finish(fmt.Errorf("datapath: writing %v to %s: no response after %d attempts", w.key, w.to, w.attempts))
+		w.finish(fmt.Errorf("datapath: writing %v to %s: no response after %d attempts: %w", w.key, w.to, w.attempts, ErrUnreachable))
 		return
 	}
 	w.sent = w.base // resend everything unacknowledged

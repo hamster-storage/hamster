@@ -59,7 +59,7 @@ func (f *fetch) onTimer() {
 	f.attempts++
 	if f.attempts >= maxAttempts {
 		delete(f.s.reads, f.reqID)
-		f.done(nil, fmt.Errorf("datapath: reading from %s: no response after %d attempts", f.to, f.attempts))
+		f.done(nil, fmt.Errorf("datapath: reading from %s: no response after %d attempts: %w", f.to, f.attempts, ErrUnreachable))
 		return
 	}
 	f.s.send(f.to, f.msg)
@@ -115,7 +115,7 @@ func (d *pendingDelete) onTimer() {
 	d.attempts++
 	if d.attempts >= maxAttempts {
 		delete(d.s.deletes, d.reqID)
-		d.done(fmt.Errorf("datapath: deleting from %s: no response after %d attempts", d.to, d.attempts))
+		d.done(fmt.Errorf("datapath: deleting from %s: no response after %d attempts: %w", d.to, d.attempts, ErrUnreachable))
 		return
 	}
 	d.s.send(d.to, d.msg)
@@ -182,7 +182,7 @@ func (v *pendingVerify) onTimer() {
 	v.attempts++
 	if v.attempts >= maxAttempts {
 		delete(v.s.verifies, v.reqID)
-		v.done(VerifyResult{}, fmt.Errorf("datapath: verifying on %s: no response after %d attempts", v.to, v.attempts))
+		v.done(VerifyResult{}, fmt.Errorf("datapath: verifying on %s: no response after %d attempts: %w", v.to, v.attempts, ErrUnreachable))
 		return
 	}
 	v.s.send(v.to, v.msg)
