@@ -36,16 +36,20 @@ type cluster struct {
 	down        map[uint64]bool
 	rosters     map[uint64]string // each node's latest OnMembershipChange report
 	snapEntries uint64            // 0: package default (snapshots effectively off in tests)
+
+	usePersister bool                     // wire a durable persister (BadgerDB's sim stand-in) into every node
+	persisters   map[uint64]*simPersister // each node's current persister, when usePersister
 }
 
 func newCluster(t *testing.T, seed uint64, net sim.NetConfig) *cluster {
 	c := &cluster{
 		t: t, s: sim.New(seed, net),
-		nodes:   make(map[uint64]*raftnode.Node),
-		worlds:  make(map[uint64]*sim.World),
-		ids:     map[uint64]seam.NodeID{1: "n1", 2: "n2", 3: "n3"},
-		down:    make(map[uint64]bool),
-		rosters: make(map[uint64]string),
+		nodes:      make(map[uint64]*raftnode.Node),
+		worlds:     make(map[uint64]*sim.World),
+		ids:        map[uint64]seam.NodeID{1: "n1", 2: "n2", 3: "n3"},
+		down:       make(map[uint64]bool),
+		rosters:    make(map[uint64]string),
+		persisters: make(map[uint64]*simPersister),
 	}
 	return c
 }
@@ -72,11 +76,26 @@ func (c *cluster) start() *cluster {
 
 func (c *cluster) boot(id uint64, join bool) sim.BootFunc {
 	return func(w *sim.World) seam.MessageHandler {
+		// In production every cluster node has a durable persister (BadgerDB,
+		// ADR-0005); the simulator stands in a crash-faithful disk-backed one
+		// so the persister path — load, skip-don't-reapply, reset, rebuild —
+		// runs under the harness too. It lives on the same disk that survives a
+		// restart, so it recovers exactly as BadgerDB would.
+		var persister raftnode.MetaPersister
+		if c.usePersister {
+			p, err := openSimPersister(w.Disk, "meta/rows")
+			if err != nil {
+				c.t.Fatalf("boot persister %d: %v", id, err)
+			}
+			c.persisters[id] = p
+			persister = p
+		}
 		n, err := raftnode.New(raftnode.Config{
 			ID: id, Peers: c.ids, Join: join,
 			Clock: w.Clock, Transport: w.Transport, Disk: w.Disk, Rand: w.Rand,
 			TickInterval: tick, ElectionTicks: electionTicks,
 			SnapshotEntries:    c.snapEntries,
+			Persister:          persister,
 			OnMembershipChange: func(ms []raftnode.Member) { c.rosters[id] = roster(ms) },
 		})
 		if err != nil {
@@ -262,11 +281,54 @@ func (c *cluster) converged(model map[string]map[string]int64) {
 		c.s.Run(tick)
 		if c.check(model, false) {
 			c.check(model, true)
+			c.checkPersisters()
 			return
 		}
 		if attempt > 4000 {
 			c.check(model, true)
+			c.checkPersisters()
 			return
+		}
+	}
+}
+
+// checkPersisters cross-checks, on every live node, that the durable persister
+// holds exactly the rows the in-memory store does — the durable copy and the
+// applied state must never disagree (the metadata scrub, in test form). A no-op
+// unless the cluster runs with persisters. Because each apply commits to the
+// persister inside the same transaction that mutates the store, a converged
+// store implies a converged persister; this asserts it rather than assuming it.
+func (c *cluster) checkPersisters() {
+	if !c.usePersister {
+		return
+	}
+	c.t.Helper()
+	for id, n := range c.nodes {
+		if c.down[id] {
+			continue
+		}
+		p := c.persisters[id]
+		rows, _, ok, err := p.LoadState()
+		if err != nil {
+			c.t.Fatalf("node %d: persister load: %v", id, err)
+		}
+		got := make(map[string]string)
+		if ok {
+			for _, r := range rows {
+				got[r.Key] = string(r.Value)
+			}
+		}
+		want := make(map[string]string)
+		for _, r := range n.Store().Dump() {
+			want[r.Key] = string(r.Value)
+		}
+		if len(got) != len(want) {
+			c.t.Fatalf("node %d: persister holds %d rows, store holds %d", id, len(got), len(want))
+		}
+		for k, v := range want {
+			if got[k] != v {
+				c.t.Fatalf("node %d: persister and store disagree on key %q", id, k)
+			}
 		}
 	}
 }
@@ -325,32 +387,41 @@ func mkPut(bucket, key string, size int64, seq byte) meta.PutObject {
 // schedule — elect, replicate, kill the leader mid-life, elect again,
 // keep writing, bring the dead node back, require full convergence.
 func TestClusterReplicatesAndSurvivesLeaderCrash(t *testing.T) {
-	for _, seed := range []uint64{1, 2, 3, 4, 5} {
-		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
-			c := newCluster(t, seed, sim.NetConfig{
-				MinLatency: time.Millisecond, MaxLatency: 8 * time.Millisecond,
-			}).start()
-			model := map[string]map[string]int64{"bkt": {}}
+	// Run with and without the durable persister: log-only proves the WAL
+	// recovery path (also the corruption fallback), and persister proves the
+	// production configuration — the leader rebuilds from its durable store on
+	// restart, with the crash landing in the window between a WAL append and
+	// the matching persister commit.
+	for _, persist := range []bool{false, true} {
+		for _, seed := range []uint64{1, 2, 3, 4, 5} {
+			t.Run(fmt.Sprintf("persist=%v/seed=%d", persist, seed), func(t *testing.T) {
+				c := newCluster(t, seed, sim.NetConfig{
+					MinLatency: time.Millisecond, MaxLatency: 8 * time.Millisecond,
+				})
+				c.usePersister = persist
+				c.start()
+				model := map[string]map[string]int64{"bkt": {}}
 
-			c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
-			for i := range 5 {
-				key := fmt.Sprintf("pre/%d", i)
-				c.propose(mkPut("bkt", key, int64(100+i), byte(i+1)))
-				model["bkt"][key] = int64(100 + i)
-			}
+				c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+				for i := range 5 {
+					key := fmt.Sprintf("pre/%d", i)
+					c.propose(mkPut("bkt", key, int64(100+i), byte(i+1)))
+					model["bkt"][key] = int64(100 + i)
+				}
 
-			lead := c.leader()
-			c.crash(lead)
+				lead := c.leader()
+				c.crash(lead)
 
-			for i := range 5 {
-				key := fmt.Sprintf("post/%d", i)
-				c.propose(mkPut("bkt", key, int64(200+i), byte(i+10)))
-				model["bkt"][key] = int64(200 + i)
-			}
+				for i := range 5 {
+					key := fmt.Sprintf("post/%d", i)
+					c.propose(mkPut("bkt", key, int64(200+i), byte(i+10)))
+					model["bkt"][key] = int64(200 + i)
+				}
 
-			c.restart(lead)
-			c.converged(model)
-		})
+				c.restart(lead)
+				c.converged(model)
+			})
+		}
 	}
 }
 
@@ -444,85 +515,154 @@ func TestClusterSeedDeterminism(t *testing.T) {
 // snapshot), and a full-cluster cold restart must recover the complete
 // state from snapshot plus tail.
 func TestSnapshotCompactsAndRecovers(t *testing.T) {
-	c := newCluster(t, 11, sim.NetConfig{
-		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
-	})
-	c.snapEntries = 8
-	c.start()
+	// Both modes: log-only reboots each replica from its snapshot plus tail;
+	// persister mode reboots each from its durable store (fast path, only the
+	// un-applied tail replayed) — a whole-cluster cold restart off the durable
+	// copies at once.
+	for _, persist := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persist=%v", persist), func(t *testing.T) {
+			c := newCluster(t, 11, sim.NetConfig{
+				MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+			})
+			c.snapEntries = 8
+			c.usePersister = persist
+			c.start()
 
-	model := map[string]map[string]int64{"bkt": {}}
-	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
-	for i := range 30 {
-		key := fmt.Sprintf("k/%02d", i)
-		c.propose(mkPut("bkt", key, int64(1000+i), byte(i+1)))
-		model["bkt"][key] = int64(1000 + i)
-	}
-	c.converged(model)
+			model := map[string]map[string]int64{"bkt": {}}
+			c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+			for i := range 30 {
+				key := fmt.Sprintf("k/%02d", i)
+				c.propose(mkPut("bkt", key, int64(1000+i), byte(i+1)))
+				model["bkt"][key] = int64(1000 + i)
+			}
+			c.converged(model)
 
-	for id := uint64(1); id <= 3; id++ {
-		logs := c.logFiles(id)
-		if len(logs) != 1 || logs[0] == "raft/log.1" {
-			t.Fatalf("node %d: logs %v, want exactly one rotated file", id, logs)
-		}
-	}
+			for id := uint64(1); id <= 3; id++ {
+				logs := c.logFiles(id)
+				if len(logs) != 1 || logs[0] == "raft/log.1" {
+					t.Fatalf("node %d: logs %v, want exactly one rotated file", id, logs)
+				}
+			}
 
-	// Cold restart of the whole cluster: every replica reboots from its
-	// snapshot and committed tail.
-	for id := uint64(1); id <= 3; id++ {
-		c.crash(id)
-	}
-	c.s.Run(time.Second)
-	for id := uint64(1); id <= 3; id++ {
-		c.restart(id)
-	}
-	c.converged(model)
+			// Cold restart of the whole cluster.
+			for id := uint64(1); id <= 3; id++ {
+				c.crash(id)
+			}
+			c.s.Run(time.Second)
+			for id := uint64(1); id <= 3; id++ {
+				c.restart(id)
+			}
+			c.converged(model)
 
-	// And the recovered cluster still accepts writes.
-	c.propose(mkPut("bkt", "after", 42, 99))
-	model["bkt"]["after"] = 42
-	c.converged(model)
+			// And the recovered cluster still accepts writes.
+			c.propose(mkPut("bkt", "after", 42, 99))
+			model["bkt"]["after"] = 42
+			c.converged(model)
+		})
+	}
 }
 
 // TestLaggingFollowerCatchesUpViaSnapshot: a follower sleeps through
 // enough writes that the leader compacts past its log — the only road back
 // is a streamed snapshot (MsgSnap), installed as a log rotation.
 func TestLaggingFollowerCatchesUpViaSnapshot(t *testing.T) {
-	c := newCluster(t, 23, sim.NetConfig{
+	// Both modes: with the persister, the streamed snapshot install drives a
+	// ResetAt that replaces the follower's durable store wholesale (it had
+	// fallen behind the leader's compaction point), and checkPersisters then
+	// confirms the durable copy matches.
+	for _, persist := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persist=%v", persist), func(t *testing.T) {
+			c := newCluster(t, 23, sim.NetConfig{
+				MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+			})
+			c.snapEntries = 8
+			c.usePersister = persist
+			c.start()
+
+			model := map[string]map[string]int64{"bkt": {}}
+			c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+
+			lead := c.leader()
+			var follower uint64
+			for id := uint64(1); id <= 3; id++ {
+				if id != lead {
+					follower = id
+					break
+				}
+			}
+			c.crash(follower)
+
+			for i := range 40 {
+				key := fmt.Sprintf("k/%02d", i)
+				c.propose(mkPut("bkt", key, int64(1000+i), byte(i+1)))
+				model["bkt"][key] = int64(1000 + i)
+			}
+
+			c.restart(follower)
+			c.converged(model)
+
+			// The follower's recovery had to come through a streamed snapshot —
+			// the leader compacted far past its log — installed as a rotation.
+			if got := c.nodes[follower].SnapshotsReceived(); got == 0 {
+				t.Fatal("follower converged without receiving a snapshot — the leader never compacted past it?")
+			}
+			logs := c.logFiles(follower)
+			if len(logs) != 1 || logs[0] == "raft/log.1" {
+				t.Fatalf("follower logs %v, want a single rotated file from the snapshot install", logs)
+			}
+		})
+	}
+}
+
+// TestPersisterRebuildsFromWALOnLoss is the sim analog of the e2e
+// rebuild-from-loss test and the answer to "what if the durable store is
+// corrupt": a node whose persister is destroyed rebuilds it from its own Raft
+// WAL (snapshot plus tail) on restart — Tier 2 of the layered recovery — with
+// no peer involved. snapEntries is low so the local log carries a snapshot,
+// exercising ResetAt onto the freshly reopened store during the rebuild.
+func TestPersisterRebuildsFromWALOnLoss(t *testing.T) {
+	c := newCluster(t, 31, sim.NetConfig{
 		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
 	})
 	c.snapEntries = 8
+	c.usePersister = true
 	c.start()
 
 	model := map[string]map[string]int64{"bkt": {}}
 	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
-
-	lead := c.leader()
-	var follower uint64
-	for id := uint64(1); id <= 3; id++ {
-		if id != lead {
-			follower = id
-			break
-		}
-	}
-	c.crash(follower)
-
-	for i := range 40 {
+	for i := range 12 {
 		key := fmt.Sprintf("k/%02d", i)
 		c.propose(mkPut("bkt", key, int64(1000+i), byte(i+1)))
 		model["bkt"][key] = int64(1000 + i)
 	}
-
-	c.restart(follower)
 	c.converged(model)
 
-	// The follower's recovery had to come through a streamed snapshot —
-	// the leader compacted far past its log — installed as a rotation.
-	if got := c.nodes[follower].SnapshotsReceived(); got == 0 {
-		t.Fatal("follower converged without receiving a snapshot — the leader never compacted past it?")
+	// Destroy a follower's durable store while it is down. Its own Raft WAL
+	// (snapshot included) is untouched and complete, so no peer catch-up is
+	// needed — and no new writes happen during the downtime, so the leader
+	// never compacts past it.
+	lead := c.leader()
+	var victim uint64
+	for id := uint64(1); id <= 3; id++ {
+		if id != lead {
+			victim = id
+			break
+		}
 	}
-	logs := c.logFiles(follower)
-	if len(logs) != 1 || logs[0] == "raft/log.1" {
-		t.Fatalf("follower logs %v, want a single rotated file from the snapshot install", logs)
+	c.crash(victim)
+	if err := c.worlds[victim].Disk.Remove("meta/rows"); err != nil {
+		t.Fatalf("destroying persister of node %d: %v", victim, err)
+	}
+
+	c.restart(victim)
+	// The rebuild happens locally in New, from the node's own WAL, before any
+	// message is exchanged — assert the store is already whole.
+	if got := len(c.nodes[victim].Store().ListObjects("bkt", "", "", 10_000)); got != len(model["bkt"]) {
+		t.Fatalf("node %d rebuilt %d objects from its WAL, want %d", victim, got, len(model["bkt"]))
+	}
+	c.converged(model) // checkPersisters confirms the durable store was re-materialised
+	if _, _, ok, _ := c.persisters[victim].LoadState(); !ok {
+		t.Fatalf("node %d: durable store was not re-materialised", victim)
 	}
 }
 
