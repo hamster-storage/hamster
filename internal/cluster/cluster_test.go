@@ -251,34 +251,13 @@ func TestClusterNodeRegistryReplicated(t *testing.T) {
 	}
 }
 
-// proposeTo submits a metadata proposal through whichever node is the leader,
-// retrying through elections — the test stand-in for an operator command that
-// has no proposal-forwarding yet.
-func proposeTo(t *testing.T, nodes []*Node, p any) {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		for _, n := range nodes {
-			ch := make(chan error, 1)
-			n.loop.Post(func() { n.raft.Propose(p, func(_ any, e error) { ch <- e }) })
-			select {
-			case err := <-ch:
-				if err == nil {
-					return
-				}
-			case <-time.After(2 * time.Second):
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("proposal %T never committed", p)
-}
-
-// TestClusterNodeDraining proves the drain flag flows end to end: a
+// TestClusterNodeDraining proves the operator drain command flows end to end:
+// `cluster drain` issued against a non-leader redirects to the leader, the
 // SetNodeDraining proposal commits, the leader's reconcile folds it into the
 // cluster layout, and every node's status reports the member as draining (a
-// committed fact, unlike the local liveness view). Placement avoidance itself
-// is proven in internal/place; this proves the cluster wiring that feeds it.
+// committed fact, unlike the local liveness view). Undrain reverses it.
+// Placement avoidance itself is proven in internal/place; this proves the
+// control RPC and the cluster wiring that feeds it.
 func TestClusterNodeDraining(t *testing.T) {
 	now := time.Now()
 	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
@@ -315,9 +294,11 @@ func TestClusterNodeDraining(t *testing.T) {
 	defer n3.Stop()
 	waitStatus(t, d1, "", "three members", func(ms []Member) bool { return len(ms) == 3 })
 
-	proposeTo(t, []*Node{n1, n2, n3}, meta.SetNodeDraining{
-		ProposedAtUnixMS: now.UnixMilli(), NodeID: "n3", Draining: true,
-	})
+	// Drain n3, issuing the command from n2 (which is not the leader): Drain
+	// must follow the redirect to the leader and commit.
+	if err := Drain(d2, "", "n3", true); err != nil {
+		t.Fatalf("drain via a non-leader: %v", err)
+	}
 
 	// Every node reports n3 draining (and only n3) — a committed fact, so the
 	// view is the same whichever node answers.
@@ -331,6 +312,19 @@ func TestClusterNodeDraining(t *testing.T) {
 			return len(ms) == 3
 		})
 	}
+
+	// Undrain reverses it: no member draining.
+	if err := Drain(d2, "", "n3", false); err != nil {
+		t.Fatalf("undrain: %v", err)
+	}
+	waitStatus(t, d1, "", "no member draining", func(ms []Member) bool {
+		for _, m := range ms {
+			if m.Draining {
+				return false
+			}
+		}
+		return len(ms) == 3
+	})
 }
 
 // TestRecoverRebuildsSingleVoterCluster: a two-node cluster loses n2

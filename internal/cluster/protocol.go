@@ -74,10 +74,23 @@ import (
 //	  bool down = 9;        // the answering node's local liveness view
 //	  bool draining = 10;   // committed: operator is removing this node
 //	}
+//
+//	message DrainRequest {
+//	  uint32 format_version = 1;
+//	  string node_id = 2;
+//	  bool draining = 3;        // true to drain, false to clear
+//	}
+//
+//	message DrainResponse {
+//	  uint32 format_version = 1;
+//	  string error = 2;         // set on refusal
+//	  string leader = 3;        // the leader's dial address when this node is not it
+//	}
 const (
 	protocolVersion = 1
 	reqJoin         = 1
 	reqStatus       = 2
+	reqDrain        = 3
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -128,6 +141,16 @@ type joinResponse struct {
 type statusResponse struct {
 	Error   string
 	Members []Member
+}
+
+type drainRequest struct {
+	NodeID   string
+	Draining bool
+}
+
+type drainResponse struct {
+	Error  string
+	Leader string // the leader's dial address when the asked node is not the leader
 }
 
 // writeFrame writes one length-framed message.
@@ -363,6 +386,46 @@ func decodeJoinResponse(buf []byte) (joinResponse, error) {
 				return err
 			}
 			r.Members = append(r.Members, m)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeDrainRequest(r drainRequest) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.NodeID)
+	return putBool(b, 3, r.Draining)
+}
+
+func decodeDrainRequest(buf []byte) (drainRequest, error) {
+	var r drainRequest
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.NodeID = string(f.b)
+		case 3:
+			r.Draining = f.u != 0
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeDrainResponse(r drainResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	return putString(b, 3, r.Leader)
+}
+
+func decodeDrainResponse(buf []byte) (drainResponse, error) {
+	var r drainResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Leader = string(f.b)
 		}
 		return nil
 	})

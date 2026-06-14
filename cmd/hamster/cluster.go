@@ -23,6 +23,9 @@ commands:
            With -token, an uninitialized node joins first — one command,
            restart-safe
   status   show cluster membership from a running node
+  drain    mark a node for removal: new writes steer off it, repair migrates
+           its shards away (undrain reverses it)
+  undrain  clear a node's drain flag
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -43,6 +46,10 @@ func clusterCmd(args []string) error {
 		return clusterRun(args[1:])
 	case "status":
 		return clusterStatus(args[1:])
+	case "drain":
+		return clusterDrain(args[1:], true)
+	case "undrain":
+		return clusterDrain(args[1:], false)
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -283,6 +290,30 @@ func clusterStatus(args []string) error {
 	}
 	if len(zones) <= 1 {
 		fmt.Println("  note: one zone — no zone-level failure tolerance")
+	}
+	return nil
+}
+
+func clusterDrain(args []string, draining bool) error {
+	cmd := "drain"
+	if !draining {
+		cmd = "undrain"
+	}
+	fs := flag.NewFlagSet("cluster "+cmd, flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	node := fs.String("node", "", "the node ID to "+cmd+" (required)")
+	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	fs.Parse(args)
+	if *dataDir == "" || *node == "" {
+		return fmt.Errorf("-data-dir and -node are required")
+	}
+	if err := cluster.Drain(*dataDir, *addr, *node, draining); err != nil {
+		return err
+	}
+	if draining {
+		log.Printf("node %s is draining — new writes steer off it; repair migrates its shards away", *node)
+	} else {
+		log.Printf("node %s is active again (drain cleared)", *node)
 	}
 	return nil
 }

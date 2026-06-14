@@ -294,6 +294,69 @@ func Status(dataDir, addr string) ([]Member, error) {
 	return resp.Members, nil
 }
 
+// Drain marks a member draining (or clears it) — an operator command that
+// commits a leader-only metadata proposal (ADR-0004) over the cluster control
+// port, authenticated by this node's own certificate (like Status). An empty
+// addr asks the local node; a non-leader answer carries the leader's address,
+// which Drain follows once so the operator need not look it up.
+func Drain(dataDir, addr, nodeID string, draining bool) error {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return err
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return err
+	}
+	target := addr
+	if target == "" {
+		target = cfg.ClusterAddr
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := requestDrain(target, cert, pool, drainRequest{NodeID: nodeID, Draining: draining})
+		if err != nil {
+			return err
+		}
+		if resp.Error == "" {
+			return nil
+		}
+		// Retry once against the named leader (leader-only, no forwarding yet).
+		if resp.Leader != "" && resp.Leader != target && attempt == 0 {
+			target = resp.Leader
+			continue
+		}
+		if resp.Leader != "" {
+			return fmt.Errorf("cluster: drain refused: %s (leader is %s)", resp.Error, resp.Leader)
+		}
+		return fmt.Errorf("cluster: drain refused: %s", resp.Error)
+	}
+	return fmt.Errorf("cluster: drain could not reach the leader")
+}
+
+// requestDrain dials a node's control port with this node's certificate and
+// runs one drain request/response.
+func requestDrain(addr string, cert tls.Certificate, pool *x509.CertPool, req drainRequest) (drainResponse, error) {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
+		MinVersion:            tls.VersionTLS13,
+		Certificates:          []tls.Certificate{cert},
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: verifyChainToPool(pool),
+	})
+	if err != nil {
+		return drainResponse{}, fmt.Errorf("cluster: dialing %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := writeFrame(conn, encodeRequest(reqDrain, encodeDrainRequest(req))); err != nil {
+		return drainResponse{}, fmt.Errorf("cluster: sending drain request: %w", err)
+	}
+	buf, err := readFrame(conn)
+	if err != nil {
+		return drainResponse{}, fmt.Errorf("cluster: reading drain response: %w", err)
+	}
+	return decodeDrainResponse(buf)
+}
+
 // dialPinned dials a join listener trusting only the token's pinned CA:
 // the server must present a chain containing the certificate with that
 // hash, and its leaf must verify against it. kubeadm-style bootstrap — the

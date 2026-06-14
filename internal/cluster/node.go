@@ -490,8 +490,56 @@ func (n *Node) handleConn(conn *tls.Conn) {
 			resp.Members = n.members()
 		}
 		_ = writeFrame(conn, encodeStatusResponse(resp))
+	case reqDrain:
+		_ = writeFrame(conn, encodeDrainResponse(n.handleDrain(conn, payload)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
+}
+
+// handleDrain serves a drain/undrain request: a leader-only metadata proposal
+// (ADR-0004), authenticated by a cluster certificate like status. A non-leader
+// answers with the leader's dial address so the client can retry there — the
+// same leader-only shape as S3 writes, no proposal forwarding yet.
+func (n *Node) handleDrain(conn *tls.Conn, payload []byte) drainResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return drainResponse{Error: "drain requires a cluster certificate"}
+	}
+	req, err := decodeDrainRequest(payload)
+	if err != nil {
+		return drainResponse{Error: "malformed drain request"}
+	}
+	switch err := n.proposeSetDraining(req.NodeID, req.Draining); {
+	case errors.Is(err, raftnode.ErrNotLeader):
+		resp := drainResponse{Error: "this node is not the metadata leader"}
+		for _, m := range n.members() {
+			if m.Leader {
+				resp.Leader = m.Dial
+				break
+			}
+		}
+		return resp
+	case err != nil:
+		return drainResponse{Error: err.Error()}
+	}
+	return drainResponse{}
+}
+
+// proposeSetDraining submits the drain-flag proposal through this node's Raft
+// and waits for its commit. Leader-only: a non-leader's Propose returns
+// ErrNotLeader unchanged for the caller to translate.
+func (n *Node) proposeSetDraining(nodeID string, draining bool) error {
+	ch := make(chan error, 1)
+	n.loop.Post(func() {
+		n.raft.Propose(meta.SetNodeDraining{
+			ProposedAtUnixMS: n.clock.Now().UnixMilli(), NodeID: nodeID, Draining: draining,
+		}, func(_ any, e error) { ch <- e })
+	})
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("cluster: drain proposal timed out")
+	}
 }
 
 type joinOutcome struct {
