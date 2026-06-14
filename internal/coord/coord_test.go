@@ -214,6 +214,32 @@ func (c *cluster) put(key string, body []byte) (coord.PutResult, error) {
 	return res, perr
 }
 
+// putTimed is put, also returning how much simulated time the PUT itself
+// took — the clock advance between posting it and its completion. Used to
+// prove a known-down node is skipped (fast) rather than waited on (the full
+// retransmit budget).
+func (c *cluster) putTimed(key string, body []byte) (coord.PutResult, error, time.Duration) {
+	c.t.Helper()
+	id := c.leader()
+	start := c.worlds[id].Clock.Now()
+	var res coord.PutResult
+	var perr error
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.Put(bucket, key, body, coord.PutOptions{}, func(r coord.PutResult, e error) {
+			res, perr, done = r, e, true
+		})
+	})
+	for range 5000 {
+		c.s.Run(tick)
+		if done {
+			return res, perr, c.worlds[id].Clock.Now().Sub(start)
+		}
+	}
+	c.t.Fatal("put never finished")
+	return res, perr, 0
+}
+
 // entry reads a key's current version entry from the leader's store.
 func (c *cluster) entry(key string) (meta.VersionEntry, bool) {
 	c.t.Helper()
@@ -425,6 +451,53 @@ func TestWriteFloorWithNodeDown(t *testing.T) {
 	}
 	if got, err := c.readObject("degraded-write"); err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("read inside the ack budget: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+}
+
+// TestPutSkipsDownNode: a node crashes; the first PUT that targets it pays its
+// retransmit timeout (that attempt is how the passive detector learns it is
+// down), but the next PUT skips it and completes promptly. Both commit at the
+// k+1 floor with five durable shards, and both objects read back — the skip
+// changes latency, never durability. With 4+2 on six nodes every object uses
+// all six, so the down node is always a holder.
+func TestPutSkipsDownNode(t *testing.T) {
+	c := newCluster(t, 7, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	c.crash("n6") // data-only: quorum untouched
+
+	body1 := randomBody(70, 1<<20)
+	res1, err, slow := c.putTimed("first", body1)
+	if err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	if res1.Durable != 5 {
+		t.Errorf("first put durable %d, want 5", res1.Durable)
+	}
+
+	body2 := randomBody(71, 1<<20)
+	res2, err, fast := c.putTimed("second", body2)
+	if err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+	if res2.Durable != 5 {
+		t.Errorf("second put durable %d, want 5", res2.Durable)
+	}
+
+	// The first put paid the down node's full retransmit budget (maxAttempts *
+	// rto = 20 * 500ms = 10s in the datapath defaults); the second skipped it.
+	// Generous margins around that 10s so the contrast, not the exact figure,
+	// is what is asserted.
+	if slow < 9*time.Second {
+		t.Fatalf("first put took %v; expected to pay the ~10s timeout, else the test cannot prove the skip", slow)
+	}
+	if fast >= 5*time.Second {
+		t.Fatalf("second put took %v; the down node was not skipped (it paid a timeout)", fast)
+	}
+
+	for name, want := range map[string][]byte{"first": body1, "second": body2} {
+		if got, err := c.readObject(name); err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("%s read back: equal=%v err=%v", name, bytes.Equal(got, want), err)
+		}
 	}
 }
 

@@ -57,12 +57,21 @@ type Config struct {
 
 // Coordinator runs data-path operations for one node.
 type Coordinator struct {
-	cfg Config
+	cfg      Config
+	liveness *liveness
 }
 
 // New returns a Coordinator over cfg.
 func New(cfg Config) *Coordinator {
-	return &Coordinator{cfg: cfg}
+	return &Coordinator{cfg: cfg, liveness: newLiveness()}
+}
+
+// DownNodes returns the nodes this coordinator currently considers down — its
+// passive view from data-plane operation outcomes (a PUT skips these to avoid
+// their write timeout). Loop-owned: call it on the node's loop. The view is
+// local to this node and best-effort, not a committed cluster fact.
+func (c *Coordinator) DownNodes() []seam.NodeID {
+	return c.liveness.down(c.cfg.Clock.Now())
 }
 
 // PutResult is an acknowledged PUT: the committed version, the ETag, and

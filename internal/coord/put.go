@@ -60,6 +60,27 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		done(PutResult{}, fmt.Errorf("coord: placing %d shards: %w", k+m, err))
 		return
 	}
+	floor := min(k+1, k+m)
+
+	// Skip nodes the liveness detector considers down — but only while enough
+	// remain up to still meet the durability floor. Skipping spares a
+	// known-down node's retransmit timeout up front, and repair rebuilds its
+	// shard when it returns. If too many look down to meet the floor, attempt
+	// them all anyway: the marks may be stale, and the ack rule refuses
+	// honestly if they are not — never a pre-emptive false refusal.
+	skip := make([]bool, k+m)
+	up := k + m
+	for i, id := range nodes {
+		if c.liveness.isDown(id, now) {
+			skip[i] = true
+			up--
+		}
+	}
+	if up < floor {
+		for i := range skip {
+			skip[i] = false
+		}
+	}
 
 	etag := md5.Sum(body)
 	objSum := sha256.Sum256(body)
@@ -67,7 +88,7 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		c: c, done: done, opts: opts,
 		bucket: bucket, key: key, atMS: now.UnixMilli(),
 		vid: vid, body: body, k: k, m: m,
-		floor:     min(k+1, k+m),
+		floor:     floor,
 		partition: partition,
 		nodes:     nodes,
 		etag:      etag[:], objSum: objSum[:],
@@ -78,6 +99,16 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 	op.sinks = make([]*sink, k+m)
 	for i := range op.streams {
 		i := i
+		if skip[i] {
+			// A known-down node: pre-fail its shard rather than open a stream
+			// that would only time out. The sink swallows the encoder's bytes
+			// for this position; the ack rule and pacing only consult live
+			// streams, and repair places the shard when the node returns.
+			op.failed[i] = true
+			op.failures++
+			op.sinks[i] = &sink{}
+			continue
+		}
 		op.streams[i] = c.cfg.Data.NewWrite(nodes[i], vid, uint32(i),
 			func() { op.step() },
 			func(err error) { op.streamDone(i, err) })
@@ -113,7 +144,9 @@ type sink struct {
 }
 
 func (s *sink) Write(p []byte) (int, error) {
-	s.ws.Write(p)
+	if s.ws != nil { // nil on a skipped (known-down) shard: swallow the bytes
+		s.ws.Write(p)
+	}
 	s.n += int64(len(p))
 	return len(p), nil
 }
@@ -210,6 +243,10 @@ func (op *putOp) streamDone(i int, err error) {
 	if op.finished {
 		return
 	}
+	// Fold the outcome into the liveness detector: a terminal stream failure
+	// marks the node down (later PUTs skip it), a success clears it. Skipped
+	// shards never reach here, so their down mark persists until it lapses.
+	op.c.liveness.record(op.nodes[i], err == nil, op.c.cfg.Clock.Now())
 	if err != nil {
 		op.failed[i] = true
 		op.failures++
