@@ -85,10 +85,20 @@ func Run(dataDir string) (*Node, error) {
 		return nil, err
 	}
 	// The metadata store: BadgerDB on this replica (ADR-0005), the durable
-	// target every applied Raft entry commits to alongside the WAL.
-	mdb, err := sys.OpenMetaDB(filepath.Join(dataDir, "meta"))
+	// source of truth the node loads on boot. If it cannot even be opened it
+	// is corrupt beyond use; the Raft WAL holds a complete copy (its snapshots
+	// are full metadata dumps), so the store is a rebuildable cache — discard
+	// it and let recovery rebuild from the log.
+	metaDir := filepath.Join(dataDir, "meta")
+	mdb, err := sys.OpenMetaDB(metaDir)
 	if err != nil {
-		return nil, err
+		log.Printf("cluster: metadata store at %s is unreadable (%v); discarding and rebuilding from the Raft log", metaDir, err)
+		if rmErr := os.RemoveAll(metaDir); rmErr != nil {
+			return nil, fmt.Errorf("cluster: removing unreadable metadata store: %w", rmErr)
+		}
+		if mdb, err = sys.OpenMetaDB(metaDir); err != nil {
+			return nil, fmt.Errorf("cluster: reopening metadata store: %w", err)
+		}
 	}
 	loop := sys.NewLoop()
 	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, stopSync: make(chan struct{})}

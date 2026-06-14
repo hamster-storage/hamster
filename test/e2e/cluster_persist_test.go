@@ -76,6 +76,64 @@ func TestClusterMetadataPersistsToBadgerDB(t *testing.T) {
 	p.interrupt(t)
 }
 
+// TestClusterMetadataRebuildsFromWALAfterStoreLoss is the durability answer to
+// "what if the BadgerDB metadata store is lost or corrupt": the Raft WAL holds
+// a complete copy (its snapshots are full metadata dumps), so a node whose
+// durable store is gone rebuilds it from the log on restart — no peer, no data
+// loss. Here the store is deleted between runs, the most total form of loss;
+// an unreadable store funnels to the same rebuild (a hard open failure is
+// discarded by the composition root, a read failure by the raftnode fallback).
+func TestClusterMetadataRebuildsFromWALAfterStoreLoss(t *testing.T) {
+	const (
+		akid   = "e2e-rebuild"
+		secret = "e2e-rebuild-secret"
+		region = "us-east-1"
+	)
+	env := []string{"HAMSTER_ACCESS_KEY_ID=" + akid, "HAMSTER_SECRET_ACCESS_KEY=" + secret}
+	dir := filepath.Join(t.TempDir(), "n1")
+	s3 := freeAddr(t)
+
+	run(t, "cluster", "init", "-data-dir", dir, "-cluster", "e2e-rebuild", "-node", "n1",
+		"-listen-cluster", freeAddr(t), "-listen-join", freeAddr(t))
+	p := start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
+	waitStatus(t, dir, "n1 leading alone", func(rows []statusRow) bool {
+		return len(rows) == 1 && rows[0].leader
+	})
+
+	c := &s3Client{t: t, akid: akid, secret: secret, region: region}
+	c.mutate([]string{s3}, "PUT", "/rebuild-probe", nil, http.StatusOK)
+
+	// Stop, destroy the durable metadata store, restart. The metadata lives
+	// only in the Raft WAL now.
+	p.interrupt(t)
+	if err := os.RemoveAll(filepath.Join(dir, "meta")); err != nil {
+		t.Fatalf("removing metadata store: %v", err)
+	}
+	p = start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
+	waitStatus(t, dir, "n1 leading after restart", func(rows []statusRow) bool {
+		return len(rows) == 1 && rows[0].leader
+	})
+
+	// The bucket must come back, rebuilt from the WAL, and the durable store
+	// re-materialised.
+	deadline := time.Now().Add(30 * time.Second)
+	survived := false
+	for time.Now().Before(deadline) {
+		if resp, _ := c.do(s3, "GET", "/rebuild-probe", nil); resp != nil && resp.StatusCode == http.StatusOK {
+			survived = true
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if !survived {
+		t.Fatal("bucket rebuild-probe did not survive loss of the metadata store")
+	}
+	if !hasBadgerStore(dir) {
+		t.Fatalf("BadgerDB store was not re-materialised under %s after the rebuild", dir)
+	}
+	p.interrupt(t)
+}
+
 // hasBadgerStore reports whether a BadgerDB store exists anywhere under dir,
 // detected by its on-disk signature: a MANIFEST plus a value log or SSTable.
 func hasBadgerStore(dir string) bool {
