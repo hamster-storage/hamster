@@ -46,6 +46,31 @@ func (s *Store) ClusterLayout() (ClusterLayout, bool) {
 	return l, true
 }
 
+// Node returns a member's registration row (ADR-0016, ADR-0004), present
+// once the issuer has committed it through RegisterNode.
+func (s *Store) Node(id string) (NodeRecord, bool) {
+	v, ok := s.kv.get(nodeRowKey(id))
+	if !ok {
+		return NodeRecord{}, false
+	}
+	return v.(NodeRecord), true
+}
+
+// Nodes returns every registered member in node-ID order — the replicated
+// registry the layout reconcile composes a labeled layout from, so any
+// leader builds the same one.
+func (s *Store) Nodes() []NodeRecord {
+	var out []NodeRecord
+	s.kv.scan(nodeScanPrefix, func(k string, v any) bool {
+		if !hasPrefix(k, nodeScanPrefix) {
+			return false
+		}
+		out = append(out, v.(NodeRecord))
+		return true
+	})
+	return out
+}
+
 // Current returns the derived current-version record for a key: present
 // if and only if the key's newest version is a live object.
 func (s *Store) Current(bucket, key string) (CurrentRecord, bool) {

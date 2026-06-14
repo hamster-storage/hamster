@@ -44,6 +44,7 @@ func fullProposals() []any {
 		AbortMultipartUpload{ProposedAtUnixMS: 1700000000012, Bucket: "docs", Key: "k", UploadID: uid},
 		SetClusterLayout{ProposedAtUnixMS: 1700000000013, Version: 3, PartitionCount: 4096,
 			Members: []string{"n1", "n2", "n3"}},
+		RegisterNode{ProposedAtUnixMS: 1700000000014, NodeID: "n1", Host: "boxA", Zone: "z1", Capacity: 4},
 	}
 }
 
@@ -122,9 +123,11 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	cases := map[string][]byte{
-		"empty":           {},
-		"no_command":      encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		"unknown_command": encode(envelope(propReservedNode)),
+		"empty":      {},
+		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
+		// Field 17 is the next unassigned command slot — a newer node's
+		// command this build does not know, which must refuse, not half-apply.
+		"unknown_command": encode(envelope(17)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -136,7 +139,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(propReservedNode)))
+	_, err := DecodeProposal(encode(envelope(17)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

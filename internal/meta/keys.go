@@ -28,6 +28,13 @@ const nul = "\x00"
 // (ADR-0028), under the reserved s/ system prefix. There is exactly one.
 const clusterLayoutKey = "s/layout"
 
+// nodeScanPrefix groups the per-member registration rows (NodeRecord) under
+// the reserved s/ system prefix, one per node ID. It sorts after s/layout
+// ("s/n" > "s/l"), so a scan from the prefix never crosses the singleton.
+const nodeScanPrefix = "s/node/"
+
+func nodeRowKey(id string) string { return nodeScanPrefix + id }
+
 const bucketScanPrefix = "b/"
 
 func bucketRowKey(bucket string) string { return "b/" + bucket }

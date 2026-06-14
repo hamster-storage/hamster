@@ -340,6 +340,26 @@ func (s *Store) ApplySetClusterLayout(p SetClusterLayout) (err error) {
 	return nil
 }
 
+// ApplyRegisterNode upserts a member's registration row (ADR-0016, ADR-0004):
+// the replicated registry the layout reconcile composes a labeled layout
+// from. Idempotent by node ID — a re-registration replaces the row — so a
+// reconciling leader that retransmits converges every replica deterministically.
+// An empty node ID is invalid.
+func (s *Store) ApplyRegisterNode(p RegisterNode) (err error) {
+	defer s.txn(&err)()
+	if p.NodeID == "" {
+		return ErrInvalidNode
+	}
+	s.kv.set(nodeRowKey(p.NodeID), NodeRecord{
+		FormatVersion: currentFormatVersion,
+		NodeID:        p.NodeID,
+		Host:          p.Host,
+		Zone:          p.Zone,
+		Capacity:      p.Capacity,
+	})
+	return nil
+}
+
 // removeNullVersion deletes the key's null-version entry if one exists, as
 // part of an unversioned or suspended write. The lock check is defense in
 // depth: lock-enabled buckets can never reach this path, but no code path

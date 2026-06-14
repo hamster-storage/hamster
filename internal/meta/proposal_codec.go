@@ -39,7 +39,7 @@ const (
 	propCompleteUpload  = 13
 	propAbortUpload     = 14
 	propSetLayout       = 15 // cluster layout (ADR-0028)
-	propReservedNode    = 16 // membership records, v0.2
+	propRegisterNode    = 16 // member registration (ADR-0016, ADR-0004)
 )
 
 // EncodeProposal encodes one proposal for the Raft log. p must be one of
@@ -153,6 +153,12 @@ func EncodeProposal(p any) []byte {
 			cmd = protowire.AppendTag(cmd, 4, protowire.BytesType)
 			cmd = protowire.AppendBytes(cmd, marshalLayoutNode(n))
 		}
+	case RegisterNode:
+		atMS, num = c.ProposedAtUnixMS, propRegisterNode
+		cmd = putString(cmd, 1, c.NodeID)
+		cmd = putString(cmd, 2, c.Host)
+		cmd = putString(cmd, 3, c.Zone)
+		cmd = putUvarint(cmd, 4, uint64(c.Capacity))
 	default:
 		panic(fmt.Sprintf("meta: unencodable proposal type %T", p))
 	}
@@ -181,7 +187,7 @@ func DecodeProposal(b []byte) (any, error) {
 			d.uint32() // format_version: additive, no branching yet
 		case d.num == propAt:
 			atMS = d.int64()
-		case d.num >= propCreateBucket && d.num <= propSetLayout:
+		case d.num >= propCreateBucket && d.num <= propRegisterNode:
 			if seen {
 				d.fail("proposal carries more than one command")
 				break
@@ -454,6 +460,23 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 					break
 				}
 				c.Nodes = append(c.Nodes, n)
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propRegisterNode:
+		c := RegisterNode{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.NodeID = d.str()
+			case 2:
+				c.Host = d.str()
+			case 3:
+				c.Zone = d.str()
+			case 4:
+				c.Capacity = d.uint32()
 			default:
 				d.skipUnknown(nil)
 			}

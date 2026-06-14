@@ -337,36 +337,68 @@ func (n *Node) syncPeers() {
 
 // reconcileLayout advances the stored cluster layout (ADR-0028, ADR-0016)
 // toward the current Raft membership, labeling each member with its
-// failure-domain host/zone from the issuer's registry. Runs on the loop.
-// Every node may call it freely: Propose is leader-gated and the apply is a
-// compare-and-set on the layout version, so a non-leader or a stale
-// generation is an ignored outcome, and a layout already matching membership
-// proposes nothing.
+// failure-domain host/zone and capacity weight. Runs on the loop. Every node
+// may call it freely: Propose is leader-gated and the applies are
+// idempotent/compare-and-set, so a non-leader or a stale generation is an
+// ignored outcome, and a layout already matching membership proposes nothing.
 //
-// The completeness guard is the safety rule: if this node does not know a
-// member's labels — only the issuer accumulates the full registry — it
-// proposes nothing rather than compose a layout with default labels, because
-// a layout whose labels degraded would move placement and mislocate existing
-// shards. The issuer (the init node, which leads while joins happen) has the
-// full registry; other leaders simply hold the last good layout. Nodes are
+// Two steps. First, the registry: the leader commits a RegisterNode for every
+// member whose labels it knows — the issuer holds them all (it accumulated
+// them at admission), a plain member only its own. Only the leader's proposals
+// commit (no forwarding in v0.3), but the issuer leads while joins happen, so
+// each member's record lands; once committed it persists. Second, composition:
+// the layout is built from the *replicated* registry (Store().Nodes()), so any
+// leader — not only the issuer — can compose a complete one. This is the gap
+// closed versus the earlier issuer-local registry, where a non-issuer leader
+// could only hold the last good layout.
+//
+// The completeness guard remains the safety rule: if a member's record has not
+// committed yet, propose nothing rather than compose a layout with degraded
+// labels, which would move placement and mislocate existing shards. Nodes are
 // sorted so the proposal is byte-identical whichever leader composes it —
-// placement ranks by hash, so the record order never affects placement.
+// placement ranks by hash, so record order never affects placement.
 func (n *Node) reconcileLayout() {
 	if n.raft == nil {
 		return
 	}
+	store := n.raft.Store()
+
+	// Step 1: ensure this node's known registrations are committed. The labels
+	// were defaulted at admission (handleJoin / Init), so they are recorded
+	// verbatim. A registration that already matches proposes nothing; a fresh
+	// commit re-triggers reconcile so composition follows without a tick's wait.
 	n.issueMu.Lock()
-	labels := make(map[string]meta.LayoutNode, len(n.cfg.NodeLabels))
-	for _, m := range n.cfg.NodeLabels {
-		labels[m.NodeID] = meta.LayoutNode{ID: m.NodeID, Host: m.Host, Zone: m.Zone, Weight: m.Capacity}
-	}
+	known := append([]Member(nil), n.cfg.NodeLabels...)
 	n.issueMu.Unlock()
+	for _, m := range known {
+		if cur, ok := store.Node(m.NodeID); ok &&
+			cur.Host == m.Host && cur.Zone == m.Zone && cur.Capacity == m.Capacity {
+			continue
+		}
+		n.raft.Propose(meta.RegisterNode{
+			ProposedAtUnixMS: n.clock.Now().UnixMilli(),
+			NodeID:           m.NodeID,
+			Host:             m.Host,
+			Zone:             m.Zone,
+			Capacity:         m.Capacity,
+		}, func(_ any, err error) {
+			if err == nil {
+				n.loop.Post(n.reconcileLayout)
+			}
+		})
+	}
+
+	// Step 2: compose the layout from the replicated registry.
+	labels := make(map[string]meta.LayoutNode)
+	for _, r := range store.Nodes() {
+		labels[r.NodeID] = meta.LayoutNode{ID: r.NodeID, Host: r.Host, Zone: r.Zone, Weight: r.Capacity}
+	}
 
 	var desired []meta.LayoutNode
 	for _, m := range n.raft.Members() {
 		lbl, known := labels[string(m.Addr)]
 		if !known {
-			return // labels incomplete — hold the existing layout (see above)
+			return // a member's record has not committed yet — hold (see above)
 		}
 		desired = append(desired, lbl)
 	}

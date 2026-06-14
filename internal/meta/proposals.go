@@ -133,6 +133,21 @@ type UpdateLegalHold struct {
 	Hold             bool
 }
 
+// RegisterNode records a cluster member's failure-domain labels (ADR-0016)
+// and capacity weight (ADR-0004) in the replicated store. The join issuer
+// proposes it as part of admission; the layout reconcile composes the
+// labeled layout from these rows, so any leader — not only the issuer that
+// accumulated the labels on its local disk — can build a complete one.
+// Idempotent by node ID: a re-registration with changed labels replaces the
+// row, so a reconciling leader that retransmits converges every replica.
+type RegisterNode struct {
+	ProposedAtUnixMS int64
+	NodeID           string
+	Host             string
+	Zone             string
+	Capacity         uint32
+}
+
 // SetClusterLayout installs a new cluster-layout generation (ADR-0028) —
 // the replicated placement basis, not an object mutation. It is a
 // compare-and-set: apply accepts it only when Version is exactly one

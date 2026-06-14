@@ -177,18 +177,19 @@ message ClusterConfig {
   string storage_profile = 5;  // active k+m for new writes; "auto" follows the ladder (ADR-0015)
 }
 
-message NodeRecord {
+message NodeRecord {             // s/node/<id>, ADR-0016 + ADR-0004
   uint32 format_version = 1;
-  bytes  node_id        = 2;
-  string control_addr   = 3;
-  string data_addr      = 4;
-  NodeStatus status     = 5;   // JOINING, ACTIVE, DRAINING, DOWN
-  string binary_version = 6;   // feeds the upgrade interlock
-  string host           = 7;   // auto-detected machine identity (ADR-0016)
-  string zone           = 8;   // operator failure-domain label, defaults to host
-  bool   voter          = 9;   // Raft voter vs learner (ADR-0017)
+  string node_id        = 2;
+  string host           = 3;   // auto-detected machine identity (ADR-0016)
+  string zone           = 4;   // operator failure-domain label, defaults to host
+  uint32 capacity       = 5;   // relative weight (ADR-0004); 0 = equal
+  // Liveness and upgrade fields arrive additively in later v0.4+ passes,
+  // field numbers from 6: status (JOINING/ACTIVE/DRAINING/DOWN), control/data
+  // addresses, binary_version (the upgrade interlock), voter (ADR-0017).
 }
 ```
+
+`NodeRecord` is the replicated member registry: the failure-domain labels and capacity weight, committed through Raft (the `RegisterNode` proposal below) so any leader can compose the `ClusterLayout` — not only the join issuer that first learned a node's labels. The first slice carries placement inputs; liveness and upgrade state grow onto the same record additively.
 
 Notes:
 
@@ -222,7 +223,7 @@ message Proposal {
     CompleteMultipartUpload complete_multipart_upload = 13;
     AbortMultipartUpload    abort_multipart_upload    = 14;
     SetClusterLayout        set_layout                = 15;  // cluster layout (ADR-0028)
-    // 16 update_node is reserved: membership records arrive additively.
+    RegisterNode            register_node             = 16;  // member registry (ADR-0016, ADR-0004)
   }
 }
 ```
