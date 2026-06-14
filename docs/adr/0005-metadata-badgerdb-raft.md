@@ -2,7 +2,21 @@
 
 ## Status
 
-Accepted
+Accepted — **with a known implementation gap (recorded 2026-06-14).** The
+decision below stands, but the clustered metadata plane does not yet honor
+it. Single-node `serve` persists metadata to BadgerDB through `meta.Persister`
+as designed; the cluster path (`internal/raftnode`) attaches *no* persister —
+it keeps the metadata store in memory and recovers it from the Raft
+write-ahead log plus snapshots, never writing BadgerDB. Verified by running
+the binary: a cluster node's data directory holds `raft/log.*` and the
+cluster identity and **no BadgerDB store**, while `serve` creates one under
+`<data-dir>/meta`. The simulation harness did not catch this because it
+substitutes the WAL row-log persister for BadgerDB ([METADATA.md](../METADATA.md)),
+so the production wiring was never asserted — the kind of gap a normal-usage
+test surfaces, now guarded by `TestClusterMetadataPersistsToBadgerDB`
+(skipped until green). Closing it means wiring BadgerDB as the per-replica
+apply target under Raft, with the applied index reconciled across restarts so
+recovery replays only the un-applied log tail exactly once.
 
 ## Context
 
