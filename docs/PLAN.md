@@ -24,11 +24,11 @@ the labeled layout:
 v0.4's headline work — drain/replace/remove, transition tracking, downsize
 re-encode, and upsize re-encode (`cluster optimize`,
 [ADR-0031](adr/0031-reencode-across-profiles.md)) — has landed, with a deep
-multi-node e2e suite (bulk/list/range, the operations isolated and back-to-back,
-operation-under-load, growth, downsize, optimize). The release is feature-complete;
-what remains before tagging v0.4 is hardening: widening the e2e matrix across the
-profile ladder (2+1 / 3+2 / 4+2) and the throttled, continuous repair/scrub
-scheduler that replaces the one-shot sweep.
+multi-node e2e suite: bulk/list/range, the operations isolated and back-to-back,
+operation-under-load, growth, downsize, optimize, and the profile ladder (2+1 /
+3+2 / 4+2, each proven to reconstruct after losing m nodes). The release is
+feature-complete; what remains before tagging v0.4 is the throttled, continuous
+repair/scrub scheduler that replaces today's one-shot, operator-driven sweep.
 
 ## Later versions
 
