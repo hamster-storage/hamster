@@ -840,6 +840,73 @@ func TestGetDualReadAcrossTransition(t *testing.T) {
 	}
 }
 
+// TestRepairMigratesAcrossTransition: the write-side counterpart of dual-read.
+// A transition relocates shards (placement is positional), and repair carries
+// every shard from its old home to its new one — a copy, not a reconstruct.
+// After a sweep, dropping the transition (and crashing the old-only node) must
+// leave every object readable purely from its new placement: proof the bytes
+// moved, not that the old node still answers. A second sweep migrates nothing,
+// which is the signal that closes the transition.
+func TestRepairMigratesAcrossTransition(t *testing.T) {
+	c := newCluster(t, 43, sim.NetConfig{}, 4, profile(t, "2+1")) // width 3 of 4 nodes
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	bodies := map[string][]byte{}
+	for i := 0; i < 8; i++ {
+		key := fmt.Sprintf("mig-%d", i)
+		body := randomBody(uint64(300+i), 200<<10)
+		if _, err := c.put(key, body); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		bodies[key] = body
+	}
+
+	// Open a transition draining n4: new placement is the three remaining nodes,
+	// old placement the full four. Repair must migrate every shard to its new
+	// home.
+	c.active = []seam.NodeID{"n1", "n2", "n3"}
+	c.previous = c.members // {n1,n2,n3,n4}
+
+	rep := c.sweep()
+	if rep.Objects != 8 {
+		t.Fatalf("swept %d objects, want 8", rep.Objects)
+	}
+	if rep.MigratedShards == 0 {
+		t.Fatal("transition migrated no shards; expected positional relocation to move some")
+	}
+	if len(rep.Unrepairable) != 0 || len(rep.Failed) != 0 {
+		t.Fatalf("migration left work: unrepairable=%v failed=%v", rep.Unrepairable, rep.Failed)
+	}
+
+	// A second sweep over the same open transition must find everything already
+	// at its new home: nothing to migrate, every object healthy. That zero is
+	// the convergence signal a future reconcile uses to close the transition.
+	rep = c.sweep()
+	if rep.MigratedShards != 0 || rep.RebuiltShards != 0 {
+		t.Fatalf("second sweep still moved shards: migrated=%d rebuilt=%d", rep.MigratedShards, rep.RebuiltShards)
+	}
+	if rep.Healthy != 8 {
+		t.Fatalf("second sweep healthy=%d, want 8", rep.Healthy)
+	}
+
+	// Close the transition and remove the drained node entirely. Every object
+	// must still read from its new placement alone — the migration populated it.
+	c.active = nil
+	c.previous = nil
+	c.members = []seam.NodeID{"n1", "n2", "n3"}
+	c.crash("n4")
+	for key, body := range bodies {
+		got, err := c.readObject(key)
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("post-migration read %s off disk: equal=%v err=%v", key, bytes.Equal(got, body), err)
+		}
+		net, err := c.get(key, 0, -1)
+		if err != nil || !bytes.Equal(net, body) {
+			t.Fatalf("post-migration GET %s: equal=%v err=%v", key, bytes.Equal(net, body), err)
+		}
+	}
+}
+
 // TestGetDegradedOverNetwork: GETs reconstruct through m crashed holders
 // and refuse cleanly past tolerance — over the real fetch path, where a
 // down node is silence and timeouts, not a nil in a slice.
