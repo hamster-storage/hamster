@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestClusterOptimizeAfterGrowth is the upsize re-encode (ADR-0004, ADR-0031):
@@ -46,30 +45,21 @@ func TestClusterOptimizeAfterGrowth(t *testing.T) {
 		c.getEventually(cl.alive(), "/vault/"+key, body)
 	}
 
-	// Optimize, polling until it actually widens the data. The leader reconciles
-	// the new node into the layout asynchronously, so an optimize run before that
-	// lands finds the active count still four and reports nothing to do; while the
-	// growth transition is open it is refused outright. Only once the five-node
-	// layout is committed does optimize re-encode (2+1 → 3+2). Wait for that — the
-	// "re-encoded" line — not merely for a success, which an early no-op also is.
-	widened := false
-	deadline := time.Now().Add(3 * time.Minute)
-	for time.Now().Before(deadline) {
-		out, err := tryRun(t, "cluster", "optimize", "-data-dir", cl.adminDir)
-		if err == nil && strings.Contains(out, "re-encoded") {
-			t.Logf("optimize widened the data: %s", strings.TrimSpace(out))
-			widened = true
-			break
-		}
-		time.Sleep(2 * time.Second)
+	// A single optimize call does the right thing — no polling, no sleep. The
+	// leader reconciles the new node in asynchronously, so optimizing this soon
+	// after the join would otherwise race a node count about to change; instead the
+	// leader reports "still reconciling" as a retryable refusal and the command
+	// waits it out, then re-encodes 2+1 → 3+2. The "re-encoded" line proves it
+	// widened rather than no-op'ing against a stale layout.
+	out := run(t, "cluster", "optimize", "-data-dir", cl.adminDir)
+	if !strings.Contains(out, "re-encoded") {
+		t.Fatalf("optimize did not widen the data (stale-layout no-op?):\n%s", out)
 	}
-	if !widened {
-		t.Fatal("optimize never re-encoded the data up — growth did not reconcile to five nodes, or upsize did not fire")
-	}
+	t.Logf("optimize widened the data: %s", strings.TrimSpace(out))
 
 	// A second optimize is a clean no-op: everything already fits the profile.
-	if _, err := tryRun(t, "cluster", "optimize", "-data-dir", cl.adminDir); err != nil {
-		t.Fatalf("second optimize should be a no-op success, got error")
+	if out := run(t, "cluster", "optimize", "-data-dir", cl.adminDir); strings.Contains(out, "re-encoded") {
+		t.Fatalf("second optimize re-encoded again; should have been a no-op:\n%s", out)
 	}
 
 	// The objects are now 3+2 and tolerate two failures: kill two non-leader nodes
