@@ -26,9 +26,19 @@ re-encode, and upsize re-encode (`cluster optimize`,
 [ADR-0031](adr/0031-reencode-across-profiles.md)) — has landed, with a deep
 multi-node e2e suite: bulk/list/range, the operations isolated and back-to-back,
 operation-under-load, growth, downsize, optimize, and the profile ladder (2+1 /
-3+2 / 4+2, each proven to reconstruct after losing m nodes). The release is
-feature-complete; what remains before tagging v0.4 is the throttled, continuous
-repair/scrub scheduler that replaces today's one-shot, operator-driven sweep.
+3+2 / 4+2, each proven to reconstruct after losing m nodes). The continuous
+background scrubber has landed too (first pass): a loop-owned, seam-clock-paced
+scrub that runs on the leader, walks the keyspace object-by-object healing bitrot
+and lost shards on its own, and yields to operator and transition sweeps through
+a shared single-flight guard — simulator-proven, and proven end to end by
+bitrotting a shard on disk and watching it self-heal. v0.4 is ready to tag.
+
+The scrubber's later refinements are operational hardening, not v0.4 blockers:
+byte-rate throttling and an operator-tunable rate (today's per-object pacing is
+fixed), scrub progress persisted across restarts and leadership changes, a
+stripe-streaming rebuild (today's buffers survivors whole), and prioritizing the
+least-recently-scrubbed object over a plain keyspace walk. These ride the broader
+operational repair system.
 
 ## Later versions
 
