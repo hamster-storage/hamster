@@ -28,6 +28,9 @@ commands:
   undrain  clear a node's drain flag
   remove   evict a drained, empty node from the cluster for good (its ID is
            tombstoned — a return needs a fresh join)
+  replace  swap a member for a fresh node at the same cluster size (profile
+           unchanged): declare it, then join the new node; the cluster
+           migrates the old node's shards across and evicts it
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -54,6 +57,8 @@ func clusterCmd(args []string) error {
 		return clusterDrain(args[1:], false)
 	case "remove":
 		return clusterRemove(args[1:])
+	case "replace":
+		return clusterReplace(args[1:])
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -341,6 +346,24 @@ func clusterRemove(args []string) error {
 		return err
 	}
 	log.Printf("node %s removed from the cluster; its ID is retired — a return needs a fresh join", *node)
+	return nil
+}
+
+func clusterReplace(args []string) error {
+	fs := flag.NewFlagSet("cluster replace", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	oldNode := fs.String("old", "", "the node ID to replace (required)")
+	newNode := fs.String("new", "", "the fresh node ID that will take its place (required)")
+	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	fs.Parse(args)
+	if *dataDir == "" || *oldNode == "" || *newNode == "" {
+		return fmt.Errorf("-data-dir, -old, and -new are required")
+	}
+	if err := cluster.Replace(*dataDir, *addr, *oldNode, *newNode); err != nil {
+		return err
+	}
+	log.Printf("declared: %s will replace %s — now join %s; the cluster will swap it in (profile unchanged) and evict %s",
+		*newNode, *oldNode, *newNode, *oldNode)
 	return nil
 }
 

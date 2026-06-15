@@ -21,11 +21,21 @@ repair outcomes, the PUT skip, and the `cluster status` STATE column) have all
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Repair re-encode** — existing data climbs to the active storage profile as the
-  cluster grows. This is also what would let a cluster shrink *below* an existing
-  object's width: today `cluster remove` refuses that (durability is never traded
-  — it requires the node be drained and empty, i.e. the remaining nodes still hold
-  every object at full width), because k is never downgraded in place.
+- **Repair re-encode + downsize** — existing data re-encoded to a different
+  storage profile, in place. Two directions: climbing *up* as a cluster grows
+  (better efficiency, optional — data is already safe), and stepping *down* so a
+  cluster can shrink *below* an existing object's width. The latter is the
+  operator-facing "downsize": the auto-ladder picks the profile for the target
+  node count (the operator thinks in node counts, not k+m), a re-encode sweep
+  rewrites every object to it (repair-driven, staged-then-marker, COMPLIANCE-safe
+  — same bytes, never deletes/shortens lock), then `cluster drain --reencode`
+  removes the node. Until it lands `cluster remove`/`drain` refuse a shrink that
+  would strand data (k is never downgraded in place). Note the ladder isn't
+  uniform: 6→5 (4+2→3+2) keeps 2-failure tolerance and only costs efficiency, but
+  5→4 (3+2→2+1) drops tolerance to 1 — the confirmation must state the real
+  per-step trade. *Replacing* a node at constant size already works (see git
+  history: `cluster replace`), and needs no re-encode — it's the size-changing
+  case that does.
 
 ## Later versions
 

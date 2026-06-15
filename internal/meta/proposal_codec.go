@@ -25,22 +25,23 @@ const proposalFormatVersion = 1
 
 // Envelope field numbers (METADATA.md "Operations as transactions").
 const (
-	propAt              = 2
-	propCreateBucket    = 3
-	propDeleteBucket    = 4
-	propSetVersioning   = 5
-	propPutObject       = 6
-	propDeleteObject    = 7
-	propDeleteVersion   = 8
-	propUpdateRetention = 9
-	propUpdateLegalHold = 10
-	propCreateUpload    = 11
-	propUploadPart      = 12
-	propCompleteUpload  = 13
-	propAbortUpload     = 14
-	propSetLayout       = 15 // cluster layout (ADR-0028)
-	propRegisterNode    = 16 // member registration (ADR-0016, ADR-0004)
-	propSetNodeDraining = 17 // member drain flag (ADR-0004)
+	propAt                = 2
+	propCreateBucket      = 3
+	propDeleteBucket      = 4
+	propSetVersioning     = 5
+	propPutObject         = 6
+	propDeleteObject      = 7
+	propDeleteVersion     = 8
+	propUpdateRetention   = 9
+	propUpdateLegalHold   = 10
+	propCreateUpload      = 11
+	propUploadPart        = 12
+	propCompleteUpload    = 13
+	propAbortUpload       = 14
+	propSetLayout         = 15 // cluster layout (ADR-0028)
+	propRegisterNode      = 16 // member registration (ADR-0016, ADR-0004)
+	propSetNodeDraining   = 17 // member drain flag (ADR-0004)
+	propSetNodeReplacedBy = 18 // member replacement pairing (ADR-0004)
 )
 
 // EncodeProposal encodes one proposal for the Raft log. p must be one of
@@ -170,6 +171,10 @@ func EncodeProposal(p any) []byte {
 		if c.Draining {
 			cmd = putUvarint(cmd, 2, 1)
 		}
+	case SetNodeReplacedBy:
+		atMS, num = c.ProposedAtUnixMS, propSetNodeReplacedBy
+		cmd = putString(cmd, 1, c.NodeID)
+		cmd = putString(cmd, 2, c.ReplacedBy)
 	default:
 		panic(fmt.Sprintf("meta: unencodable proposal type %T", p))
 	}
@@ -198,7 +203,7 @@ func DecodeProposal(b []byte) (any, error) {
 			d.uint32() // format_version: additive, no branching yet
 		case d.num == propAt:
 			atMS = d.int64()
-		case d.num >= propCreateBucket && d.num <= propSetNodeDraining:
+		case d.num >= propCreateBucket && d.num <= propSetNodeReplacedBy:
 			if seen {
 				d.fail("proposal carries more than one command")
 				break
@@ -508,6 +513,19 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.NodeID = d.str()
 			case 2:
 				c.Draining = d.uvarint() != 0
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propSetNodeReplacedBy:
+		c := SetNodeReplacedBy{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.NodeID = d.str()
+			case 2:
+				c.ReplacedBy = d.str()
 			default:
 				d.skipUnknown(nil)
 			}

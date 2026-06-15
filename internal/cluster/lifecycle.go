@@ -375,6 +375,67 @@ func Remove(dataDir, addr, nodeID string) error {
 	return fmt.Errorf("cluster: remove could not reach the leader")
 }
 
+// Replace declares that a fresh node will take an existing member's place
+// (ADR-0004): a leader-only metadata operation that pairs old→new. The operator
+// then brings up the new node with a normal join; the cluster swaps it in at the
+// same size (so the storage profile is unchanged), migrates the old node's
+// shards across, and evicts the old node. addr is the control address to dial;
+// empty uses this node's own.
+func Replace(dataDir, addr, oldNode, newNode string) error {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return err
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return err
+	}
+	target := addr
+	if target == "" {
+		target = cfg.ClusterAddr
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := requestReplace(target, cert, pool, replaceRequest{Old: oldNode, New: newNode})
+		if err != nil {
+			return err
+		}
+		if resp.Error == "" {
+			return nil
+		}
+		if resp.Leader != "" && resp.Leader != target && attempt == 0 {
+			target = resp.Leader
+			continue
+		}
+		if resp.Leader != "" {
+			return fmt.Errorf("cluster: replace refused: %s (leader is %s)", resp.Error, resp.Leader)
+		}
+		return fmt.Errorf("cluster: replace refused: %s", resp.Error)
+	}
+	return fmt.Errorf("cluster: replace could not reach the leader")
+}
+
+func requestReplace(addr string, cert tls.Certificate, pool *x509.CertPool, req replaceRequest) (replaceResponse, error) {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
+		MinVersion:            tls.VersionTLS13,
+		Certificates:          []tls.Certificate{cert},
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: verifyChainToPool(pool),
+	})
+	if err != nil {
+		return replaceResponse{}, fmt.Errorf("cluster: dialing %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := writeFrame(conn, encodeRequest(reqReplace, encodeReplaceRequest(req))); err != nil {
+		return replaceResponse{}, fmt.Errorf("cluster: sending replace request: %w", err)
+	}
+	buf, err := readFrame(conn)
+	if err != nil {
+		return replaceResponse{}, fmt.Errorf("cluster: reading replace response: %w", err)
+	}
+	return decodeReplaceResponse(buf)
+}
+
 func requestRemove(addr string, cert tls.Certificate, pool *x509.CertPool, req removeRequest) (removeResponse, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
 		MinVersion:            tls.VersionTLS13,

@@ -428,18 +428,29 @@ func (n *Node) reconcileLayout() {
 	}
 
 	// Step 2: compose the layout from the replicated registry.
-	labels := make(map[string]meta.LayoutNode)
+	recs := make(map[string]meta.NodeRecord)
 	for _, r := range store.Nodes() {
-		labels[r.NodeID] = meta.LayoutNode{ID: r.NodeID, Host: r.Host, Zone: r.Zone, Weight: r.Capacity, Draining: r.Draining}
+		recs[r.NodeID] = r
+	}
+	raftMember := make(map[string]bool)
+	for _, m := range n.raft.Members() {
+		raftMember[string(m.Addr)] = true
 	}
 
 	var desired []meta.LayoutNode
 	for _, m := range n.raft.Members() {
-		lbl, known := labels[string(m.Addr)]
+		r, known := recs[string(m.Addr)]
 		if !known {
 			return // a member's record has not committed yet — hold (see above)
 		}
-		desired = append(desired, lbl)
+		// A node being replaced drops out of placement entirely once its
+		// replacement is a member (ADR-0004) — a same-size swap that keeps the
+		// storage profile fixed, unlike draining which only demotes. Until the
+		// replacement is present, keep it so the active count never dips.
+		if r.ReplacedBy != "" && raftMember[r.ReplacedBy] {
+			continue
+		}
+		desired = append(desired, meta.LayoutNode{ID: r.NodeID, Host: r.Host, Zone: r.Zone, Weight: r.Capacity, Draining: r.Draining})
 	}
 	if len(desired) == 0 {
 		return
@@ -456,6 +467,19 @@ func (n *Node) reconcileLayout() {
 	if ok && len(cur.Previous) > 0 {
 		n.driveTransitionClose()
 		return
+	}
+	// Finish a completed replacement (ADR-0004): once the swap transition has
+	// closed, the replaced node is out of the layout and holds nothing, so evict
+	// it from Raft (its ID is tombstoned, like any removal).
+	if ok {
+		for _, m := range n.raft.Members() {
+			id := string(m.Addr)
+			r, known := recs[id]
+			if known && r.ReplacedBy != "" && raftMember[r.ReplacedBy] && !inLayout(cur, id) {
+				n.evictReplaced(id)
+				return
+			}
+		}
 	}
 	if ok && slices.Equal(cur.EffectiveNodes(), desired) {
 		return // already current, no transition
@@ -509,6 +533,30 @@ func subtractiveLayout(old, next []meta.LayoutNode) bool {
 		}
 	}
 	return false
+}
+
+// inLayout reports whether nodeID is one of the layout's effective members.
+func inLayout(cl meta.ClusterLayout, nodeID string) bool {
+	for _, m := range cl.EffectiveNodes() {
+		if m.ID == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+// evictReplaced removes a node whose replacement has taken over (ADR-0004): the
+// swap transition has closed, so it holds nothing. Leader-gated like reconcile's
+// other proposals (benign on a non-leader); RemoveNode tombstones the ID.
+func (n *Node) evictReplaced(nodeID string) {
+	for _, m := range n.raft.Members() {
+		if string(m.Addr) == nodeID {
+			if err := n.raft.RemoveNode(m.ID); err == nil {
+				log.Printf("cluster: node %s has been replaced; evicted from the cluster", nodeID)
+			}
+			return
+		}
+	}
 }
 
 // driveTransitionClose advances an in-flight layout transition (ADR-0004),
@@ -623,6 +671,8 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeDrainResponse(n.handleDrain(conn, payload)))
 	case reqRemove:
 		_ = writeFrame(conn, encodeRemoveResponse(n.handleRemove(conn, payload)))
+	case reqReplace:
+		_ = writeFrame(conn, encodeReplaceResponse(n.handleReplace(conn, payload)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }
@@ -680,23 +730,113 @@ func (n *Node) proposeSetDraining(nodeID string, draining bool) error {
 	}
 }
 
-// drainBlockedReason returns a non-empty explanation when a new drain must be
-// refused: one node drains at a time (ADR-0004, the single-transition model). A
-// layout transition already in flight, or another node already flagged draining
-// (the flag set before its transition has opened), blocks a second so the
-// operator gets a clear error rather than a silent queue. Runs on the loop.
-// Draining multiple nodes at once is future work — the format already supports a
-// set; only the open logic would change. Empty means clear to proceed.
-func (n *Node) drainBlockedReason(nodeID string) string {
+// layoutOpInProgress returns a description of an in-flight layout operation — a
+// transition, a drain, or a replace — or "" if the cluster is quiescent. Only
+// one at a time (ADR-0004): drain and replace both refuse while another runs, so
+// the operator gets a clear error rather than a silent queue. except is a node
+// ID to ignore (the one the caller is acting on). Runs on the loop. Driving
+// several at once is future work; the format already supports it.
+func (n *Node) layoutOpInProgress(except string) string {
 	if cl, ok := n.raft.Store().ClusterLayout(); ok && len(cl.Previous) > 0 {
-		return "a layout transition is already in progress; wait for it to finish before draining another node"
+		return "a layout transition is already in progress"
 	}
 	for _, r := range n.raft.Store().Nodes() {
-		if r.Draining && r.NodeID != nodeID {
-			return fmt.Sprintf("node %s is already draining; only one node may drain at a time", r.NodeID)
+		if r.NodeID == except {
+			continue
+		}
+		if r.Draining {
+			return fmt.Sprintf("node %s is draining", r.NodeID)
+		}
+		if r.ReplacedBy != "" {
+			return fmt.Sprintf("node %s is being replaced by %s", r.NodeID, r.ReplacedBy)
 		}
 	}
 	return ""
+}
+
+// drainBlockedReason refuses a new drain while any layout operation is in
+// flight — one at a time (ADR-0004).
+func (n *Node) drainBlockedReason(nodeID string) string {
+	return n.layoutOpInProgress(nodeID)
+}
+
+// handleReplace serves a replace request (ADR-0004): a leader-only metadata
+// operation, authenticated by a cluster certificate like drain. It pairs the
+// outgoing node with the incoming one; the operator then joins the new node and
+// the cluster swaps it in at the same size. A non-leader answers with the
+// leader's dial so the client retries there.
+func (n *Node) handleReplace(conn *tls.Conn, payload []byte) replaceResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return replaceResponse{Error: "replace requires a cluster certificate"}
+	}
+	req, err := decodeReplaceRequest(payload)
+	if err != nil {
+		return replaceResponse{Error: "malformed replace request"}
+	}
+	switch err := n.proposeReplace(req.Old, req.New); {
+	case errors.Is(err, raftnode.ErrNotLeader):
+		resp := replaceResponse{Error: "this node is not the metadata leader"}
+		for _, m := range n.members() {
+			if m.Leader {
+				resp.Leader = m.Dial
+				break
+			}
+		}
+		return resp
+	case err != nil:
+		return replaceResponse{Error: err.Error()}
+	}
+	return replaceResponse{}
+}
+
+// proposeReplace pairs old→new (ADR-0004): old must be a current member, new must
+// not be one yet (it joins fresh), and no other layout operation may be running.
+// The pairing commits on old's record; reconcile then swaps new in for old once
+// new joins. Leader-only.
+func (n *Node) proposeReplace(oldNode, newNode string) error {
+	if oldNode == "" || newNode == "" {
+		return fmt.Errorf("both the old and new node IDs are required")
+	}
+	if oldNode == newNode {
+		return fmt.Errorf("a node cannot replace itself")
+	}
+	ch := make(chan error, 1)
+	n.loop.Post(func() {
+		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
+			ch <- raftnode.ErrNotLeader
+			return
+		}
+		oldMember, newMember := false, false
+		for _, m := range n.raft.Members() {
+			switch string(m.Addr) {
+			case oldNode:
+				oldMember = true
+			case newNode:
+				newMember = true
+			}
+		}
+		if !oldMember {
+			ch <- fmt.Errorf("node %s is not a cluster member", oldNode)
+			return
+		}
+		if newMember {
+			ch <- fmt.Errorf("node %s is already a cluster member; the replacement must be a fresh node — declare the replacement before joining it", newNode)
+			return
+		}
+		if reason := n.layoutOpInProgress(""); reason != "" {
+			ch <- fmt.Errorf("%s; only one layout change at a time", reason)
+			return
+		}
+		n.raft.Propose(meta.SetNodeReplacedBy{
+			ProposedAtUnixMS: n.clock.Now().UnixMilli(), NodeID: oldNode, ReplacedBy: newNode,
+		}, func(_ any, e error) { ch <- e })
+	})
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("cluster: replace timed out")
+	}
 }
 
 // handleRemove serves a remove request (ADR-0004): a leader-only metadata
@@ -914,9 +1054,13 @@ func (n *Node) handleJoin(payload []byte) joinOutcome {
 		return refuse("%v", err)
 	}
 
+	// Snapshot membership before taking issueMu: members() round-trips the loop,
+	// and reconcileLayout (on the loop) also takes issueMu — holding it across
+	// this call would deadlock the loop until members() times out, handing the
+	// joiner an empty member list and stranding it with no peers to reach.
+	members := n.members()
 	n.issueMu.Lock()
 	defer n.issueMu.Unlock()
-	members := n.members()
 	for _, m := range members {
 		if m.NodeID == req.NodeID {
 			return refuse("node ID %q is already a cluster member", req.NodeID)
