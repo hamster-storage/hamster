@@ -271,25 +271,9 @@ func Status(dataDir, addr string) ([]Member, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cert},
-		// The peer is authenticated as a holder of a cluster-CA
-		// certificate, not by name: status may be asked of any member,
-		// whose node ID the caller need not know.
-		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: verifyChainToPool(pool),
-	})
+	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqStatus, nil))
 	if err != nil {
-		return nil, fmt.Errorf("cluster: dialing %s: %w", addr, err)
-	}
-	defer conn.Close()
-	if err := writeFrame(conn, encodeRequest(reqStatus, nil)); err != nil {
-		return nil, fmt.Errorf("cluster: sending status request: %w", err)
-	}
-	buf, err := readFrame(conn)
-	if err != nil {
-		return nil, fmt.Errorf("cluster: reading status response: %w", err)
+		return nil, err
 	}
 	resp, err := decodeStatusResponse(buf)
 	if err != nil {
@@ -448,6 +432,62 @@ const optimizeSettleWait = 5 * time.Minute
 // requestOptimize dials a node's control port and runs one optimize request. No
 // client read deadline: the sweep can take far longer than other control calls,
 // and the server holds the connection open until it finishes.
+// controlRetries / controlRetryWait bound the redial of a control request after
+// a transient connection or TLS error. The cluster control port runs over real
+// loopback mTLS — plumbing the simulator does not model — and under heavy load a
+// freshly dialed connection can drop or desync mid-record (surfacing as a "bad
+// record MAC"). A short, idempotent control request is safe to redial. An
+// application-level refusal is not a transient error: it rides the decoded
+// response and never reaches here, so it is never retried.
+const (
+	controlRetries   = 4
+	controlRetryWait = 200 * time.Millisecond
+)
+
+// controlExchange dials addr with this node's cluster certificate, sends one
+// framed control request, and returns the framed response — a single attempt.
+// The peer is authenticated as a holder of a cluster-CA certificate, not by name
+// (a request may be asked of any member, whose node ID the caller need not know).
+func controlExchange(addr string, cert tls.Certificate, pool *x509.CertPool, req []byte) ([]byte, error) {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
+		MinVersion:            tls.VersionTLS13,
+		Certificates:          []tls.Certificate{cert},
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: verifyChainToPool(pool),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("cluster: dialing %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := writeFrame(conn, req); err != nil {
+		return nil, fmt.Errorf("cluster: sending request to %s: %w", addr, err)
+	}
+	buf, err := readFrame(conn)
+	if err != nil {
+		return nil, fmt.Errorf("cluster: reading response from %s: %w", addr, err)
+	}
+	return buf, nil
+}
+
+// controlRoundTrip is controlExchange with a bounded redial on a transient
+// connection or TLS error. Only for idempotent requests (status, drain/undrain,
+// remove): a retry that races a server-side commit is harmless for those. Join
+// is excluded — its token is single-use, so a redial after a consumed token is
+// not the same request.
+func controlRoundTrip(addr string, cert tls.Certificate, pool *x509.CertPool, req []byte) ([]byte, error) {
+	var buf []byte
+	var err error
+	for attempt := 0; attempt < controlRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(controlRetryWait)
+		}
+		if buf, err = controlExchange(addr, cert, pool, req); err == nil {
+			return buf, nil
+		}
+	}
+	return nil, err
+}
+
 func requestOptimize(addr string, cert tls.Certificate, pool *x509.CertPool) (optimizeResponse, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
 		MinVersion:            tls.VersionTLS13,
@@ -470,43 +510,17 @@ func requestOptimize(addr string, cert tls.Certificate, pool *x509.CertPool) (op
 }
 
 func requestRemove(addr string, cert tls.Certificate, pool *x509.CertPool, req removeRequest) (removeResponse, error) {
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
-		MinVersion:            tls.VersionTLS13,
-		Certificates:          []tls.Certificate{cert},
-		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: verifyChainToPool(pool),
-	})
+	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqRemove, encodeRemoveRequest(req)))
 	if err != nil {
-		return removeResponse{}, fmt.Errorf("cluster: dialing %s: %w", addr, err)
-	}
-	defer conn.Close()
-	if err := writeFrame(conn, encodeRequest(reqRemove, encodeRemoveRequest(req))); err != nil {
-		return removeResponse{}, fmt.Errorf("cluster: sending remove request: %w", err)
-	}
-	buf, err := readFrame(conn)
-	if err != nil {
-		return removeResponse{}, fmt.Errorf("cluster: reading remove response: %w", err)
+		return removeResponse{}, err
 	}
 	return decodeRemoveResponse(buf)
 }
 
 func requestDrain(addr string, cert tls.Certificate, pool *x509.CertPool, req drainRequest) (drainResponse, error) {
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
-		MinVersion:            tls.VersionTLS13,
-		Certificates:          []tls.Certificate{cert},
-		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: verifyChainToPool(pool),
-	})
+	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqDrain, encodeDrainRequest(req)))
 	if err != nil {
-		return drainResponse{}, fmt.Errorf("cluster: dialing %s: %w", addr, err)
-	}
-	defer conn.Close()
-	if err := writeFrame(conn, encodeRequest(reqDrain, encodeDrainRequest(req))); err != nil {
-		return drainResponse{}, fmt.Errorf("cluster: sending drain request: %w", err)
-	}
-	buf, err := readFrame(conn)
-	if err != nil {
-		return drainResponse{}, fmt.Errorf("cluster: reading drain response: %w", err)
+		return drainResponse{}, err
 	}
 	return decodeDrainResponse(buf)
 }
