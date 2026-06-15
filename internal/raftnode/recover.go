@@ -78,13 +78,14 @@ func ForceNewCluster(disk seam.Disk, id uint64, node seam.NodeID, dial string) (
 	storage := raft.NewMemoryStorage()
 	store := meta.NewStore()
 	peers := make(map[uint64]peerInfo)
+	removed := make(map[uint64]struct{})
 	for i, raw := range records {
 		rec, err := decodeRecord(raw)
 		if err != nil {
 			return RecoverySummary{}, fmt.Errorf("raftnode: record %d: %w", i, err)
 		}
 		if !raft.IsEmptySnap(rec.snap) {
-			snapStore, members, err := decodeSnapshotData(rec.snap.Data)
+			snapStore, members, snapRemoved, err := decodeSnapshotData(rec.snap.Data)
 			if err != nil {
 				return RecoverySummary{}, fmt.Errorf("raftnode: record %d snapshot: %w", i, err)
 			}
@@ -93,6 +94,7 @@ func ForceNewCluster(disk seam.Disk, id uint64, node seam.NodeID, dial string) (
 			}
 			store = snapStore
 			peers = members
+			removed = snapRemoved
 		}
 		if err := storage.Append(rec.entries); err != nil {
 			return RecoverySummary{}, fmt.Errorf("raftnode: record %d: %w", i, err)
@@ -145,6 +147,7 @@ func ForceNewCluster(disk seam.Disk, id uint64, node seam.NodeID, dial string) (
 					}
 				case raftpb.ConfChangeRemoveNode:
 					delete(peers, cc.NodeID)
+					removed[cc.NodeID] = struct{}{} // preserve the tombstone across recovery
 				}
 			}
 		}
@@ -170,7 +173,7 @@ func ForceNewCluster(disk seam.Disk, id uint64, node seam.NodeID, dial string) (
 			Index: last, Term: lastTerm,
 			ConfState: raftpb.ConfState{Voters: []uint64{id}},
 		},
-		Data: encodeSnapshotData(store.Dump(), map[uint64]peerInfo{id: self}),
+		Data: encodeSnapshotData(store.Dump(), map[uint64]peerInfo{id: self}, removed),
 	}
 	newHS := raftpb.HardState{Term: hs.Term, Vote: hs.Vote, Commit: last}
 

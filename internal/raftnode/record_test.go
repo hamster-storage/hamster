@@ -27,7 +27,8 @@ func TestSnapshotDataRoundTrip(t *testing.T) {
 		2: {node: "n2", dial: "10.0.0.2:7946"},
 		7: {node: "node-seven"}, // no dial: the simulator's shape
 	}
-	restored, restoredMembers, err := decodeSnapshotData(encodeSnapshotData(s.Dump(), members))
+	removed := map[uint64]struct{}{3: {}, 9: {}}
+	restored, restoredMembers, restoredRemoved, err := decodeSnapshotData(encodeSnapshotData(s.Dump(), members, removed))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +44,9 @@ func TestSnapshotDataRoundTrip(t *testing.T) {
 	if !maps.Equal(restoredMembers, members) {
 		t.Fatalf("members diverged: %v vs %v", restoredMembers, members)
 	}
+	if !maps.Equal(restoredRemoved, removed) {
+		t.Fatalf("removed tombstone diverged: %v vs %v", restoredRemoved, removed)
+	}
 }
 
 // validLog is the boot rule: a rotated file must open with a snapshot
@@ -51,7 +55,7 @@ func TestValidLog(t *testing.T) {
 	bare := encodeRecord(record{hs: raftpb.HardState{Term: 1, Commit: 0, Vote: 1}})
 	withSnap := encodeRecord(record{snap: raftpb.Snapshot{
 		Metadata: raftpb.SnapshotMetadata{Index: 5, Term: 1},
-		Data:     encodeSnapshotData(nil, nil),
+		Data:     encodeSnapshotData(nil, nil, nil),
 	}})
 
 	cases := []struct {

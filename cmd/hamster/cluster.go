@@ -26,6 +26,8 @@ commands:
   drain    mark a node for removal: new writes steer off it, repair migrates
            its shards away (undrain reverses it)
   undrain  clear a node's drain flag
+  remove   evict a drained, empty node from the cluster for good (its ID is
+           tombstoned — a return needs a fresh join)
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -50,6 +52,8 @@ func clusterCmd(args []string) error {
 		return clusterDrain(args[1:], true)
 	case "undrain":
 		return clusterDrain(args[1:], false)
+	case "remove":
+		return clusterRemove(args[1:])
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -182,8 +186,14 @@ func clusterRun(args []string) error {
 	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
-	<-stop
-	log.Printf("hamster cluster node: shutting down")
+	select {
+	case <-stop:
+		log.Printf("hamster cluster node: shutting down")
+	case <-n.Done():
+		// The node removed itself from the cluster (ADR-0004): exit rather than
+		// linger as a stopped, tombstoned process.
+		log.Printf("hamster cluster node: removed from the cluster; exiting")
+	}
 	n.Stop()
 	return nil
 }
@@ -315,6 +325,22 @@ func clusterDrain(args []string, draining bool) error {
 	} else {
 		log.Printf("node %s is active again (drain cleared)", *node)
 	}
+	return nil
+}
+
+func clusterRemove(args []string) error {
+	fs := flag.NewFlagSet("cluster remove", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	node := fs.String("node", "", "the node ID to remove (required)")
+	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	fs.Parse(args)
+	if *dataDir == "" || *node == "" {
+		return fmt.Errorf("-data-dir and -node are required")
+	}
+	if err := cluster.Remove(*dataDir, *addr, *node); err != nil {
+		return err
+	}
+	log.Printf("node %s removed from the cluster; its ID is retired — a return needs a fresh join", *node)
 	return nil
 }
 

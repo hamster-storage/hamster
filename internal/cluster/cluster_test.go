@@ -405,6 +405,78 @@ func TestClusterNodeDraining(t *testing.T) {
 	}
 }
 
+// TestClusterRemoveNode: a node must be drained and empty before removal
+// (ADR-0004) — durability is never traded for a shrink — and once removed its ID
+// is retired. With no data here, draining empties the node, so removal succeeds
+// and membership drops.
+func TestClusterRemoveNode(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "removetest", "n1", freeAddr(t), "", 0, now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	waitStatus(t, d1, "", "n1 leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].Leader
+	})
+
+	join := func(dir, id string) *Node {
+		tok, err := MintToken(d1, time.Hour, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Join(dir, id, freeAddr(t), tok, "", 0); err != nil {
+			t.Fatal(err)
+		}
+		n, err := Run(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	n2 := join(d2, "n2")
+	defer n2.Stop()
+	n3 := join(d3, "n3")
+	defer n3.Stop()
+	waitStatus(t, d1, "", "three members", func(ms []Member) bool { return len(ms) == 3 })
+
+	// Removing a node that has not been drained is refused: durability first.
+	if err := Remove(d2, "", "n3"); err == nil {
+		t.Fatal("removing a non-drained node should be refused")
+	} else if !strings.Contains(err.Error(), "drain") {
+		t.Fatalf("refusal should say to drain first: %v", err)
+	}
+
+	// Drain n3 and let its transition close (no data, so it empties at once).
+	if err := Drain(d2, "", "n3", true); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	waitLayout(t, n1, "n3 drained, transition closed", func(cl meta.ClusterLayout) bool {
+		return len(cl.Previous) == 0 && nodeDraining(cl, "n3")
+	})
+
+	// Now removal succeeds — issued from a non-leader to exercise the redirect.
+	if err := Remove(d2, "", "n3"); err != nil {
+		t.Fatalf("remove a drained, empty node: %v", err)
+	}
+	waitStatus(t, d1, "", "n3 gone", func(ms []Member) bool {
+		if len(ms) != 2 {
+			return false
+		}
+		for _, m := range ms {
+			if m.NodeID == "n3" {
+				return false
+			}
+		}
+		return true
+	})
+}
+
 // TestRecoverRebuildsSingleVoterCluster: a two-node cluster loses n2
 // forever; recover rewrites the stopped n1 into a sole-voter cluster that
 // runs, leads, and grows again with a fresh token.
