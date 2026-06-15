@@ -26,11 +26,12 @@ commands:
            With -token, an uninitialized node joins first — one command,
            restart-safe
   status   show cluster membership from a running node
-  drain    mark a node for removal: new writes steer off it, repair migrates
-           its shards away; if this shrinks the cluster past a storage-profile
-           boundary it re-encodes the data down (with a confirmation prompt;
-           -reencode skips it). undrain reverses it
-  undrain  clear a node's drain flag
+  drain    take a node out of service: new writes steer off it, repair migrates
+           its shards away. Reversible with undrain (e.g. for maintenance);
+           follow with remove to decommission. If it shrinks the cluster past a
+           storage-profile boundary it re-encodes the data down (prompts first;
+           -reencode skips the prompt)
+  undrain  return a drained node to service
   remove   evict a drained, empty node from the cluster for good (its ID is
            tombstoned — a return needs a fresh join)
   recover  rewrite a stopped survivor into a new single-voter cluster —
@@ -363,9 +364,9 @@ func clusterDrain(args []string, draining bool) error {
 		return err
 	}
 	if draining {
-		log.Printf("node %s is draining — new writes steer off it; repair migrates (or re-encodes) its shards away", *node)
+		log.Printf("node %s is draining — new writes steer off it and its shards migrate away; undrain to return it to service, or remove to decommission", *node)
 	} else {
-		log.Printf("node %s is active again (drain cleared)", *node)
+		log.Printf("node %s is back in service (drain cleared)", *node)
 	}
 	return nil
 }
