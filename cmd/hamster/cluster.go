@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/cluster"
+	"github.com/hamster-storage/hamster/internal/ec"
 )
 
 const clusterUsage = `usage: hamster cluster <command> [flags]
@@ -24,7 +27,9 @@ commands:
            restart-safe
   status   show cluster membership from a running node
   drain    mark a node for removal: new writes steer off it, repair migrates
-           its shards away (undrain reverses it)
+           its shards away; if this shrinks the cluster past a storage-profile
+           boundary it re-encodes the data down (with a confirmation prompt;
+           -reencode skips it). undrain reverses it
   undrain  clear a node's drain flag
   remove   evict a drained, empty node from the cluster for good (its ID is
            tombstoned — a return needs a fresh join)
@@ -323,19 +328,79 @@ func clusterDrain(args []string, draining bool) error {
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	node := fs.String("node", "", "the node ID to "+cmd+" (required)")
 	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	reencode := fs.Bool("reencode", false, "proceed without the prompt when draining crosses a storage-profile boundary (re-encodes existing data to the smaller profile)")
 	fs.Parse(args)
 	if *dataDir == "" || *node == "" {
 		return fmt.Errorf("-data-dir and -node are required")
 	}
+
+	// Draining a node that shrinks the cluster past a profile boundary re-encodes
+	// every object to the smaller profile (ADR-0004, ADR-0015) — a consequential,
+	// possibly durability-reducing change. Warn and confirm before committing it.
+	if draining {
+		if members, err := cluster.Status(*dataDir, *addr); err == nil {
+			active, isMember := 0, false
+			for _, m := range members {
+				if m.NodeID == *node {
+					isMember = true
+				}
+				if !m.Draining {
+					active++
+				}
+			}
+			if isMember {
+				if msg, downsize := downsizeWarning(*node, active); downsize && !*reencode {
+					fmt.Println(msg)
+					if !confirm() {
+						return fmt.Errorf("drain cancelled")
+					}
+				}
+			}
+		}
+	}
+
 	if err := cluster.Drain(*dataDir, *addr, *node, draining); err != nil {
 		return err
 	}
 	if draining {
-		log.Printf("node %s is draining — new writes steer off it; repair migrates its shards away", *node)
+		log.Printf("node %s is draining — new writes steer off it; repair migrates (or re-encodes) its shards away", *node)
 	} else {
 		log.Printf("node %s is active again (drain cleared)", *node)
 	}
 	return nil
+}
+
+// downsizeWarning reports whether draining one node from a cluster of `active`
+// non-draining nodes crosses a storage-profile boundary — forcing every object
+// to be re-encoded to the smaller profile — and, if so, the operator warning
+// describing the change. `active` is the count before this drain.
+func downsizeWarning(node string, active int) (msg string, isDownsize bool) {
+	cur := ec.AutoProfile(active)
+	if active < 1 || cur.Nodes() <= active-1 {
+		return "", false // the current widest profile still fits — a same-size drain
+	}
+	next := ec.AutoProfile(active - 1)
+	tol := fmt.Sprintf("tolerates %d failures → tolerates %d (unchanged)", cur.Parity, next.Parity)
+	if next.Parity < cur.Parity {
+		tol = fmt.Sprintf("tolerates %d failures → tolerates %d (REDUCED)", cur.Parity, next.Parity)
+	}
+	overhead := func(p ec.Profile) float64 { return float64(p.Data+p.Parity) / float64(p.Data) }
+	return fmt.Sprintf(
+		"Draining %s shrinks the cluster from %d to %d nodes, re-encoding all existing\n"+
+			"data from %s to %s:\n"+
+			"  durability:       %s\n"+
+			"  storage overhead: %.2fx → %.2fx\n"+
+			"The object data is unchanged; re-encoding happens in place and can take a while.\n"+
+			"Once it converges, `cluster remove %s` evicts the node.",
+		node, active, active-1, cur.Name, next.Name, tol, overhead(cur), overhead(next), node), true
+}
+
+// confirm reads a yes/no answer from stdin, defaulting to no.
+func confirm() bool {
+	fmt.Print("Proceed? [y/N]: ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line = strings.ToLower(strings.TrimSpace(line))
+	return line == "y" || line == "yes"
 }
 
 func clusterRemove(args []string) error {
