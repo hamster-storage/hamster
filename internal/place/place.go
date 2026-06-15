@@ -109,6 +109,20 @@ func (l Layout) Nodes(partition uint64, width int) ([]seam.NodeID, error) {
 	return spread(partition, l.Members, width)
 }
 
+// ActiveCount is the number of members not draining out (ADR-0004): the nodes
+// that will remain. It sets the storage profile for new writes and the target
+// an existing object is re-encoded to when it no longer fits — a draining node
+// leaving drops it, so a shrink past a profile boundary lowers the profile.
+func (l Layout) ActiveCount() int {
+	n := 0
+	for _, m := range l.Members {
+		if !m.Draining {
+			n++
+		}
+	}
+	return n
+}
+
 // Locate resolves a partition's placement for a read during a possible
 // transition (ADR-0004): newNodes is the target placement (Members), and
 // oldNodes is the prior placement (Previous) when a transition is open, else

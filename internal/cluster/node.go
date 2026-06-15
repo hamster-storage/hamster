@@ -580,9 +580,10 @@ func (n *Node) driveTransitionClose() {
 			log.Printf("cluster: transition repair sweep failed: %v", err)
 			return
 		}
-		// Converged: a sweep that moved nothing and left nothing unhealable
-		// means every shard is at its new home — the old set is dead weight.
-		if rep.MigratedShards == 0 && rep.RebuiltShards == 0 &&
+		// Converged: a sweep that moved, rebuilt, and re-encoded nothing and
+		// left nothing unhealable means every shard is at its new home and every
+		// object fits the active set — the old set is dead weight.
+		if rep.MigratedShards == 0 && rep.RebuiltShards == 0 && rep.ReEncoded == 0 &&
 			len(rep.Unrepairable) == 0 && len(rep.Failed) == 0 {
 			n.closeTransition()
 		}

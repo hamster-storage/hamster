@@ -82,17 +82,21 @@ type cluster struct {
 	// over members.
 	active   []seam.NodeID
 	previous []seam.NodeID
+	// draining marks members the layout reports as draining out, lowering the
+	// active count the profile and downsize re-encode follow.
+	draining map[seam.NodeID]bool
 }
 
 // newCluster builds n nodes; the first min(n, 3) are Raft voters.
 func newCluster(t *testing.T, seed uint64, net sim.NetConfig, n int, profile ec.Profile) *cluster {
 	c := &cluster{
 		t: t, s: sim.New(seed, net),
-		raftIDs: make(map[uint64]seam.NodeID),
-		nodes:   make(map[seam.NodeID]*simNode),
-		worlds:  make(map[seam.NodeID]*sim.World),
-		down:    make(map[seam.NodeID]bool),
-		profile: profile,
+		raftIDs:  make(map[uint64]seam.NodeID),
+		nodes:    make(map[seam.NodeID]*simNode),
+		worlds:   make(map[seam.NodeID]*sim.World),
+		down:     make(map[seam.NodeID]bool),
+		draining: make(map[seam.NodeID]bool),
+		profile:  profile,
 	}
 	for i := 1; i <= min(n, 3); i++ {
 		c.raftIDs[uint64(i)] = seam.NodeID(fmt.Sprintf("n%d", i))
@@ -139,6 +143,11 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 						Version:        1,
 						PartitionCount: place.DefaultPartitionCount,
 						Members:        placeNodes(members),
+					}
+					for i := range l.Members {
+						if c.draining[l.Members[i].ID] {
+							l.Members[i].Draining = true
+						}
 					}
 					if c.previous != nil {
 						l.Previous = placeNodes(c.previous)
@@ -1278,5 +1287,57 @@ func TestReEncodeShrinksProfile(t *testing.T) {
 	disk, err := c.readObject("obj")
 	if err != nil || !bytes.Equal(disk, body) {
 		t.Fatalf("off-disk read after re-encode: equal=%v err=%v", bytes.Equal(disk, body), err)
+	}
+}
+
+// TestRepairDownsizeReEncodes: draining a node from a 6-node 4+2 cluster drops
+// the active count to 5, so every width-6 object no longer fits. The repair
+// sweep re-encodes each to 3+2 — the data step of a downsize — converging in one
+// pass; a second sweep re-encodes nothing. With the drained node then crashed,
+// every object still reads identical, proving its data moved entirely onto the
+// five active nodes.
+func TestRepairDownsizeReEncodes(t *testing.T) {
+	c := newCluster(t, 53, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	bodies := map[string][]byte{}
+	for i := 0; i < 6; i++ {
+		key := fmt.Sprintf("obj-%d", i)
+		body := randomBody(uint64(200+i), 300<<10)
+		if _, err := c.put(key, body); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		bodies[key] = body
+		if e, _ := c.entry(key); e.ECDataShards != 4 || e.ECParityShards != 2 {
+			t.Fatalf("%s is %d+%d, want 4+2", key, e.ECDataShards, e.ECParityShards)
+		}
+	}
+
+	// Drain n6: a downsize opens a transition (Previous is the pre-drain member
+	// set, where the existing 4+2 shards sit), and the active count drops to 5,
+	// so every width-6 object must re-encode to 3+2 to fit.
+	c.draining["n6"] = true
+	c.previous = c.members
+
+	rep := c.sweep()
+	if rep.ReEncoded != 6 || len(rep.Failed) != 0 {
+		t.Fatalf("downsize sweep: re-encoded=%d failed=%v, want 6 / none", rep.ReEncoded, rep.Failed)
+	}
+	rep = c.sweep()
+	if rep.ReEncoded != 0 {
+		t.Fatalf("second sweep still re-encoded %d (should have converged)", rep.ReEncoded)
+	}
+
+	// The drained node is now dead weight: crash it and every object still reads,
+	// at its new 3+2 profile, off the five active nodes.
+	c.crash("n6")
+	for key, body := range bodies {
+		if e, _ := c.entry(key); e.ECDataShards != 3 || e.ECParityShards != 2 {
+			t.Fatalf("%s not re-encoded to 3+2: %d+%d", key, e.ECDataShards, e.ECParityShards)
+		}
+		got, err := c.get(key, 0, -1)
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("post-downsize GET %s: equal=%v err=%v", key, bytes.Equal(got, body), err)
+		}
 	}
 }

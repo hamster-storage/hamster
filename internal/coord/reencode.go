@@ -34,10 +34,18 @@ func (c *Coordinator) ReEncode(bucket, key string, entry meta.VersionEntry, newK
 		return
 	}
 	oldK, oldM := int(entry.ECDataShards), int(entry.ECParityShards)
-	oldNodes, err := layout.Nodes(entry.Partition, oldK+oldM)
+	// The object's current shards sit at its current-width placement. During a
+	// transition (a downsize opens one) the un-migrated object is at its old
+	// home, so resolve through Locate and read from there; Nodes alone would be
+	// the post-drain ordering, where the shards are not (ADR-0004).
+	readNew, readOld, err := layout.Locate(entry.Partition, oldK+oldM)
 	if err != nil {
 		done(fmt.Errorf("coord: re-encode placing old: %w", err))
 		return
+	}
+	oldNodes := readNew
+	if readOld != nil {
+		oldNodes = readOld
 	}
 	newNodes, err := layout.Nodes(entry.Partition, newK+newM)
 	if err != nil {

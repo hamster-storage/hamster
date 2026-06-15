@@ -38,6 +38,10 @@ type RepairReport struct {
 	// their new one during a layout transition (ADR-0004) — a copy, not a
 	// reconstruct, so the bytes are moved whole, not recomputed.
 	MigratedShards int
+	// ReEncoded is how many object versions were re-encoded to a smaller profile
+	// because they no longer fit the active node count — the data step of a
+	// downsize (ADR-0004, ADR-0015).
+	ReEncoded int
 	// Unrepairable lists versions with fewer than k verified shards —
 	// unreadable until nodes return; repair cannot invent the bytes.
 	Unrepairable []string
@@ -134,6 +138,24 @@ func (op *sweepOp) nextItem() {
 	layout, ok := op.c.cfg.Layout()
 	if !ok {
 		op.itemFailed(fmt.Errorf("placing: no cluster layout"))
+		return
+	}
+	// Downsize (ADR-0004, ADR-0015): an object whose width no longer fits the
+	// active node count is re-encoded down to the active-count profile — the
+	// data step of a shrink. ReEncode moves it off the leaving node by writing
+	// the narrower shards to the active set; healing/migrating it at the old
+	// width would only chase a placement that cannot exist.
+	if active := layout.ActiveCount(); op.width > active {
+		tk, tm := ec.AutoProfile(active).Params(e.Size)
+		op.c.ReEncode(op.item.bucket, op.item.key, e, tk, tm, func(err error) {
+			if err != nil {
+				op.report.Failed = append(op.report.Failed,
+					fmt.Sprintf("%s/%s: re-encode: %v", op.item.bucket, op.item.key, err))
+			} else {
+				op.report.ReEncoded++
+			}
+			op.nextItem()
+		})
 		return
 	}
 	// Locate resolves the new placement and, while a layout transition is in

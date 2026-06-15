@@ -52,7 +52,11 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		done(PutResult{}, fmt.Errorf("coord: no cluster layout yet: %w", ErrRefused))
 		return
 	}
-	k, m := ec.AutoProfile(len(layout.Members)).Params(size)
+	// The profile follows the active (non-draining) node count, so a write
+	// during a downsize already lands at the target profile the shrink converges
+	// to — and a same-size drain (the active count unchanged) writes exactly as
+	// before (ADR-0004, ADR-0015).
+	k, m := ec.AutoProfile(layout.ActiveCount()).Params(size)
 
 	partition := place.Partition(vid, layout.PartitionCount)
 	nodes, err := layout.Nodes(partition, k+m)
