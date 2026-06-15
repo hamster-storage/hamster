@@ -379,6 +379,24 @@ func (s *Store) ApplySetNodeDraining(p SetNodeDraining) (err error) {
 	return nil
 }
 
+// ApplySetNodeReplacedBy records the node taking p.NodeID's place (ADR-0004),
+// or clears the pairing when p.ReplacedBy is empty. Leaves the node's other
+// fields intact. Idempotent; refuses an unknown node.
+func (s *Store) ApplySetNodeReplacedBy(p SetNodeReplacedBy) (err error) {
+	defer s.txn(&err)()
+	if p.NodeID == "" {
+		return ErrInvalidNode
+	}
+	v, ok := s.kv.get(nodeRowKey(p.NodeID))
+	if !ok {
+		return ErrInvalidNode
+	}
+	rec := v.(NodeRecord)
+	rec.ReplacedBy = p.ReplacedBy
+	s.kv.set(nodeRowKey(p.NodeID), rec)
+	return nil
+}
+
 // removeNullVersion deletes the key's null-version entry if one exists, as
 // part of an unversioned or suspended write. The lock check is defense in
 // depth: lock-enabled buckets can never reach this path, but no code path

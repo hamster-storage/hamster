@@ -97,12 +97,25 @@ import (
 //	  string error = 2;         // set on refusal
 //	  string leader = 3;        // the leader's dial address when this node is not it
 //	}
+//
+//	message ReplaceRequest {
+//	  uint32 format_version = 1;
+//	  string old = 2;           // the member being replaced
+//	  string new = 3;           // the fresh node that will take its place
+//	}
+//
+//	message ReplaceResponse {
+//	  uint32 format_version = 1;
+//	  string error = 2;         // set on refusal
+//	  string leader = 3;        // the leader's dial address when this node is not it
+//	}
 const (
 	protocolVersion = 1
 	reqJoin         = 1
 	reqStatus       = 2
 	reqDrain        = 3
 	reqRemove       = 4
+	reqReplace      = 5
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -170,6 +183,16 @@ type removeRequest struct {
 }
 
 type removeResponse struct {
+	Error  string
+	Leader string // the leader's dial address when the asked node is not the leader
+}
+
+type replaceRequest struct {
+	Old string
+	New string
+}
+
+type replaceResponse struct {
 	Error  string
 	Leader string // the leader's dial address when the asked node is not the leader
 }
@@ -477,6 +500,46 @@ func encodeRemoveResponse(r removeResponse) []byte {
 
 func decodeRemoveResponse(buf []byte) (removeResponse, error) {
 	var r removeResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Leader = string(f.b)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeReplaceRequest(r replaceRequest) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Old)
+	return putString(b, 3, r.New)
+}
+
+func decodeReplaceRequest(buf []byte) (replaceRequest, error) {
+	var r replaceRequest
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Old = string(f.b)
+		case 3:
+			r.New = string(f.b)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeReplaceResponse(r replaceResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	return putString(b, 3, r.Leader)
+}
+
+func decodeReplaceResponse(buf []byte) (replaceResponse, error) {
+	var r replaceResponse
 	err := forEachField(buf, func(f field) error {
 		switch f.num {
 		case 2:

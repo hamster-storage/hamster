@@ -576,6 +576,8 @@ func marshalNodeRecord(n NodeRecord) []byte {
 	if n.Draining {
 		b = putUvarint(b, 6, 1)
 	}
+	// Field 7 (replaced_by) is additive and written only when set.
+	b = putString(b, 7, n.ReplacedBy)
 	return append(b, n.unknown...)
 }
 
@@ -596,6 +598,8 @@ func unmarshalNodeRecord(b []byte) (NodeRecord, error) {
 			n.Capacity = d.uint32()
 		case 6:
 			n.Draining = d.uvarint() != 0
+		case 7:
+			n.ReplacedBy = d.str()
 		default:
 			d.skipUnknown(&n.unknown)
 		}

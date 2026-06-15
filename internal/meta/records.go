@@ -280,6 +280,14 @@ type NodeRecord struct {
 	// off. Additive (invariant 2), encoded only when true.
 	Draining bool
 
+	// ReplacedBy names the node taking this one's place (ADR-0004): set when an
+	// operator replaces this node with a fresh one. Once the replacement is a
+	// cluster member, placement drops this node entirely (not merely demoted as
+	// Draining does) and the same-size swap keeps the storage profile unchanged —
+	// repair migrates this node's shards to its replacement, then it is evicted.
+	// Additive (invariant 2), encoded only when set.
+	ReplacedBy string
+
 	unknown []byte
 }
 

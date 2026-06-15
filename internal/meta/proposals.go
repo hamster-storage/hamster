@@ -158,6 +158,16 @@ type SetNodeDraining struct {
 	Draining         bool
 }
 
+// SetNodeReplacedBy records (or clears) which node is taking an existing
+// member's place (ADR-0004). NodeID is the outgoing node; ReplacedBy is the
+// incoming one (empty clears the pairing). It mutates only that field. Apply
+// refuses an unknown node ID.
+type SetNodeReplacedBy struct {
+	ProposedAtUnixMS int64
+	NodeID           string
+	ReplacedBy       string
+}
+
 // SetClusterLayout installs a new cluster-layout generation (ADR-0028) —
 // the replicated placement basis, not an object mutation. It is a
 // compare-and-set: apply accepts it only when Version is exactly one

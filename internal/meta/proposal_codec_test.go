@@ -47,6 +47,7 @@ func fullProposals() []any {
 			Previous: []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}, {ID: "n3", Host: "h3", Zone: "z3"}}},
 		RegisterNode{ProposedAtUnixMS: 1700000000014, NodeID: "n1", Host: "boxA", Zone: "z1", Capacity: 4},
 		SetNodeDraining{ProposedAtUnixMS: 1700000000015, NodeID: "n1", Draining: true},
+		SetNodeReplacedBy{ProposedAtUnixMS: 1700000000016, NodeID: "n1", ReplacedBy: "n7"},
 	}
 }
 
@@ -127,9 +128,9 @@ func TestProposalDecodeErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":      {},
 		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		// Field 18 is the next unassigned command slot — a newer node's
+		// Field 19 is the next unassigned command slot — a newer node's
 		// command this build does not know, which must refuse, not half-apply.
-		"unknown_command": encode(envelope(18)),
+		"unknown_command": encode(envelope(19)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -141,7 +142,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(18)))
+	_, err := DecodeProposal(encode(envelope(19)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

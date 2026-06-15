@@ -477,6 +477,90 @@ func TestClusterRemoveNode(t *testing.T) {
 	})
 }
 
+// TestClusterReplaceNode: swapping a member for a fresh node at constant cluster
+// size (ADR-0004). On a 3-node cluster (where every node is load-bearing and a
+// plain drain/remove can't make room), declaring n3→n4 and joining n4 swaps it
+// in — the layout stays 3 effective nodes throughout (so the profile never
+// changes), and n3 is evicted and tombstoned once the swap completes.
+func TestClusterReplaceNode(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3, d4 := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "replacetest", "n1", freeAddr(t), "", 0, now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	waitStatus(t, d1, "", "n1 leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].Leader
+	})
+
+	join := func(dir, id string) *Node {
+		tok, err := MintToken(d1, time.Hour, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Join(dir, id, freeAddr(t), tok, "", 0); err != nil {
+			t.Fatal(err)
+		}
+		n, err := Run(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	n2 := join(d2, "n2")
+	defer n2.Stop()
+	n3 := join(d3, "n3")
+	defer n3.Stop()
+	waitStatus(t, d1, "", "three voters", func(ms []Member) bool {
+		return len(ms) == 3 && voters(ms) == 3
+	})
+	// Let the layout settle before the swap, so the replace runs against a quiet
+	// cluster rather than racing formation.
+	waitLayout(t, n1, "settled three-node layout", func(cl meta.ClusterLayout) bool {
+		return len(cl.Previous) == 0 && len(cl.EffectiveNodes()) == 3 && !anyDraining(cl)
+	})
+
+	// Replacing with a node that is already a member is refused — the
+	// replacement must be fresh (and so the declaration comes before the join).
+	if err := Replace(d2, "", "n3", "n2"); err == nil {
+		t.Fatal("replacing with an existing member should be refused")
+	}
+
+	// Declare the replacement, then bring up the fresh node.
+	if err := Replace(d2, "", "n3", "n4"); err != nil {
+		t.Fatalf("declare replace n3->n4: %v", err)
+	}
+	n4 := join(d4, "n4")
+	defer n4.Stop()
+
+	// The cluster converges to {n1, n2, n4}: n4 swapped in, n3 evicted — and the
+	// layout is still exactly 3 effective nodes, so the storage profile never
+	// changed (no re-encode, just a migrate).
+	cl := waitLayout(t, n1, "n4 swapped in for n3", func(cl meta.ClusterLayout) bool {
+		return len(cl.Previous) == 0 && len(cl.EffectiveNodes()) == 3 &&
+			inLayout(cl, "n4") && !inLayout(cl, "n3")
+	})
+	if len(cl.EffectiveNodes()) != 3 {
+		t.Fatalf("layout has %d effective nodes, want 3 (replace must preserve size)", len(cl.EffectiveNodes()))
+	}
+	// And n3 is gone from membership for good.
+	waitStatus(t, d1, "", "n3 evicted, n4 a member", func(ms []Member) bool {
+		if len(ms) != 3 {
+			return false
+		}
+		has := map[string]bool{}
+		for _, m := range ms {
+			has[m.NodeID] = true
+		}
+		return has["n1"] && has["n2"] && has["n4"] && !has["n3"]
+	})
+}
+
 // TestRecoverRebuildsSingleVoterCluster: a two-node cluster loses n2
 // forever; recover rewrites the stopped n1 into a sole-voter cluster that
 // runs, leads, and grows again with a fresh token.
