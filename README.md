@@ -29,7 +29,7 @@ When MinIO archived its community edition in 2026 and steered users toward a com
 
 ## Features
 
-High level and honest: a check mark means shipped and tested, not promised. Versions beyond that are the [roadmap](docs/ROADMAP.md)'s plan and may shift as the code pushes back.
+High level and honest: a check mark means shipped and tested, not promised. Versions beyond that are the [roadmap](docs/ROADMAP.md)'s plan and may shift as the code pushes back. On-disk and on-wire formats may change between v0 releases.
 
 | Version | Features | Status |
 |---|---|---|
@@ -112,11 +112,6 @@ Two ways to run Hamster, and they don't convert in place.
 
 Drain is reversible (undrain) and pairs with remove to decommission — the same split as `kubectl drain`/`uncordon` and `delete node`. A quick reboot needs neither: the erasure coding already covers a node being briefly down. (Two voters is a valid but failure-intolerant cluster; three is the first size that survives losing one.)
 
-## Roadmap
-
-- **v0.x** — core PUT and GET, erasure coding with repair, partitioned placement, versioning, object lock, the simulation harness, and the upgrade test suite. On-disk and on-wire formats may change between v0 releases.
-- **v1.0** — stable formats with a compatibility promise, zero-downtime rolling upgrades, and the web console.
-
 ## Documentation
 
 - [Glossary](docs/GLOSSARY.md) — the vocabulary (object, version, shard, stripe, partition, node, cluster, layout, …), grouped by layer. Start here if a term is unfamiliar.
@@ -131,11 +126,3 @@ Early, but contributions are welcome. Hamster is Apache 2.0 licensed, and contri
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
-
-## Release history
-
-High level only — details live in each [release](https://github.com/hamster-storage/hamster/releases). On-disk and on-wire formats may change between v0 releases.
-
-- **v0.3** (June 2026) — Erasure coding and self-healing repair. Objects are erasure-coded into `k+m` self-describing shards spread across distinct nodes and reconstructed from any `k`; only the small metadata commit ever touches the Raft log. `hamster cluster run -s3` serves the full S3 API from the cluster, with the write-ack rule enforced mechanically (all `k+m` durable on the healthy path, a hard floor of `k+1`, `SlowDown` below it). A repair sweep scrubs every shard against its replicated checksum and rebuilds missing or bit-rotted shards from any `k` verified survivors, without anyone reading the object first. The whole data path runs under the deterministic simulation harness, and a six-node e2e kills nodes mid-workload over real sockets. Leader-only writes; multipart and server-side copy land on this path later.
-- **v0.2** (June 2026) — Clustering foundations. The Raft-replicated metadata plane as a runnable preview: `hamster cluster` (init, token, join, run, status, recover), mutual TLS between nodes with no plaintext mode and zero TLS configuration, single-use CA-pinned join tokens, automatic learner-to-voter promotion under a five-voter cap, crash-safe log compaction with streamed snapshot catch-up, and disaster recovery from a surviving node. Deterministic election timing makes the whole consensus layer simulation-testable, and an e2e suite drives the real binary through the full lifecycle. S3 serving stays single-node until the data path replicates (v0.3).
-- **v0.1** (June 2026) — The single-node store. Core S3 API: objects, listings, multipart uploads, server-side copies, batch deletes, presigned URLs; full SigV4 authentication including `aws-chunked` streaming; path-style and virtual-hosted addressing; MD5 ETags, exactly like S3. Uploads stream through the write buffer (a 1 GiB PUT needs ~12 MB of server memory). Durable single-node storage: BadgerDB metadata, versioned protobuf formats with golden-pinned encodings. Verified by a third-party client compatibility suite (`aws` CLI, rclone, restic, s3cmd) and a deterministic simulation harness that crash-tests the store against a reference model. Dev preview — single node, not production ready.
