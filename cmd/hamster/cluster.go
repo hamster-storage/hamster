@@ -433,7 +433,7 @@ func clusterOptimize(args []string) error {
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
 	}
-	log.Printf("optimizing: re-encoding existing data up to the current cluster's storage profile — this can take a while")
+	log.Printf("optimizing: waiting for any recent membership change to reconcile, then re-encoding existing data up to the current cluster's storage profile — this can take a while")
 	rep, err := cluster.Optimize(*dataDir, *addr)
 	if err != nil {
 		return err

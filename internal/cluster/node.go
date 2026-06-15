@@ -437,25 +437,10 @@ func (n *Node) reconcileLayout() {
 		raftMember[string(m.Addr)] = true
 	}
 
-	var desired []meta.LayoutNode
-	for _, m := range n.raft.Members() {
-		r, known := recs[string(m.Addr)]
-		if !known {
-			return // a member's record has not committed yet — hold (see above)
-		}
-		// A node being replaced drops out of placement entirely once its
-		// replacement is a member (ADR-0004) — a same-size swap that keeps the
-		// storage profile fixed, unlike draining which only demotes. Until the
-		// replacement is present, keep it so the active count never dips.
-		if r.ReplacedBy != "" && raftMember[r.ReplacedBy] {
-			continue
-		}
-		desired = append(desired, meta.LayoutNode{ID: r.NodeID, Host: r.Host, Zone: r.Zone, Weight: r.Capacity, Draining: r.Draining})
+	desired, have := n.desiredLayout()
+	if !have {
+		return // a member's record has not committed yet (or no members) — hold
 	}
-	if len(desired) == 0 {
-		return
-	}
-	slices.SortFunc(desired, func(a, b meta.LayoutNode) int { return strings.Compare(a.ID, b.ID) })
 
 	cur, ok := n.raft.Store().ClusterLayout()
 	// One transition at a time — the single-pair model (ADR-0004). While one is
@@ -546,6 +531,57 @@ func inLayout(cl meta.ClusterLayout, nodeID string) bool {
 		}
 	}
 	return false
+}
+
+// desiredLayout composes the layout the registry and Raft membership imply
+// (ADR-0004): every current member, labeled from its NodeRecord, minus any node
+// whose replacement is already present. have is false while a member's record has
+// not committed yet, or there are no members — the same hold reconcileLayout
+// takes. Self-contained so the optimize readiness check can reuse it. Runs on the
+// loop.
+func (n *Node) desiredLayout() (desired []meta.LayoutNode, have bool) {
+	store := n.raft.Store()
+	recs := make(map[string]meta.NodeRecord)
+	for _, r := range store.Nodes() {
+		recs[r.NodeID] = r
+	}
+	raftMember := make(map[string]bool)
+	for _, m := range n.raft.Members() {
+		raftMember[string(m.Addr)] = true
+	}
+	for _, m := range n.raft.Members() {
+		r, known := recs[string(m.Addr)]
+		if !known {
+			return nil, false
+		}
+		if r.ReplacedBy != "" && raftMember[r.ReplacedBy] {
+			continue
+		}
+		desired = append(desired, meta.LayoutNode{ID: r.NodeID, Host: r.Host, Zone: r.Zone, Weight: r.Capacity, Draining: r.Draining})
+	}
+	if len(desired) == 0 {
+		return nil, false
+	}
+	slices.SortFunc(desired, func(a, b meta.LayoutNode) int { return strings.Compare(a.ID, b.ID) })
+	return desired, true
+}
+
+// layoutSettled reports whether the committed layout already reflects current
+// membership: no transition open, and its effective nodes equal the set the
+// registry and Raft membership imply. It is false in the window right after a
+// join or drain, before reconcile has incorporated the change — exactly when an
+// optimize would otherwise read a node count that is about to grow and conclude
+// the data already fits. Runs on the loop.
+func (n *Node) layoutSettled() bool {
+	cur, ok := n.raft.Store().ClusterLayout()
+	if !ok || len(cur.Previous) > 0 {
+		return false
+	}
+	desired, have := n.desiredLayout()
+	if !have {
+		return false
+	}
+	return slices.Equal(cur.EffectiveNodes(), desired)
 }
 
 // evictReplaced removes a node whose replacement has taken over (ADR-0004): the
@@ -924,7 +960,7 @@ func (n *Node) handleOptimize(conn *tls.Conn) optimizeResponse {
 	// An optimize sweep re-encodes every under-width object and can run far longer
 	// than the default control deadline; extend it for the duration of the sweep.
 	conn.SetDeadline(time.Now().Add(30 * time.Minute))
-	switch rep, err := n.runOptimize(); {
+	switch rep, retry, err := n.runOptimize(); {
 	case errors.Is(err, raftnode.ErrNotLeader):
 		resp := optimizeResponse{Error: "this node is not the metadata leader"}
 		for _, m := range n.members() {
@@ -935,7 +971,7 @@ func (n *Node) handleOptimize(conn *tls.Conn) optimizeResponse {
 		}
 		return resp
 	case err != nil:
-		return optimizeResponse{Error: err.Error()}
+		return optimizeResponse{Error: err.Error(), Retry: retry}
 	default:
 		resp := optimizeResponse{Objects: uint64(rep.Objects), ReEncoded: uint64(rep.ReEncoded)}
 		if len(rep.Failed) > 0 {
@@ -947,16 +983,21 @@ func (n *Node) handleOptimize(conn *tls.Conn) optimizeResponse {
 }
 
 // runOptimize starts one optimize sweep on the loop and waits for it to finish.
-// Leader-only (re-encode proposes through Raft), refused while any layout
-// operation is in flight or another sweep runs — one heavy data movement at a
-// time. Runs off the loop (the control handler's goroutine), so it may wait.
-func (n *Node) runOptimize() (coord.RepairReport, error) {
+// Leader-only (re-encode proposes through Raft). It refuses until the cluster is
+// ready, distinguishing two cases: an operator-initiated op the caller must
+// resolve (a drain or replace in flight — not retryable), versus the cluster
+// still converging a membership change (a layout transition open, or a join not
+// yet reconciled — retryable, the caller should wait and re-ask). The retryable
+// flag is what lets `cluster optimize` wait out a fresh join instead of silently
+// no-op'ing against a stale node count. Runs off the loop, so it may wait.
+func (n *Node) runOptimize() (rep coord.RepairReport, retry bool, err error) {
 	if n.coord == nil {
-		return coord.RepairReport{}, errors.New("this node has no data-path coordinator")
+		return coord.RepairReport{}, false, errors.New("this node has no data-path coordinator")
 	}
 	type result struct {
-		rep coord.RepairReport
-		err error
+		rep   coord.RepairReport
+		retry bool
+		err   error
 	}
 	ch := make(chan result, 1)
 	n.loop.Post(func() {
@@ -964,12 +1005,27 @@ func (n *Node) runOptimize() (coord.RepairReport, error) {
 			ch <- result{err: raftnode.ErrNotLeader}
 			return
 		}
-		if reason := n.layoutOpInProgress(""); reason != "" {
-			ch <- result{err: fmt.Errorf("%s; wait for it to finish before optimizing", reason)}
+		// An operator-initiated layout op (drain, replace) must be resolved first
+		// — not something to wait out.
+		for _, r := range n.raft.Store().Nodes() {
+			if r.Draining {
+				ch <- result{err: fmt.Errorf("node %s is draining; finish or undo it before optimizing", r.NodeID)}
+				return
+			}
+			if r.ReplacedBy != "" {
+				ch <- result{err: fmt.Errorf("node %s is being replaced; let that finish before optimizing", r.NodeID)}
+				return
+			}
+		}
+		// The cluster is still absorbing a membership change (a transition is open,
+		// or a recent join has not reconciled into the layout). Optimizing now would
+		// target a node count that is about to change — wait and re-ask.
+		if !n.layoutSettled() {
+			ch <- result{retry: true, err: errors.New("the cluster layout is still reconciling a recent membership change")}
 			return
 		}
 		if n.sweeping {
-			ch <- result{err: errors.New("a repair or optimize sweep is already running")}
+			ch <- result{retry: true, err: errors.New("a repair or optimize sweep is already running")}
 			return
 		}
 		n.sweeping = true
@@ -979,7 +1035,7 @@ func (n *Node) runOptimize() (coord.RepairReport, error) {
 		})
 	})
 	r := <-ch
-	return r.rep, r.err
+	return r.rep, r.retry, r.err
 }
 
 // removeBlockedReason returns a non-empty explanation when a node may not be

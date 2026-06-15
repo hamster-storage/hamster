@@ -394,6 +394,12 @@ type OptimizeReport struct {
 // coding. An empty addr asks the local node; a non-leader answer carries the
 // leader's address, which Optimize follows once. The sweep can run a while; the
 // call blocks until it completes.
+//
+// A fresh join takes a moment to reconcile into the layout, and optimizing before
+// it lands would target the old, smaller node count. The leader reports that as a
+// retryable refusal rather than a misleading no-op, and Optimize waits it out (up
+// to optimizeSettleWait) so one invocation does the right thing after growth —
+// no guessing at a sleep.
 func Optimize(dataDir, addr string) (OptimizeReport, error) {
 	dir := Dir(dataDir)
 	cfg, err := loadConfig(dir)
@@ -408,7 +414,9 @@ func Optimize(dataDir, addr string) (OptimizeReport, error) {
 	if target == "" {
 		target = cfg.ClusterAddr
 	}
-	for attempt := 0; attempt < 2; attempt++ {
+	deadline := time.Now().Add(optimizeSettleWait)
+	redirected := false
+	for {
 		resp, err := requestOptimize(target, cert, pool)
 		if err != nil {
 			return OptimizeReport{}, err
@@ -416,8 +424,13 @@ func Optimize(dataDir, addr string) (OptimizeReport, error) {
 		if resp.Error == "" {
 			return OptimizeReport{Objects: resp.Objects, ReEncoded: resp.ReEncoded}, nil
 		}
-		if resp.Leader != "" && resp.Leader != target && attempt == 0 {
-			target = resp.Leader
+		if resp.Leader != "" && resp.Leader != target && !redirected {
+			target, redirected = resp.Leader, true
+			continue
+		}
+		// The cluster is still converging a membership change — wait and re-ask.
+		if resp.Retry && time.Now().Before(deadline) {
+			time.Sleep(2 * time.Second)
 			continue
 		}
 		if resp.Leader != "" {
@@ -425,8 +438,12 @@ func Optimize(dataDir, addr string) (OptimizeReport, error) {
 		}
 		return OptimizeReport{}, fmt.Errorf("cluster: optimize refused: %s", resp.Error)
 	}
-	return OptimizeReport{}, fmt.Errorf("cluster: optimize could not reach the leader")
 }
+
+// optimizeSettleWait bounds how long Optimize waits for a recent membership
+// change to reconcile before giving up — generous, since a join's transition
+// migrates data before the layout settles.
+const optimizeSettleWait = 5 * time.Minute
 
 // requestOptimize dials a node's control port and runs one optimize request. No
 // client read deadline: the sweep can take far longer than other control calls,

@@ -187,6 +187,9 @@ type optimizeResponse struct {
 	Leader    string // the leader's dial address when the asked node is not the leader
 	Objects   uint64
 	ReEncoded uint64
+	// Retry marks a refusal the caller should wait out and re-ask (the cluster is
+	// converging a membership change), as opposed to one it must resolve first.
+	Retry bool
 }
 
 // writeFrame writes one length-framed message.
@@ -512,7 +515,8 @@ func encodeOptimizeResponse(r optimizeResponse) []byte {
 	b = putString(b, 2, r.Error)
 	b = putString(b, 3, r.Leader)
 	b = putUint(b, 4, r.Objects)
-	return putUint(b, 5, r.ReEncoded)
+	b = putUint(b, 5, r.ReEncoded)
+	return putBool(b, 6, r.Retry)
 }
 
 func decodeOptimizeResponse(buf []byte) (optimizeResponse, error) {
@@ -527,6 +531,8 @@ func decodeOptimizeResponse(buf []byte) (optimizeResponse, error) {
 			r.Objects = f.u
 		case 5:
 			r.ReEncoded = f.u
+		case 6:
+			r.Retry = f.u != 0
 		}
 		return nil
 	})
