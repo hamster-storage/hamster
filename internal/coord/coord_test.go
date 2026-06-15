@@ -1001,6 +1001,32 @@ func (c *cluster) sweep() coord.RepairReport {
 	return rep
 }
 
+// optimize drives one Optimize sweep through the leader's coordinator to
+// completion — a repair sweep that also re-encodes under-width objects up to the
+// active profile.
+func (c *cluster) optimize() coord.RepairReport {
+	c.t.Helper()
+	id := c.leader()
+	var rep coord.RepairReport
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.Optimize(func(r coord.RepairReport, err error) {
+			if err != nil {
+				c.t.Errorf("optimize: %v", err)
+			}
+			rep, done = r, true
+		})
+	})
+	for range 20000 {
+		c.s.Run(tick)
+		if done {
+			return rep
+		}
+	}
+	c.t.Fatal("optimize never finished")
+	return rep
+}
+
 // corruptShard flips one payload byte of a committed shard file in place,
 // leaving its commit marker — silent bitrot, as a disk would serve it.
 func (c *cluster) corruptShard(key string, holderIdx int) seam.NodeID {
@@ -1338,6 +1364,75 @@ func TestRepairDownsizeReEncodes(t *testing.T) {
 		got, err := c.get(key, 0, -1)
 		if err != nil || !bytes.Equal(got, body) {
 			t.Fatalf("post-downsize GET %s: equal=%v err=%v", key, bytes.Equal(got, body), err)
+		}
+	}
+}
+
+// TestRepairUpsizeReEncodes is the downsize's mirror: objects written over a
+// three-node set (2+1) and then spread onto a grown six-node cluster are widened
+// to 4+2 — but only by an explicit Optimize, never a plain repair sweep. Growth
+// first migrates the width-3 shards to their six-node home (a transition); then
+// Optimize re-encodes each up to 4+2, converging in one pass. With two nodes
+// crashed every object still reads identical — durability the original 2+1 could
+// not give, the whole point of growing into the larger cluster.
+func TestRepairUpsizeReEncodes(t *testing.T) {
+	c := newCluster(t, 61, sim.NetConfig{}, 6, profile(t, "2+1"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	// Write over a three-node member set: objects land 2+1 (width 3).
+	full := c.members
+	c.members = []seam.NodeID{"n1", "n2", "n3"}
+	bodies := map[string][]byte{}
+	for i := 0; i < 5; i++ {
+		key := fmt.Sprintf("obj-%d", i)
+		body := randomBody(uint64(300+i), 300<<10)
+		if _, err := c.put(key, body); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		bodies[key] = body
+		if e, _ := c.entry(key); e.ECDataShards != 2 || e.ECParityShards != 1 {
+			t.Fatalf("%s is %d+%d, want 2+1", key, e.ECDataShards, e.ECParityShards)
+		}
+	}
+
+	// Grow to six nodes: growth opens a transition (the prior three-node set is
+	// where the width-3 shards sit), and a sweep migrates them to their six-node
+	// home so they are readable at the current placement.
+	c.previous = []seam.NodeID{"n1", "n2", "n3"}
+	c.members = full
+	rep := c.sweep()
+	if len(rep.Failed) != 0 || len(rep.Unrepairable) != 0 {
+		t.Fatalf("migrate sweep: failed=%v unrepairable=%v", rep.Failed, rep.Unrepairable)
+	}
+	c.previous = nil // the transition converged and closed
+
+	// A plain repair sweep widens nothing — growth never auto-re-encodes.
+	if rep := c.sweep(); rep.ReEncoded != 0 {
+		t.Fatalf("repair sweep widened %d objects; upsize must be explicit", rep.ReEncoded)
+	}
+
+	// Optimize widens every width-3 object to 4+2, converging in one pass; a
+	// second optimize re-encodes nothing.
+	rep = c.optimize()
+	if rep.ReEncoded != 5 || len(rep.Failed) != 0 {
+		t.Fatalf("optimize: re-encoded=%d failed=%v, want 5 / none", rep.ReEncoded, rep.Failed)
+	}
+	if rep := c.optimize(); rep.ReEncoded != 0 {
+		t.Fatalf("second optimize re-encoded %d (should have converged)", rep.ReEncoded)
+	}
+
+	// Now 4+2: crash two nodes and every object still reads identical.
+	for key := range bodies {
+		if e, _ := c.entry(key); e.ECDataShards != 4 || e.ECParityShards != 2 {
+			t.Fatalf("%s not re-encoded to 4+2: %d+%d", key, e.ECDataShards, e.ECParityShards)
+		}
+	}
+	c.crash("n5")
+	c.crash("n6")
+	for key, body := range bodies {
+		got, err := c.get(key, 0, -1)
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("post-optimize GET %s with two nodes down: equal=%v err=%v", key, bytes.Equal(got, body), err)
 		}
 	}
 }

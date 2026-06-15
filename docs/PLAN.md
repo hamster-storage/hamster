@@ -21,16 +21,14 @@ repair outcomes, the PUT skip, and the `cluster status` STATE column) have all
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-v0.4's headline work — drain/replace/remove, transition tracking, and downsize
-re-encode ([ADR-0031](adr/0031-reencode-across-profiles.md)) — has landed. What
-remains is the optional other direction:
-
-- **Upsize re-encode** — climbing existing data *up* to a larger profile as a
-  cluster grows, for storage efficiency. The same machine as downsize
-  (`coord.ReEncode`), but optional: data is already safe at the smaller profile,
-  so it must never fire automatically on a join (a join can't trigger a full
-  re-encode) — a background, throttled, opt-in pass. Downsize is the safety
-  feature; upsize is the tidy-up.
+v0.4's headline work — drain/replace/remove, transition tracking, downsize
+re-encode, and upsize re-encode (`cluster optimize`,
+[ADR-0031](adr/0031-reencode-across-profiles.md)) — has landed, with a deep
+multi-node e2e suite (bulk/list/range, the operations isolated and back-to-back,
+operation-under-load, growth, downsize, optimize). The release is feature-complete;
+what remains before tagging v0.4 is hardening: widening the e2e matrix across the
+profile ladder (2+1 / 3+2 / 4+2) and the throttled, continuous repair/scrub
+scheduler that replaces the one-shot sweep.
 
 ## Later versions
 

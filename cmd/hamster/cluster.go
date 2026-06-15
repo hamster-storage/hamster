@@ -34,6 +34,9 @@ commands:
   undrain  return a drained node to service
   remove   evict a drained, empty node from the cluster for good (its ID is
            tombstoned — a return needs a fresh join)
+  optimize re-encode existing data up to the current cluster's storage profile,
+           spreading objects written when it was smaller across the nodes added
+           since (run after growing the cluster — never automatic)
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -60,6 +63,8 @@ func clusterCmd(args []string) error {
 		return clusterDrain(args[1:], false)
 	case "remove":
 		return clusterRemove(args[1:])
+	case "optimize":
+		return clusterOptimize(args[1:])
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -417,6 +422,27 @@ func clusterRemove(args []string) error {
 		return err
 	}
 	log.Printf("node %s removed from the cluster; its ID is retired — a return needs a fresh join", *node)
+	return nil
+}
+
+func clusterOptimize(args []string) error {
+	fs := flag.NewFlagSet("cluster optimize", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	fs.Parse(args)
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
+	}
+	log.Printf("optimizing: re-encoding existing data up to the current cluster's storage profile — this can take a while")
+	rep, err := cluster.Optimize(*dataDir, *addr)
+	if err != nil {
+		return err
+	}
+	if rep.ReEncoded == 0 {
+		log.Printf("optimize complete: all %d objects already fit the current profile — nothing to do", rep.Objects)
+	} else {
+		log.Printf("optimize complete: re-encoded %d of %d objects up to the current profile", rep.ReEncoded, rep.Objects)
+	}
 	return nil
 }
 

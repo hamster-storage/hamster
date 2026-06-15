@@ -127,3 +127,15 @@ func (c *cluster) markStopped(id string) {
 	defer c.mu.Unlock()
 	c.procs[id] = nil
 }
+
+// kill stops a node (SIGINT, clean shutdown) and drops it from the alive set —
+// for simulating a failure mid-test.
+func (c *cluster) kill(id string) {
+	c.mu.Lock()
+	p := c.procs[id]
+	c.procs[id] = nil
+	c.mu.Unlock()
+	if p != nil {
+		p.interrupt(c.t)
+	}
+}

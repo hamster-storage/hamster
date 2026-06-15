@@ -382,6 +382,76 @@ func Remove(dataDir, addr, nodeID string) error {
 	return fmt.Errorf("cluster: remove could not reach the leader")
 }
 
+// OptimizeReport summarizes an optimize sweep for the CLI.
+type OptimizeReport struct {
+	Objects   uint64
+	ReEncoded uint64
+}
+
+// Optimize re-encodes existing data up to the active-count storage profile
+// (ADR-0004, ADR-0031): a leader-only sweep that spreads objects written when the
+// cluster was smaller across the nodes added since, widening their erasure
+// coding. An empty addr asks the local node; a non-leader answer carries the
+// leader's address, which Optimize follows once. The sweep can run a while; the
+// call blocks until it completes.
+func Optimize(dataDir, addr string) (OptimizeReport, error) {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return OptimizeReport{}, err
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return OptimizeReport{}, err
+	}
+	target := addr
+	if target == "" {
+		target = cfg.ClusterAddr
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := requestOptimize(target, cert, pool)
+		if err != nil {
+			return OptimizeReport{}, err
+		}
+		if resp.Error == "" {
+			return OptimizeReport{Objects: resp.Objects, ReEncoded: resp.ReEncoded}, nil
+		}
+		if resp.Leader != "" && resp.Leader != target && attempt == 0 {
+			target = resp.Leader
+			continue
+		}
+		if resp.Leader != "" {
+			return OptimizeReport{}, fmt.Errorf("cluster: optimize refused: %s (leader is %s)", resp.Error, resp.Leader)
+		}
+		return OptimizeReport{}, fmt.Errorf("cluster: optimize refused: %s", resp.Error)
+	}
+	return OptimizeReport{}, fmt.Errorf("cluster: optimize could not reach the leader")
+}
+
+// requestOptimize dials a node's control port and runs one optimize request. No
+// client read deadline: the sweep can take far longer than other control calls,
+// and the server holds the connection open until it finishes.
+func requestOptimize(addr string, cert tls.Certificate, pool *x509.CertPool) (optimizeResponse, error) {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
+		MinVersion:            tls.VersionTLS13,
+		Certificates:          []tls.Certificate{cert},
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: verifyChainToPool(pool),
+	})
+	if err != nil {
+		return optimizeResponse{}, fmt.Errorf("cluster: dialing %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := writeFrame(conn, encodeRequest(reqOptimize, nil)); err != nil {
+		return optimizeResponse{}, fmt.Errorf("cluster: sending optimize request: %w", err)
+	}
+	buf, err := readFrame(conn)
+	if err != nil {
+		return optimizeResponse{}, fmt.Errorf("cluster: reading optimize response: %w", err)
+	}
+	return decodeOptimizeResponse(buf)
+}
+
 func requestRemove(addr string, cert tls.Certificate, pool *x509.CertPool, req removeRequest) (removeResponse, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
 		MinVersion:            tls.VersionTLS13,
