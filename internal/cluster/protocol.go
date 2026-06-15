@@ -43,6 +43,10 @@ import (
 //	  string token = 2;
 //	  string node_id = 3;
 //	  string cluster_addr = 4;  // where the joiner's transport will listen
+//	  string host = 5;          // failure-domain labels (ADR-0016)
+//	  string zone = 6;
+//	  uint32 capacity = 7;      // relative weight (ADR-0004)
+//	  string replaces = 8;      // the member this node replaces, if any (ADR-0004)
 //	}
 //
 //	message JoinResponse {
@@ -97,25 +101,12 @@ import (
 //	  string error = 2;         // set on refusal
 //	  string leader = 3;        // the leader's dial address when this node is not it
 //	}
-//
-//	message ReplaceRequest {
-//	  uint32 format_version = 1;
-//	  string old = 2;           // the member being replaced
-//	  string new = 3;           // the fresh node that will take its place
-//	}
-//
-//	message ReplaceResponse {
-//	  uint32 format_version = 1;
-//	  string error = 2;         // set on refusal
-//	  string leader = 3;        // the leader's dial address when this node is not it
-//	}
 const (
 	protocolVersion = 1
 	reqJoin         = 1
 	reqStatus       = 2
 	reqDrain        = 3
 	reqRemove       = 4
-	reqReplace      = 5
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -151,6 +142,7 @@ type joinRequest struct {
 	Host        string
 	Zone        string
 	Capacity    uint32
+	Replaces    string // the member this node takes the place of (ADR-0004), if any
 }
 
 type joinResponse struct {
@@ -183,16 +175,6 @@ type removeRequest struct {
 }
 
 type removeResponse struct {
-	Error  string
-	Leader string // the leader's dial address when the asked node is not the leader
-}
-
-type replaceRequest struct {
-	Old string
-	New string
-}
-
-type replaceResponse struct {
 	Error  string
 	Leader string // the leader's dial address when the asked node is not the leader
 }
@@ -369,7 +351,8 @@ func encodeJoinRequest(r joinRequest) []byte {
 	b = putString(b, 4, r.ClusterAddr)
 	b = putString(b, 5, r.Host)
 	b = putString(b, 6, r.Zone)
-	return putUint(b, 7, uint64(r.Capacity))
+	b = putUint(b, 7, uint64(r.Capacity))
+	return putString(b, 8, r.Replaces)
 }
 
 func decodeJoinRequest(buf []byte) (joinRequest, error) {
@@ -388,6 +371,8 @@ func decodeJoinRequest(buf []byte) (joinRequest, error) {
 			r.Zone = string(f.b)
 		case 7:
 			r.Capacity = uint32(f.u)
+		case 8:
+			r.Replaces = string(f.b)
 		}
 		return nil
 	})
@@ -500,46 +485,6 @@ func encodeRemoveResponse(r removeResponse) []byte {
 
 func decodeRemoveResponse(buf []byte) (removeResponse, error) {
 	var r removeResponse
-	err := forEachField(buf, func(f field) error {
-		switch f.num {
-		case 2:
-			r.Error = string(f.b)
-		case 3:
-			r.Leader = string(f.b)
-		}
-		return nil
-	})
-	return r, err
-}
-
-func encodeReplaceRequest(r replaceRequest) []byte {
-	b := putUint(nil, 1, protocolVersion)
-	b = putString(b, 2, r.Old)
-	return putString(b, 3, r.New)
-}
-
-func decodeReplaceRequest(buf []byte) (replaceRequest, error) {
-	var r replaceRequest
-	err := forEachField(buf, func(f field) error {
-		switch f.num {
-		case 2:
-			r.Old = string(f.b)
-		case 3:
-			r.New = string(f.b)
-		}
-		return nil
-	})
-	return r, err
-}
-
-func encodeReplaceResponse(r replaceResponse) []byte {
-	b := putUint(nil, 1, protocolVersion)
-	b = putString(b, 2, r.Error)
-	return putString(b, 3, r.Leader)
-}
-
-func decodeReplaceResponse(buf []byte) (replaceResponse, error) {
-	var r replaceResponse
 	err := forEachField(buf, func(f field) error {
 		switch f.num {
 		case 2:

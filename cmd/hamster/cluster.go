@@ -28,9 +28,6 @@ commands:
   undrain  clear a node's drain flag
   remove   evict a drained, empty node from the cluster for good (its ID is
            tombstoned — a return needs a fresh join)
-  replace  swap a member for a fresh node at the same cluster size (profile
-           unchanged): declare it, then join the new node; the cluster
-           migrates the old node's shards across and evicts it
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -57,8 +54,6 @@ func clusterCmd(args []string) error {
 		return clusterDrain(args[1:], false)
 	case "remove":
 		return clusterRemove(args[1:])
-	case "replace":
-		return clusterReplace(args[1:])
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -112,14 +107,19 @@ func clusterJoin(args []string) error {
 	token := fs.String("token", "", "join token from `hamster cluster token` (required)")
 	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight (ADR-0004); 0 means equal — set it proportional to disk size on a heterogeneous cluster")
+	replaces := fs.String("replaces", "", "replace an existing member with this node at the same cluster size (ADR-0004): the cluster migrates the old node's shards across and evicts it, profile unchanged")
 	fs.Parse(args)
 	if *dataDir == "" || *node == "" || *token == "" {
 		return fmt.Errorf("-data-dir, -node, and -token are required")
 	}
-	if err := cluster.Join(*dataDir, *node, *listen, *token, *zone, uint32(*capacity)); err != nil {
+	if err := cluster.Join(*dataDir, *node, *listen, *token, *zone, uint32(*capacity), *replaces); err != nil {
 		return err
 	}
-	log.Printf("joined as node %s", *node)
+	if *replaces != "" {
+		log.Printf("joined as node %s, replacing %s — the cluster will migrate %s's shards here and evict it", *node, *replaces, *replaces)
+	} else {
+		log.Printf("joined as node %s", *node)
+	}
 	log.Printf("next: hamster cluster run -data-dir %s", *dataDir)
 	return nil
 }
@@ -132,6 +132,7 @@ func clusterRun(args []string) error {
 	token := fs.String("token", "", "join token: an uninitialized data directory joins before running; ignored once joined, so the same command line is restart-safe")
 	zone := fs.String("zone", "", "failure-domain label when joining with -token — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight when joining with -token (ADR-0004); 0 means equal")
+	replaces := fs.String("replaces", "", "when joining with -token, replace an existing member with this node at the same cluster size (ADR-0004): the old node's shards migrate here and it is evicted, profile unchanged")
 	s3 := fs.String("s3", "", "serve the S3 API on this address (host:port); empty disables")
 	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
 	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
@@ -146,10 +147,14 @@ func clusterRun(args []string) error {
 		if *node == "" {
 			return fmt.Errorf("-node is required when joining with -token")
 		}
-		if err := cluster.Join(*dataDir, *node, *listen, *token, *zone, uint32(*capacity)); err != nil {
+		if err := cluster.Join(*dataDir, *node, *listen, *token, *zone, uint32(*capacity), *replaces); err != nil {
 			return err
 		}
-		log.Printf("joined as node %s", *node)
+		if *replaces != "" {
+			log.Printf("joined as node %s, replacing %s", *node, *replaces)
+		} else {
+			log.Printf("joined as node %s", *node)
+		}
 	} else {
 		if *token != "" {
 			log.Printf("already a cluster member; ignoring -token")
@@ -346,24 +351,6 @@ func clusterRemove(args []string) error {
 		return err
 	}
 	log.Printf("node %s removed from the cluster; its ID is retired — a return needs a fresh join", *node)
-	return nil
-}
-
-func clusterReplace(args []string) error {
-	fs := flag.NewFlagSet("cluster replace", flag.ExitOnError)
-	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
-	oldNode := fs.String("old", "", "the node ID to replace (required)")
-	newNode := fs.String("new", "", "the fresh node ID that will take its place (required)")
-	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
-	fs.Parse(args)
-	if *dataDir == "" || *oldNode == "" || *newNode == "" {
-		return fmt.Errorf("-data-dir, -old, and -new are required")
-	}
-	if err := cluster.Replace(*dataDir, *addr, *oldNode, *newNode); err != nil {
-		return err
-	}
-	log.Printf("declared: %s will replace %s — now join %s; the cluster will swap it in (profile unchanged) and evict %s",
-		*newNode, *oldNode, *newNode, *oldNode)
 	return nil
 }
 

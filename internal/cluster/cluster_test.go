@@ -128,7 +128,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if !strings.HasPrefix(tok, "hamster-join-") {
 		t.Fatalf("token %q has no recognizable prefix", tok)
 	}
-	if err := Join(d2, "n2", freeAddr(t), tok, "", 0); err != nil {
+	if err := Join(d2, "n2", freeAddr(t), tok, "", 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	n2, err := Run(d2)
@@ -141,7 +141,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	})
 
 	// The token burned on use: a second join with it is refused.
-	if err := Join(t.TempDir(), "nX", freeAddr(t), tok, "", 0); err == nil {
+	if err := Join(t.TempDir(), "nX", freeAddr(t), tok, "", 0, ""); err == nil {
 		t.Fatal("a used join token was accepted")
 	} else if !strings.Contains(err.Error(), "already-used") {
 		t.Fatalf("used token refused for the wrong reason: %v", err)
@@ -152,7 +152,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(t.TempDir(), "n2", freeAddr(t), tokDup, "", 0); err == nil {
+	if err := Join(t.TempDir(), "n2", freeAddr(t), tokDup, "", 0, ""); err == nil {
 		t.Fatal("a duplicate node ID was accepted")
 	}
 
@@ -161,7 +161,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(t.TempDir(), "n4", freeAddr(t), tokOld, "", 0); err == nil {
+	if err := Join(t.TempDir(), "n4", freeAddr(t), tokOld, "", 0, ""); err == nil {
 		t.Fatal("an expired join token was accepted")
 	}
 
@@ -170,7 +170,7 @@ func TestClusterGrowsByTokenJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(d3, "n3", freeAddr(t), tok3, "", 0); err != nil {
+	if err := Join(d3, "n3", freeAddr(t), tok3, "", 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	n3, err := Run(d3)
@@ -252,7 +252,7 @@ func TestClusterNodeRegistryReplicated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Join(dir, id, freeAddr(t), tok, zone, capacity); err != nil {
+		if err := Join(dir, id, freeAddr(t), tok, zone, capacity, ""); err != nil {
 			t.Fatal(err)
 		}
 		n, err := Run(dir)
@@ -322,7 +322,7 @@ func TestClusterNodeDraining(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Join(dir, id, freeAddr(t), tok, "", 0); err != nil {
+		if err := Join(dir, id, freeAddr(t), tok, "", 0, ""); err != nil {
 			t.Fatal(err)
 		}
 		n, err := Run(dir)
@@ -430,7 +430,7 @@ func TestClusterRemoveNode(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Join(dir, id, freeAddr(t), tok, "", 0); err != nil {
+		if err := Join(dir, id, freeAddr(t), tok, "", 0, ""); err != nil {
 			t.Fatal(err)
 		}
 		n, err := Run(dir)
@@ -479,12 +479,12 @@ func TestClusterRemoveNode(t *testing.T) {
 
 // TestClusterReplaceNode: swapping a member for a fresh node at constant cluster
 // size (ADR-0004). On a 3-node cluster (where every node is load-bearing and a
-// plain drain/remove can't make room), declaring n3→n4 and joining n4 swaps it
-// in — the layout stays 3 effective nodes throughout (so the profile never
+// plain drain/remove can't make room), joining n4 with -replaces n3 swaps it in
+// — the layout stays 3 effective nodes throughout (so the profile never
 // changes), and n3 is evicted and tombstoned once the swap completes.
 func TestClusterReplaceNode(t *testing.T) {
 	now := time.Now()
-	d1, d2, d3, d4 := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	d1, d2, d3, d4, dx := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 
 	if err := Init(d1, "replacetest", "n1", freeAddr(t), "", 0, now); err != nil {
 		t.Fatal(err)
@@ -498,15 +498,24 @@ func TestClusterReplaceNode(t *testing.T) {
 		return len(ms) == 1 && ms[0].Leader
 	})
 
-	join := func(dir, id string) *Node {
+	// joinReplacing joins as id, optionally replacing an existing member; an
+	// empty replaces is an ordinary join.
+	joinReplacing := func(dir, id, replaces string) (*Node, error) {
 		tok, err := MintToken(d1, time.Hour, now)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Join(dir, id, freeAddr(t), tok, "", 0); err != nil {
-			t.Fatal(err)
+		if err := Join(dir, id, freeAddr(t), tok, "", 0, replaces); err != nil {
+			return nil, err
 		}
 		n, err := Run(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n, nil
+	}
+	join := func(dir, id string) *Node {
+		n, err := joinReplacing(dir, id, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -525,17 +534,19 @@ func TestClusterReplaceNode(t *testing.T) {
 		return len(cl.Previous) == 0 && len(cl.EffectiveNodes()) == 3 && !anyDraining(cl)
 	})
 
-	// Replacing with a node that is already a member is refused — the
-	// replacement must be fresh (and so the declaration comes before the join).
-	if err := Replace(d2, "", "n3", "n2"); err == nil {
-		t.Fatal("replacing with an existing member should be refused")
+	// Replacing a node that isn't a member is refused (caught before any
+	// identity is issued).
+	if _, err := joinReplacing(dx, "nx", "ghost"); err == nil {
+		t.Fatal("replacing a non-member should be refused")
+	} else if !strings.Contains(err.Error(), "not a cluster member") {
+		t.Fatalf("refusal should explain the unknown target: %v", err)
 	}
 
-	// Declare the replacement, then bring up the fresh node.
-	if err := Replace(d2, "", "n3", "n4"); err != nil {
-		t.Fatalf("declare replace n3->n4: %v", err)
+	// Join n4 as n3's replacement; the cluster swaps it in.
+	n4, err := joinReplacing(d4, "n4", "n3")
+	if err != nil {
+		t.Fatalf("join n4 replacing n3: %v", err)
 	}
-	n4 := join(d4, "n4")
 	defer n4.Stop()
 
 	// The cluster converges to {n1, n2, n4}: n4 swapped in, n3 evicted — and the
@@ -580,7 +591,7 @@ func TestRecoverRebuildsSingleVoterCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(d2, "n2", freeAddr(t), tok, "", 0); err != nil {
+	if err := Join(d2, "n2", freeAddr(t), tok, "", 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	n2, err := Run(d2)
@@ -622,7 +633,7 @@ func TestRecoverRebuildsSingleVoterCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Join(d3, "n3", freeAddr(t), tok3, "", 0); err != nil {
+	if err := Join(d3, "n3", freeAddr(t), tok3, "", 0, ""); err != nil {
 		t.Fatal(err)
 	}
 	n3, err := Run(d3)
@@ -757,7 +768,7 @@ func TestClusterZoneLabels(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Join(dir, id, freeAddr(t), tok, zone, 0); err != nil {
+		if err := Join(dir, id, freeAddr(t), tok, zone, 0, ""); err != nil {
 			t.Fatal(err)
 		}
 		n, err := Run(dir)
@@ -821,7 +832,7 @@ func TestClusterCapacityWeights(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := Join(dir, id, freeAddr(t), tok, "", capacity); err != nil {
+		if err := Join(dir, id, freeAddr(t), tok, "", capacity, ""); err != nil {
 			t.Fatal(err)
 		}
 		n, err := Run(dir)
