@@ -59,12 +59,29 @@ type Config struct {
 type Coordinator struct {
 	cfg      Config
 	liveness *liveness
+	// sweeping is the single-flight guard shared by every repair sweep — the
+	// operator optimize, the transition migration, and the background scrubber —
+	// so at most one runs at a time. Loop-owned, so no lock.
+	sweeping bool
+	scrub    *scrubber
 }
 
 // New returns a Coordinator over cfg.
 func New(cfg Config) *Coordinator {
 	return &Coordinator{cfg: cfg, liveness: newLiveness()}
 }
+
+// beginSweep claims the single-flight guard, returning false if a sweep is
+// already running. Loop-owned. endSweep releases it.
+func (c *Coordinator) beginSweep() bool {
+	if c.sweeping {
+		return false
+	}
+	c.sweeping = true
+	return true
+}
+
+func (c *Coordinator) endSweep() { c.sweeping = false }
 
 // DownNodes returns the nodes this coordinator currently considers down — its
 // passive view from data-plane operation outcomes (a PUT skips these to avoid

@@ -2,6 +2,7 @@ package coord
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 
@@ -69,7 +70,30 @@ func (c *Coordinator) Optimize(done func(RepairReport, error)) {
 }
 
 func (c *Coordinator) runSweep(optimize bool, done func(RepairReport, error)) {
-	op := &sweepOp{c: c, done: done, optimize: optimize}
+	if !c.beginSweep() {
+		done(RepairReport{}, ErrSweepBusy)
+		return
+	}
+	work, skipped := c.collectSweepWork()
+	op := &sweepOp{
+		c:        c,
+		optimize: optimize,
+		work:     work,
+		done:     func(r RepairReport, e error) { c.endSweep(); done(r, e) },
+	}
+	op.report.Skipped = skipped
+	op.nextItem()
+}
+
+// ErrSweepBusy is returned when a sweep is requested while another (an operator
+// optimize, a transition migration, or the background scrub) already holds the
+// single-flight guard. The caller retries.
+var ErrSweepBusy = errors.New("coord: a repair sweep is already running")
+
+// collectSweepWork snapshots every whole-object version the metadata names — the
+// scrub/repair work list — and counts the multipart entries skipped (they ride
+// the v0.1 blob path). Shared by runSweep and the background scrubber.
+func (c *Coordinator) collectSweepWork() (work []sweepItem, skipped int) {
 	store := c.cfg.Raft.Store()
 	for _, b := range store.ListBuckets() {
 		bucket := b.Name
@@ -78,14 +102,14 @@ func (c *Coordinator) runSweep(optimize bool, done func(RepairReport, error)) {
 				return true // delete markers hold no shards
 			}
 			if len(e.Parts) > 0 {
-				op.report.Skipped++
+				skipped++
 				return true
 			}
-			op.work = append(op.work, sweepItem{bucket: bucket, key: key, entry: e})
+			work = append(work, sweepItem{bucket: bucket, key: key, entry: e})
 			return true
 		})
 	}
-	op.nextItem()
+	return work, skipped
 }
 
 type sweepItem struct {

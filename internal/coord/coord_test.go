@@ -1027,6 +1027,24 @@ func (c *cluster) optimize() coord.RepairReport {
 	return rep
 }
 
+// startScrub / stopScrub / scrubStats drive the background scrubber on node id's
+// coordinator from the test goroutine, each on the node's loop.
+func (c *cluster) startScrub(id seam.NodeID, cfg coord.ScrubConfig) {
+	c.worlds[id].Loop.Post(func() { c.nodes[id].co.StartScrub(cfg) })
+	c.s.Run(0)
+}
+
+func (c *cluster) stopScrub(id seam.NodeID) {
+	c.worlds[id].Loop.Post(func() { c.nodes[id].co.StopScrub() })
+	c.s.Run(0)
+}
+
+func (c *cluster) scrubStats(id seam.NodeID) (scrubbed, healed, passes int) {
+	c.worlds[id].Loop.Post(func() { scrubbed, healed, passes = c.nodes[id].co.ScrubStats() })
+	c.s.Run(0)
+	return
+}
+
 // corruptShard flips one payload byte of a committed shard file in place,
 // leaving its commit marker — silent bitrot, as a disk would serve it.
 func (c *cluster) corruptShard(key string, holderIdx int) seam.NodeID {
@@ -1434,5 +1452,101 @@ func TestRepairUpsizeReEncodes(t *testing.T) {
 		if err != nil || !bytes.Equal(got, body) {
 			t.Fatalf("post-optimize GET %s with two nodes down: equal=%v err=%v", key, bytes.Equal(got, body), err)
 		}
+	}
+}
+
+// TestScrubHealsContinuously: the background scrubber finds and rebuilds bitrot on
+// its own, without any operator sweep. Every object's shard is corrupted in
+// place; the scrubber, started on the leader and paced object-by-object, walks
+// the keyspace and rebuilds each. Afterward a manual sweep finds nothing left to
+// heal — the scrubber converged it — and every object reads identical.
+func TestScrubHealsContinuously(t *testing.T) {
+	c := newCluster(t, 71, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	bodies := map[string][]byte{}
+	for i := 0; i < 4; i++ {
+		key := fmt.Sprintf("obj-%d", i)
+		body := randomBody(uint64(400+i), 300<<10)
+		if _, err := c.put(key, body); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		bodies[key] = body
+	}
+	// Bitrot one shard of every object — silent corruption no read has tripped yet.
+	for key := range bodies {
+		c.corruptShard(key, 1)
+	}
+
+	// Start the continuous scrubber on the leader and let virtual time run. No
+	// operator sweep is ever called; the scrubber must heal everything on its own.
+	lead := c.leader()
+	c.startScrub(lead, coord.ScrubConfig{Pace: 30 * time.Millisecond, PassInterval: 100 * time.Millisecond})
+	healed := 0
+	for range 200 {
+		c.idle(50)
+		if _, healed, _ = c.scrubStats(lead); healed >= len(bodies) {
+			break
+		}
+	}
+	if healed < len(bodies) {
+		t.Fatalf("scrubber healed %d of %d objects before the budget ran out", healed, len(bodies))
+	}
+	_, _, passes := c.scrubStats(lead)
+	if passes < 1 {
+		t.Fatalf("scrubber reported %d full passes, want at least 1", passes)
+	}
+
+	// Stop it and drain any in-flight scrub, then a manual sweep must find nothing
+	// to rebuild — proof the scrubber already converged the cluster.
+	c.stopScrub(lead)
+	c.idle(200)
+	rep := c.sweep()
+	if rep.RebuiltShards != 0 || len(rep.Failed) != 0 || rep.Healthy != len(bodies) {
+		t.Fatalf("post-scrub sweep: rebuilt=%d healthy=%d failed=%v, want 0 / %d / none",
+			rep.RebuiltShards, rep.Healthy, rep.Failed, len(bodies))
+	}
+	for key, body := range bodies {
+		got, err := c.get(key, 0, -1)
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("post-scrub GET %s: equal=%v err=%v", key, bytes.Equal(got, body), err)
+		}
+	}
+}
+
+// TestScrubYieldsDuringTransition: the scrubber stands aside while a layout
+// transition is open — migration is driveTransitionClose's to drive, not the
+// background scrub's. With a transition open it examines nothing, even with
+// corruption present; once the transition closes it heals.
+func TestScrubYieldsDuringTransition(t *testing.T) {
+	c := newCluster(t, 73, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	body := randomBody(7, 300<<10)
+	if _, err := c.put("obj", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	c.corruptShard("obj", 1)
+
+	// Open a transition (Previous set) and run the scrubber: it must yield —
+	// examine nothing, heal nothing — for as long as the transition is open.
+	c.previous = c.members
+	lead := c.leader()
+	c.startScrub(lead, coord.ScrubConfig{Pace: 20 * time.Millisecond, PassInterval: 50 * time.Millisecond})
+	c.idle(500)
+	if scrubbed, healed, _ := c.scrubStats(lead); scrubbed != 0 || healed != 0 {
+		t.Fatalf("scrubber ran during an open transition: scrubbed=%d healed=%d, want 0/0", scrubbed, healed)
+	}
+
+	// Close the transition; the scrubber resumes and heals the corruption.
+	c.previous = nil
+	healed := 0
+	for range 100 {
+		c.idle(50)
+		if _, healed, _ = c.scrubStats(lead); healed >= 1 {
+			break
+		}
+	}
+	if healed < 1 {
+		t.Fatal("scrubber did not resume after the transition closed")
 	}
 }
