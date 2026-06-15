@@ -1217,3 +1217,66 @@ func TestPutRefusesWithoutLayout(t *testing.T) {
 		t.Fatalf("got %v, want ErrRefused", gotErr)
 	}
 }
+
+// reencode drives one ReEncode through the leader's coordinator to completion.
+func (c *cluster) reencode(key string, e meta.VersionEntry, newK, newM int) {
+	c.t.Helper()
+	id := c.leader()
+	var rerr error
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.ReEncode(bucket, key, e, newK, newM, func(err error) { rerr, done = err, true })
+	})
+	for range 8000 {
+		c.s.Run(tick)
+		if done {
+			break
+		}
+	}
+	if !done {
+		c.t.Fatal("re-encode never finished")
+	}
+	if rerr != nil {
+		c.t.Fatalf("re-encode: %v", rerr)
+	}
+}
+
+// TestReEncodeShrinksProfile: re-encode rewrites a 4+2 object to 3+2 — the data
+// step a 6→5 node downsize takes. The object reads back identical at the new
+// profile, over the network and off the disks (the new, narrower placement),
+// and the old shards are gone.
+func TestReEncodeShrinksProfile(t *testing.T) {
+	c := newCluster(t, 51, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	body := randomBody(51, 600<<10)
+	if _, err := c.put("obj", body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	e, ok := c.entry("obj")
+	if !ok || e.ECDataShards != 4 || e.ECParityShards != 2 {
+		t.Fatalf("expected a 4+2 object, got %d+%d (ok %v)", e.ECDataShards, e.ECParityShards, ok)
+	}
+
+	c.reencode("obj", e, 3, 2)
+
+	e2, _ := c.entry("obj")
+	if e2.ECDataShards != 3 || e2.ECParityShards != 2 {
+		t.Fatalf("re-encode to 3+2 failed: now %d+%d", e2.ECDataShards, e2.ECParityShards)
+	}
+	if e2.DataID == e.DataID {
+		t.Fatal("re-encode must mint a new DataID for the new shards")
+	}
+	if len(e2.ShardChecksums) != 5 {
+		t.Fatalf("re-encoded object has %d shard checksums, want 5", len(e2.ShardChecksums))
+	}
+
+	got, err := c.get("obj", 0, -1)
+	if err != nil || !bytes.Equal(got, body) {
+		t.Fatalf("GET after re-encode: equal=%v err=%v", bytes.Equal(got, body), err)
+	}
+	disk, err := c.readObject("obj")
+	if err != nil || !bytes.Equal(disk, body) {
+		t.Fatalf("off-disk read after re-encode: equal=%v err=%v", bytes.Equal(disk, body), err)
+	}
+}
