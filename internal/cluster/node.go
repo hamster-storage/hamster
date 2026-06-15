@@ -198,7 +198,14 @@ func Run(dataDir string) (*Node, error) {
 			Rand:         rng,
 			TickInterval: tickInterval, ElectionTicks: electionTicks,
 			OnMembershipChange: onMembership,
-			Persister:          mdb,
+			OnRemoved: func() {
+				// This node was evicted from the cluster (ADR-0004). Its ID is
+				// tombstoned, so it can never re-admit; stop it so it does not
+				// keep asking. Asynchronous — Stop joins the loop this fires on.
+				log.Printf("cluster: this node was removed from the cluster; shutting down")
+				go n.Stop()
+			},
+			Persister: mdb,
 		})
 		n.raft = rn
 		// Every cluster node is a shard holder: the data-plane service
@@ -285,6 +292,11 @@ func (n *Node) Stop() {
 		}
 	})
 }
+
+// Done is closed when the node stops — on Stop, including the self-stop after
+// this node is removed from the cluster (ADR-0004). A server loop selects on it
+// to exit the process when the node is evicted, not only on a signal.
+func (n *Node) Done() <-chan struct{} { return n.stopSync }
 
 // Addr is the transport address; JoinAddr the join/status listener's.
 func (n *Node) Addr() string { return n.transport.Addr() }
@@ -609,6 +621,8 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeStatusResponse(resp))
 	case reqDrain:
 		_ = writeFrame(conn, encodeDrainResponse(n.handleDrain(conn, payload)))
+	case reqRemove:
+		_ = writeFrame(conn, encodeRemoveResponse(n.handleRemove(conn, payload)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }
@@ -683,6 +697,191 @@ func (n *Node) drainBlockedReason(nodeID string) string {
 		}
 	}
 	return ""
+}
+
+// handleRemove serves a remove request (ADR-0004): a leader-only metadata
+// operation, authenticated by a cluster certificate like drain. A non-leader
+// answers with the leader's dial address so the client can retry there.
+func (n *Node) handleRemove(conn *tls.Conn, payload []byte) removeResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return removeResponse{Error: "remove requires a cluster certificate"}
+	}
+	req, err := decodeRemoveRequest(payload)
+	if err != nil {
+		return removeResponse{Error: "malformed remove request"}
+	}
+	switch err := n.proposeRemove(req.NodeID); {
+	case errors.Is(err, raftnode.ErrNotLeader):
+		resp := removeResponse{Error: "this node is not the metadata leader"}
+		for _, m := range n.members() {
+			if m.Leader {
+				resp.Leader = m.Dial
+				break
+			}
+		}
+		return resp
+	case err != nil:
+		return removeResponse{Error: err.Error()}
+	}
+	return removeResponse{}
+}
+
+// proposeRemove evicts nodeID, retrying the asynchronous conf change (which raft
+// drops while another is pending) until membership reflects it or the deadline
+// passes. Runs off the loop (the control handler's goroutine), so it may wait.
+// Leadership and membership are judged on the leader: a non-leader redirects
+// (ErrNotLeader) rather than answering from its own possibly-lagging view.
+func (n *Node) proposeRemove(nodeID string) error {
+	if !n.isLeader() {
+		return raftnode.ErrNotLeader
+	}
+	if !n.isClusterMember(nodeID) {
+		return fmt.Errorf("node %s is not a cluster member", nodeID)
+	}
+	deadline := n.clock.Now().Add(30 * time.Second)
+	for n.clock.Now().Before(deadline) {
+		if err := n.removeAttempt(nodeID); err != nil {
+			return err
+		}
+		for until := time.Now().Add(3 * time.Second); time.Now().Before(until); {
+			if !n.isClusterMember(nodeID) {
+				return nil
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return fmt.Errorf("cluster: remove did not take effect before the deadline")
+}
+
+// removeAttempt runs one removal attempt on the loop: validate the gate, then
+// propose the Raft conf change. Idempotent — a node already gone is success.
+func (n *Node) removeAttempt(nodeID string) error {
+	ch := make(chan error, 1)
+	n.loop.Post(func() {
+		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
+			ch <- raftnode.ErrNotLeader
+			return
+		}
+		var raftID uint64
+		found := false
+		for _, m := range n.raft.Members() {
+			if string(m.Addr) == nodeID {
+				raftID, found = m.ID, true
+				break
+			}
+		}
+		if !found {
+			ch <- nil // already removed (a retry that raced a commit)
+			return
+		}
+		if raftID == n.cfg.RaftID {
+			ch <- fmt.Errorf("a node cannot remove itself; issue remove from another node")
+			return
+		}
+		if reason := n.removeBlockedReason(nodeID); reason != "" {
+			ch <- errors.New(reason)
+			return
+		}
+		if err := n.raft.RemoveNode(raftID); err != nil {
+			ch <- err
+			return
+		}
+		log.Printf("cluster: removing node %s (raft id %d)", nodeID, raftID)
+		ch <- nil
+	})
+	select {
+	case err := <-ch:
+		return err
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("cluster: remove timed out")
+	}
+}
+
+// removeBlockedReason returns a non-empty explanation when a node may not be
+// removed (ADR-0004): durability is never traded for a shrink. A node must be
+// drained (its shards migrated off) and empty — the remaining nodes must still
+// hold every stored object at its full width, since k is never downgraded and
+// re-encode to a smaller profile is not yet available. Runs on the loop.
+func (n *Node) removeBlockedReason(nodeID string) string {
+	cl, ok := n.raft.Store().ClusterLayout()
+	if !ok {
+		return "" // no layout yet — no committed data to strand
+	}
+	if len(cl.Previous) > 0 {
+		return "a layout transition is in progress; wait for it to finish before removing a node"
+	}
+	draining := false
+	active := 0
+	for _, m := range cl.EffectiveNodes() {
+		if m.ID == nodeID {
+			draining = m.Draining
+		}
+		if !m.Draining {
+			active++
+		}
+	}
+	if !draining {
+		return fmt.Sprintf("node %s must be drained before removal — run `cluster drain %s` and let it finish", nodeID, nodeID)
+	}
+	if w := n.maxStoredWidth(); w > active {
+		return fmt.Sprintf("removing %s would leave %d active node(s), fewer than the widest stored object needs (%d shards); its data has not fully migrated off (re-encoding existing data to a smaller profile is not yet available)", nodeID, active, w)
+	}
+	return ""
+}
+
+// maxStoredWidth is the largest shard width (k+m) of any stored object version —
+// the number of distinct nodes the cluster must keep to hold every object at
+// full spread. Multipart parts (not on the cluster path yet) carry no width.
+func (n *Node) maxStoredWidth() int {
+	store := n.raft.Store()
+	maxW := 0
+	for _, b := range store.ListBuckets() {
+		store.ScanVersions(b.Name, func(_ string, e meta.VersionEntry) bool {
+			if e.Kind == meta.KindObject && len(e.Parts) == 0 {
+				if w := int(e.ECDataShards + e.ECParityShards); w > maxW {
+					maxW = w
+				}
+			}
+			return true
+		})
+	}
+	return maxW
+}
+
+// isLeader reports, on the loop, whether this node is the current Raft leader.
+func (n *Node) isLeader() bool {
+	ch := make(chan bool, 1)
+	n.loop.Post(func() {
+		lead, _ := n.raft.Leader()
+		ch <- lead == n.cfg.RaftID
+	})
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		return false
+	}
+}
+
+// isClusterMember reports, on the loop, whether nodeID is in the current Raft
+// membership.
+func (n *Node) isClusterMember(nodeID string) bool {
+	ch := make(chan bool, 1)
+	n.loop.Post(func() {
+		for _, m := range n.raft.Members() {
+			if string(m.Addr) == nodeID {
+				ch <- true
+				return
+			}
+		}
+		ch <- false
+	})
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		return true // loop wedged; do not falsely report removed
+	}
 }
 
 type joinOutcome struct {

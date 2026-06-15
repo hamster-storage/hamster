@@ -336,6 +336,66 @@ func Drain(dataDir, addr, nodeID string, draining bool) error {
 
 // requestDrain dials a node's control port with this node's certificate and
 // runs one drain request/response.
+// Remove evicts a node from the cluster (ADR-0004): a leader-only metadata
+// operation that drops the node from Raft membership and tombstones its ID so it
+// can never re-admit itself. The node must already be drained and empty — its
+// shards migrated off — or removal is refused, so durability is never traded.
+// addr is the cluster control address to dial; empty uses this node's own.
+func Remove(dataDir, addr, nodeID string) error {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return err
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return err
+	}
+	target := addr
+	if target == "" {
+		target = cfg.ClusterAddr
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		resp, err := requestRemove(target, cert, pool, removeRequest{NodeID: nodeID})
+		if err != nil {
+			return err
+		}
+		if resp.Error == "" {
+			return nil
+		}
+		if resp.Leader != "" && resp.Leader != target && attempt == 0 {
+			target = resp.Leader
+			continue
+		}
+		if resp.Leader != "" {
+			return fmt.Errorf("cluster: remove refused: %s (leader is %s)", resp.Error, resp.Leader)
+		}
+		return fmt.Errorf("cluster: remove refused: %s", resp.Error)
+	}
+	return fmt.Errorf("cluster: remove could not reach the leader")
+}
+
+func requestRemove(addr string, cert tls.Certificate, pool *x509.CertPool, req removeRequest) (removeResponse, error) {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
+		MinVersion:            tls.VersionTLS13,
+		Certificates:          []tls.Certificate{cert},
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: verifyChainToPool(pool),
+	})
+	if err != nil {
+		return removeResponse{}, fmt.Errorf("cluster: dialing %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := writeFrame(conn, encodeRequest(reqRemove, encodeRemoveRequest(req))); err != nil {
+		return removeResponse{}, fmt.Errorf("cluster: sending remove request: %w", err)
+	}
+	buf, err := readFrame(conn)
+	if err != nil {
+		return removeResponse{}, fmt.Errorf("cluster: reading remove response: %w", err)
+	}
+	return decodeRemoveResponse(buf)
+}
+
 func requestDrain(addr string, cert tls.Certificate, pool *x509.CertPool, req drainRequest) (drainResponse, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
 		MinVersion:            tls.VersionTLS13,

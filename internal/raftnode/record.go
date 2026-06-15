@@ -33,6 +33,7 @@ import (
 //	  uint32 format_version = 1;
 //	  repeated Row rows = 2;        // Row: 1 key, 2 value — meta.Store.Dump order
 //	  repeated Member members = 3;  // sorted by raft_id
+//	  repeated uint64 removed = 4;  // tombstoned raft IDs, sorted; never re-admitted
 //	}
 //
 //	message Member {
@@ -143,9 +144,10 @@ func decodeRecord(b []byte) (record, error) {
 	return rec, nil
 }
 
-// encodeSnapshotData serializes a store dump and the address book as a
-// snapshot payload. Members are emitted in raft-ID order.
-func encodeSnapshotData(rows []meta.Row, members map[uint64]peerInfo) []byte {
+// encodeSnapshotData serializes a store dump, the address book, and the
+// removed-ID tombstone as a snapshot payload. Members and removed IDs are
+// emitted in raft-ID order.
+func encodeSnapshotData(rows []meta.Row, members map[uint64]peerInfo, removed map[uint64]struct{}) []byte {
 	b := protowire.AppendTag(nil, 1, protowire.VarintType)
 	b = protowire.AppendVarint(b, snapshotFormatVersion)
 	for _, r := range rows {
@@ -160,50 +162,64 @@ func encodeSnapshotData(rows []meta.Row, members map[uint64]peerInfo) []byte {
 		b = protowire.AppendTag(b, 3, protowire.BytesType)
 		b = protowire.AppendBytes(b, encodeMember(id, members[id]))
 	}
+	for _, id := range slices.Sorted(maps.Keys(removed)) {
+		b = protowire.AppendTag(b, 4, protowire.VarintType)
+		b = protowire.AppendVarint(b, id)
+	}
 	return b
 }
 
-// decodeSnapshotData rebuilds a store and the address book from a snapshot
-// payload.
-func decodeSnapshotData(b []byte) (*meta.Store, map[uint64]peerInfo, error) {
+// decodeSnapshotData rebuilds a store, the address book, and the removed-ID
+// tombstone from a snapshot payload.
+func decodeSnapshotData(b []byte) (*meta.Store, map[uint64]peerInfo, map[uint64]struct{}, error) {
 	store := meta.NewStore()
 	members := make(map[uint64]peerInfo)
+	removed := make(map[uint64]struct{})
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
-			return nil, nil, protowire.ParseError(n)
+			return nil, nil, nil, protowire.ParseError(n)
 		}
 		b = b[n:]
+		if num == 4 && typ == protowire.VarintType {
+			id, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return nil, nil, nil, protowire.ParseError(n)
+			}
+			b = b[n:]
+			removed[id] = struct{}{}
+			continue
+		}
 		if (num == 2 || num == 3) && typ == protowire.BytesType {
 			v, n := protowire.ConsumeBytes(b)
 			if n < 0 {
-				return nil, nil, protowire.ParseError(n)
+				return nil, nil, nil, protowire.ParseError(n)
 			}
 			b = b[n:]
 			if num == 3 {
 				id, info, err := decodeMember(v)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				members[id] = info
 				continue
 			}
 			key, value, err := decodeSnapshotRow(v)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if err := store.Restore(key, value); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			continue
 		}
 		n = protowire.ConsumeFieldValue(num, typ, b)
 		if n < 0 {
-			return nil, nil, protowire.ParseError(n)
+			return nil, nil, nil, protowire.ParseError(n)
 		}
 		b = b[n:]
 	}
-	return store, members, nil
+	return store, members, removed, nil
 }
 
 // encodeMember serializes one Member record (see the package sketch): a

@@ -825,6 +825,61 @@ func TestRemoveVoterRefillsFromLearners(t *testing.T) {
 	c.converged(model)
 }
 
+// TestRemovedNodeCannotRejoin: a removed node, left running (as a real
+// decommissioned node would be until stopped), keeps sending admit requests —
+// admission is joiner-driven. The removed-ID tombstone (ADR-0004) must keep it
+// out for good: the leader refuses to re-admit an evicted ID. A legitimate
+// return is a fresh `cluster join` with a new ID, not the dead one.
+func TestRemovedNodeCannotRejoin(t *testing.T) {
+	c := newCluster(t, 23, sim.NetConfig{
+		MinLatency: time.Millisecond, MaxLatency: 6 * time.Millisecond,
+	}).start()
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: "bkt"})
+
+	c.addNode(4)
+	c.waitMembers(4, 4) // node 4 caught up and promoted into the under-cap vacancy
+
+	// Remove node 4, but unlike the removeNode helper do not crash it: a live
+	// removed node is exactly what the tombstone defends against.
+	lead := c.leader()
+	for range 50 {
+		if err := c.nodes[lead].RemoveNode(4); err == nil {
+			break
+		}
+		lead = c.leader()
+	}
+	gone := false
+	for range 4000 {
+		c.s.Run(tick)
+		if !hasMember(c.nodes[c.leader()].Members(), 4) {
+			gone = true
+			break
+		}
+	}
+	if !gone {
+		t.Fatal("node 4 was never removed")
+	}
+
+	// Node 4 keeps asking to rejoin. Run well past many admit cooldowns: the
+	// tombstone must hold, on the leader and on every replica.
+	for range 3000 {
+		c.s.Run(tick)
+		for id, n := range c.nodes {
+			if c.down[id] {
+				continue
+			}
+			if hasMember(n.Members(), 4) {
+				t.Fatalf("removed node 4 rejoined (seen by %d) — tombstone failed", id)
+			}
+		}
+	}
+
+	// And an explicit re-admission is refused at the source.
+	if err := c.nodes[c.leader()].AddNode(4, c.ids[4], ""); err == nil {
+		t.Fatal("AddNode re-admitted a removed node")
+	}
+}
+
 // TestForceNewClusterRecovers: two of three voters die forever — no
 // quorum, no progress, the dark scenario. ForceNewCluster on the
 // survivor's disk rewrites it into a single-voter cluster that keeps all

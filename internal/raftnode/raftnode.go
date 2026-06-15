@@ -102,6 +102,13 @@ type Config struct {
 	// nil.
 	OnMembershipChange func(members []Member)
 
+	// OnRemoved, when set, is called on the node's loop when this node applies
+	// the configuration change that removes itself — the cluster has evicted it
+	// (ADR-0004). The composition root stops the node; the removal is durable
+	// regardless (a removed ID is tombstoned, so it cannot re-admit). Nil under
+	// the simulator.
+	OnRemoved func()
+
 	// Persister, when set, is the durable metadata store (BadgerDB in
 	// production, ADR-0005) this replica makes authoritative on boot: every
 	// applied entry commits to it together with the entry's Raft index, and
@@ -166,6 +173,7 @@ type Node struct {
 	snapIndex uint64
 	confState raftpb.ConfState
 	peers     map[uint64]peerInfo           // the address book: seeded by Config.Peers/Dials, maintained by conf changes and snapshots
+	removed   map[uint64]struct{}           // tombstone: raft IDs evicted from the cluster, never re-admitted (carried in snapshots)
 	waiters   map[uint64][]func(any, error) // log index → callbacks for this node's proposals
 	proposing []func(any, error)            // accepted by Propose, not yet paired to an index
 
@@ -191,6 +199,7 @@ func New(cfg Config) (*Node, error) {
 		cfg:     cfg,
 		storage: raft.NewMemoryStorage(),
 		peers:   make(map[uint64]peerInfo),
+		removed: make(map[uint64]struct{}),
 		waiters: make(map[uint64][]func(any, error)),
 		store:   meta.NewStore(),
 	}
@@ -408,7 +417,7 @@ func (n *Node) adoptStore(store *meta.Store, index uint64) {
 // at or beyond this snapshot's index, in which case it is kept as-is and the
 // tail above it is replayed.
 func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
-	store, members, err := decodeSnapshotData(snap.Data)
+	store, members, removed, err := decodeSnapshotData(snap.Data)
 	if err != nil {
 		return fmt.Errorf("snapshot data: %w", err)
 	}
@@ -422,6 +431,7 @@ func (n *Node) restoreSnapshot(snap raftpb.Snapshot) error {
 		n.adoptStore(store, s)
 	}
 	maps.Copy(n.peers, members)
+	maps.Copy(n.removed, removed) // tombstones only accumulate
 	n.applied = s
 	n.snapIndex = s
 	n.confState = snap.Metadata.ConfState
@@ -518,6 +528,12 @@ func (n *Node) isMember(id uint64) bool {
 func (n *Node) AddNode(id uint64, addr seam.NodeID, dial string) error {
 	if n.isMember(id) {
 		return nil
+	}
+	if _, gone := n.removed[id]; gone {
+		// A removed node is tombstoned: it (or its restarted self) keeps sending
+		// admit requests, but the cluster never takes an evicted ID back. A
+		// legitimate rejoin comes through `cluster join` with a fresh ID.
+		return fmt.Errorf("raftnode: node %d was removed and cannot rejoin", id)
 	}
 	return n.proposeConfChange(raftpb.ConfChange{
 		Type: raftpb.ConfChangeAddLearnerNode, NodeID: id,
@@ -762,7 +778,7 @@ func (n *Node) maybeSnapshot() {
 		return // nothing newer than the standing snapshot
 	}
 	n.confChanged = false
-	snap, err := n.storage.CreateSnapshot(n.applied, &n.confState, encodeSnapshotData(n.store.Dump(), n.peers))
+	snap, err := n.storage.CreateSnapshot(n.applied, &n.confState, encodeSnapshotData(n.store.Dump(), n.peers, n.removed))
 	if err != nil {
 		panic(fmt.Sprintf("raftnode %d: create snapshot: %v", n.cfg.ID, err))
 	}
@@ -866,10 +882,18 @@ func (n *Node) applyEntry(e raftpb.Entry) {
 			}
 		case raftpb.ConfChangeRemoveNode:
 			delete(n.peers, cc.NodeID)
+			// Tombstone the evicted ID so the joiner-driven admit path can never
+			// take it back (the removed node keeps asking until it is stopped).
+			n.removed[cc.NodeID] = struct{}{}
 		}
 		n.confState = *n.rn.ApplyConfChange(cc)
 		n.confChanged = true
 		n.notifyMembership()
+		if cc.Type == raftpb.ConfChangeRemoveNode && cc.NodeID == n.cfg.ID && n.cfg.OnRemoved != nil {
+			// This node just evicted itself: tell the composition root to stop.
+			// The tombstone above makes the removal durable either way.
+			n.cfg.OnRemoved()
+		}
 	case raftpb.EntryNormal:
 		if len(e.Data) == 0 {
 			return // the leader's commit-barrier no-op

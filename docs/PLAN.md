@@ -21,20 +21,11 @@ repair outcomes, the PUT skip, and the `cluster status` STATE column) have all
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Drained-node removal** — transition tracking has landed end to end (see git
-  history across `place`/`meta`/`coord`/`cluster`): `cluster drain` opens a layout
-  transition on the subtractive change, the leader's repair sweep migrates the
-  node's shards to the rest of the cluster (a copy old→new, not a rebuild), and
-  closes the transition once a sweep converges — one drain at a time, additive
-  changes (joins, weight) still riding rebuild-from-k so formation never stalls.
-  A fully drained node then holds no shards but is still a Raft member; the
-  remaining step is the operator command to remove it from membership
-  (`raftnode.RemoveNode` exists, no CLI yet) — now a safe, additive change because
-  the data already moved. (Evacuation is only complete when the active node count
-  still meets the EC width; below that the draining node stays a last-resort
-  holder, by design — durability is never traded for avoidance.)
 - **Repair re-encode** — existing data climbs to the active storage profile as the
-  cluster grows.
+  cluster grows. This is also what would let a cluster shrink *below* an existing
+  object's width: today `cluster remove` refuses that (durability is never traded
+  — it requires the node be drained and empty, i.e. the remaining nodes still hold
+  every object at full width), because k is never downgraded in place.
 
 ## Later versions
 
