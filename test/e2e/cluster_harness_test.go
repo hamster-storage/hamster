@@ -16,6 +16,8 @@ import (
 // the S3 endpoints of the nodes still running.
 type cluster struct {
 	t        *testing.T
+	root     string
+	env      []string
 	nodes    []string
 	dirs     map[string]string
 	procs    map[string]*proc
@@ -37,6 +39,8 @@ func startCluster(t *testing.T, name string, n int, env []string) *cluster {
 	root := t.TempDir()
 	c := &cluster{
 		t:       t,
+		root:    root,
+		env:     env,
 		dirs:    map[string]string{},
 		procs:   map[string]*proc{},
 		s3Addrs: map[string]string{},
@@ -91,4 +95,35 @@ func (c *cluster) leaderS3() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.s3Addrs[leaderOf(rows)]
+}
+
+// join brings up a new node and joins it with a fresh token, serving S3.
+// extraArgs carries flags like -replaces. It returns once the process is
+// started — not yet a settled member; the caller waits on status.
+func (c *cluster) join(id string, extraArgs ...string) {
+	c.t.Helper()
+	token := strings.TrimSpace(run(c.t, "cluster", "token", "-data-dir", c.adminDir))
+	dir := filepath.Join(c.root, id)
+	s3 := freeAddr(c.t)
+	args := append([]string{"cluster", "run", "-data-dir", dir, "-node", id,
+		"-listen", freeAddr(c.t), "-token", token, "-s3", s3}, extraArgs...)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dirs[id] = dir
+	c.s3Addrs[id] = s3
+	c.procs[id] = start(c.t, c.env, args...)
+	for _, n := range c.nodes {
+		if n == id {
+			return
+		}
+	}
+	c.nodes = append(c.nodes, id)
+}
+
+// markStopped drops a node from the alive set — for one the cluster evicted and
+// that has self-stopped.
+func (c *cluster) markStopped(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.procs[id] = nil
 }
