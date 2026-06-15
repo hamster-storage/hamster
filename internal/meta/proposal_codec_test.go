@@ -48,6 +48,9 @@ func fullProposals() []any {
 		RegisterNode{ProposedAtUnixMS: 1700000000014, NodeID: "n1", Host: "boxA", Zone: "z1", Capacity: 4},
 		SetNodeDraining{ProposedAtUnixMS: 1700000000015, NodeID: "n1", Draining: true},
 		SetNodeReplacedBy{ProposedAtUnixMS: 1700000000016, NodeID: "n1", ReplacedBy: "n7"},
+		ReEncodeObject{ProposedAtUnixMS: 1700000000017, Bucket: "docs", Key: "dir/report.pdf",
+			VersionID: vid, DataID: did, ECDataShards: 3, ECParityShards: 2,
+			ShardChecksums: [][]byte{{0x51}, {0x52}, {0x53}, {0x54}, {0x55}}},
 	}
 }
 
@@ -128,9 +131,9 @@ func TestProposalDecodeErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":      {},
 		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		// Field 19 is the next unassigned command slot — a newer node's
+		// Field 20 is the next unassigned command slot — a newer node's
 		// command this build does not know, which must refuse, not half-apply.
-		"unknown_command": encode(envelope(19)),
+		"unknown_command": encode(envelope(20)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -142,7 +145,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(19)))
+	_, err := DecodeProposal(encode(envelope(20)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

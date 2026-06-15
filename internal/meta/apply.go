@@ -280,6 +280,38 @@ func (s *Store) ApplyUpdateLegalHold(p UpdateLegalHold) (err error) {
 	return nil
 }
 
+// ApplyReEncodeObject rewrites a version's EC layout to a new profile (ADR-0004,
+// ADR-0015) — a physical re-representation, not a content edit. Only the data-
+// addressing and EC fields move; Size, ETag, ObjectChecksum, and the object-lock
+// fields are left exactly as they are, so it is COMPLIANCE-safe (it can run on a
+// locked version because it neither deletes the object nor shortens retention).
+func (s *Store) ApplyReEncodeObject(p ReEncodeObject) (err error) {
+	defer s.txn(&err)()
+	row, ok := s.kv.get(versionRowKey(p.Bucket, p.Key, p.VersionID))
+	if !ok {
+		return ErrNoSuchVersion
+	}
+	entry := row.(VersionEntry)
+	if entry.Kind != KindObject || len(entry.Parts) > 0 {
+		// Delete markers and multipart objects have no single whole-object EC
+		// layout to rewrite.
+		return ErrInvalidReEncode
+	}
+	if p.ECDataShards == 0 || int(p.ECDataShards+p.ECParityShards) != len(p.ShardChecksums) {
+		return ErrInvalidReEncode
+	}
+	entry.DataID = p.DataID
+	entry.ECDataShards = p.ECDataShards
+	entry.ECParityShards = p.ECParityShards
+	sc := make([][]byte, len(p.ShardChecksums))
+	for i, c := range p.ShardChecksums {
+		sc[i] = append([]byte(nil), c...)
+	}
+	entry.ShardChecksums = sc
+	s.kv.set(versionRowKey(p.Bucket, p.Key, p.VersionID), entry)
+	return nil
+}
+
 // lockTarget validates and fetches the version a lock mutation aims at:
 // the bucket must be lock-enabled and the target a real object, not a
 // delete marker.

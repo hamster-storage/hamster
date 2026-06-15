@@ -41,6 +41,8 @@ func (s *Store) Apply(p any) (any, error) {
 		return nil, s.ApplySetNodeDraining(c)
 	case SetNodeReplacedBy:
 		return nil, s.ApplySetNodeReplacedBy(c)
+	case ReEncodeObject:
+		return nil, s.ApplyReEncodeObject(c)
 	default:
 		return nil, fmt.Errorf("meta: Apply on unknown proposal type %T", p)
 	}
