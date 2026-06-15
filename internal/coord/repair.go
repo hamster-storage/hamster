@@ -56,7 +56,20 @@ type RepairReport struct {
 // done fires exactly once on the loop. Only one sweep may run at a time
 // per coordinator.
 func (c *Coordinator) RepairSweep(done func(RepairReport, error)) {
-	op := &sweepOp{c: c, done: done}
+	c.runSweep(false, done)
+}
+
+// Optimize runs a sweep that also re-encodes every object up to the active-count
+// storage profile (ADR-0004, ADR-0031) — the explicit operator step that spreads
+// existing data across a grown cluster. Otherwise identical to RepairSweep: it
+// still scrubs, rebuilds, and (during a transition) migrates. One sweep widens
+// every under-width object; a second re-encodes nothing.
+func (c *Coordinator) Optimize(done func(RepairReport, error)) {
+	c.runSweep(true, done)
+}
+
+func (c *Coordinator) runSweep(optimize bool, done func(RepairReport, error)) {
+	op := &sweepOp{c: c, done: done, optimize: optimize}
 	store := c.cfg.Raft.Store()
 	for _, b := range store.ListBuckets() {
 		bucket := b.Name
@@ -80,11 +93,28 @@ type sweepItem struct {
 	entry       meta.VersionEntry
 }
 
+// reEncode rewrites the current item to a new profile — down for a shrink that no
+// longer fits, up for an optimize after growth — and advances. Both share
+// ReEncode's physical re-representation: the bytes, and so the object's identity
+// and lock, are unchanged.
+func (op *sweepOp) reEncode(tk, tm int) {
+	op.c.ReEncode(op.item.bucket, op.item.key, op.item.entry, tk, tm, func(err error) {
+		if err != nil {
+			op.report.Failed = append(op.report.Failed,
+				fmt.Sprintf("%s/%s: re-encode: %v", op.item.bucket, op.item.key, err))
+		} else {
+			op.report.ReEncoded++
+		}
+		op.nextItem()
+	})
+}
+
 type sweepOp struct {
-	c      *Coordinator
-	done   func(RepairReport, error)
-	work   []sweepItem
-	report RepairReport
+	c        *Coordinator
+	done     func(RepairReport, error)
+	optimize bool // also re-encode under-width objects up to the active profile
+	work     []sweepItem
+	report   RepairReport
 
 	// Per-item state, reset by startItem.
 	item    sweepItem
@@ -140,23 +170,28 @@ func (op *sweepOp) nextItem() {
 		op.itemFailed(fmt.Errorf("placing: no cluster layout"))
 		return
 	}
+	active := layout.ActiveCount()
 	// Downsize (ADR-0004, ADR-0015): an object whose width no longer fits the
 	// active node count is re-encoded down to the active-count profile — the
 	// data step of a shrink. ReEncode moves it off the leaving node by writing
 	// the narrower shards to the active set; healing/migrating it at the old
-	// width would only chase a placement that cannot exist.
-	if active := layout.ActiveCount(); op.width > active {
+	// width would only chase a placement that cannot exist. Always — a shrink
+	// must complete whether or not the sweep was asked to optimize.
+	if op.width > active {
 		tk, tm := ec.AutoProfile(active).Params(e.Size)
-		op.c.ReEncode(op.item.bucket, op.item.key, e, tk, tm, func(err error) {
-			if err != nil {
-				op.report.Failed = append(op.report.Failed,
-					fmt.Sprintf("%s/%s: re-encode: %v", op.item.bucket, op.item.key, err))
-			} else {
-				op.report.ReEncoded++
-			}
-			op.nextItem()
-		})
+		op.reEncode(tk, tm)
 		return
+	}
+	// Upsize (ADR-0004, ADR-0031): an object encoded narrower than the active
+	// profile is widened to it — the data step of growing into a larger cluster.
+	// Only on an explicit optimize, never automatic: growth keeps data readable at
+	// its old width, so re-spreading it across the new nodes is the operator's
+	// call (cluster optimize), not a side effect of every repair sweep.
+	if op.optimize {
+		if tk, tm := ec.AutoProfile(active).Params(e.Size); tk+tm > op.width {
+			op.reEncode(tk, tm)
+			return
+		}
 	}
 	// Locate resolves the new placement and, while a layout transition is in
 	// flight, the old one (ADR-0004). In steady state oldNodes is nil and the

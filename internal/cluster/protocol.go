@@ -107,6 +107,7 @@ const (
 	reqStatus       = 2
 	reqDrain        = 3
 	reqRemove       = 4
+	reqOptimize     = 5
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -177,6 +178,15 @@ type removeRequest struct {
 type removeResponse struct {
 	Error  string
 	Leader string // the leader's dial address when the asked node is not the leader
+}
+
+// optimizeResponse reports one optimize sweep (ADR-0004, ADR-0031): how many
+// objects it examined and how many it re-encoded up to the active profile.
+type optimizeResponse struct {
+	Error     string
+	Leader    string // the leader's dial address when the asked node is not the leader
+	Objects   uint64
+	ReEncoded uint64
 }
 
 // writeFrame writes one length-framed message.
@@ -491,6 +501,32 @@ func decodeRemoveResponse(buf []byte) (removeResponse, error) {
 			r.Error = string(f.b)
 		case 3:
 			r.Leader = string(f.b)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeOptimizeResponse(r optimizeResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	b = putString(b, 3, r.Leader)
+	b = putUint(b, 4, r.Objects)
+	return putUint(b, 5, r.ReEncoded)
+}
+
+func decodeOptimizeResponse(buf []byte) (optimizeResponse, error) {
+	var r optimizeResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Leader = string(f.b)
+		case 4:
+			r.Objects = f.u
+		case 5:
+			r.ReEncoded = f.u
 		}
 		return nil
 	})

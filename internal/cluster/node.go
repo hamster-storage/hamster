@@ -675,6 +675,8 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeDrainResponse(n.handleDrain(conn, payload)))
 	case reqRemove:
 		_ = writeFrame(conn, encodeRemoveResponse(n.handleRemove(conn, payload)))
+	case reqOptimize:
+		_ = writeFrame(conn, encodeOptimizeResponse(n.handleOptimize(conn)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }
@@ -908,6 +910,76 @@ func (n *Node) removeAttempt(nodeID string) error {
 	case <-time.After(10 * time.Second):
 		return fmt.Errorf("cluster: remove timed out")
 	}
+}
+
+// handleOptimize serves an optimize request (ADR-0004, ADR-0031): a leader-only
+// sweep that re-encodes existing data up to the active-count storage profile, so
+// objects written when the cluster was smaller spread across the nodes added
+// since. Authenticated by a cluster certificate like drain; a non-leader answers
+// with the leader's dial address so the client can retry there.
+func (n *Node) handleOptimize(conn *tls.Conn) optimizeResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return optimizeResponse{Error: "optimize requires a cluster certificate"}
+	}
+	// An optimize sweep re-encodes every under-width object and can run far longer
+	// than the default control deadline; extend it for the duration of the sweep.
+	conn.SetDeadline(time.Now().Add(30 * time.Minute))
+	switch rep, err := n.runOptimize(); {
+	case errors.Is(err, raftnode.ErrNotLeader):
+		resp := optimizeResponse{Error: "this node is not the metadata leader"}
+		for _, m := range n.members() {
+			if m.Leader {
+				resp.Leader = m.Dial
+				break
+			}
+		}
+		return resp
+	case err != nil:
+		return optimizeResponse{Error: err.Error()}
+	default:
+		resp := optimizeResponse{Objects: uint64(rep.Objects), ReEncoded: uint64(rep.ReEncoded)}
+		if len(rep.Failed) > 0 {
+			resp.Error = fmt.Sprintf("%d of %d objects could not be re-encoded: %s",
+				len(rep.Failed), rep.Objects, strings.Join(rep.Failed, "; "))
+		}
+		return resp
+	}
+}
+
+// runOptimize starts one optimize sweep on the loop and waits for it to finish.
+// Leader-only (re-encode proposes through Raft), refused while any layout
+// operation is in flight or another sweep runs — one heavy data movement at a
+// time. Runs off the loop (the control handler's goroutine), so it may wait.
+func (n *Node) runOptimize() (coord.RepairReport, error) {
+	if n.coord == nil {
+		return coord.RepairReport{}, errors.New("this node has no data-path coordinator")
+	}
+	type result struct {
+		rep coord.RepairReport
+		err error
+	}
+	ch := make(chan result, 1)
+	n.loop.Post(func() {
+		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
+			ch <- result{err: raftnode.ErrNotLeader}
+			return
+		}
+		if reason := n.layoutOpInProgress(""); reason != "" {
+			ch <- result{err: fmt.Errorf("%s; wait for it to finish before optimizing", reason)}
+			return
+		}
+		if n.sweeping {
+			ch <- result{err: errors.New("a repair or optimize sweep is already running")}
+			return
+		}
+		n.sweeping = true
+		n.coord.Optimize(func(rep coord.RepairReport, err error) {
+			n.sweeping = false
+			ch <- result{rep: rep, err: err}
+		})
+	})
+	r := <-ch
+	return r.rep, r.err
 }
 
 // removeBlockedReason returns a non-empty explanation when a node may not be

@@ -102,7 +102,8 @@ Two ways to run Hamster, and they don't convert in place.
 
 | Operation | How | What happens |
 |---|---|---|
-| **Add a node** | `cluster run -token …` | joins as a learner, auto-promoted to voter (five-voter cap); placement rebalances data onto it — no reshape |
+| **Add a node** | `cluster run -token …` | joins as a learner, auto-promoted to voter (five-voter cap); existing data migrates onto it at its current width — no reshape |
+| **Grow into the new size** | `cluster optimize` | re-encodes existing data *up* to the larger cluster's profile, spreading objects written when it was smaller across the new nodes (run after adding nodes — never automatic) |
 | **Reboot for maintenance** | just reboot it | erasure coding tolerates a node briefly down (a 4+2 object survives two); repair rebuilds whatever was written during the outage when it returns — no drain needed |
 | **Take a node out of service** | `cluster drain <node>` | new writes steer off it and its shards migrate away; **reversible** with `cluster undrain` |
 | **Replace a node** | `cluster run -token … -replaces <old>` | swaps a fresh node in for an existing one at the **same cluster size** — same profile, no re-encode |
