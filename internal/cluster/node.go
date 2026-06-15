@@ -35,6 +35,15 @@ var (
 	peerSyncEvery = time.Second
 )
 
+// Background-scrub pacing (ADR-0009). Gentle by intent: the scrub is a safety
+// net against bitrot, not a hot path, so it walks objects unhurriedly and idles
+// between passes. Byte-rate throttling and an operator-tunable rate arrive with
+// the operational repair system; these are the v0.4 dev-preview defaults.
+const (
+	scrubPace         = 500 * time.Millisecond
+	scrubPassInterval = 15 * time.Second
+)
+
 // Node is one running cluster node: the Raft-replicated metadata plane over
 // the production adapters. The join/status protocol shares the peer transport's
 // port (ADR-0030), so a node binds one cluster address, not two. In v0.2 this
@@ -231,6 +240,17 @@ func Run(dataDir string) (*Node, error) {
 					Members:        placeNodes(cl.EffectiveNodes()),
 					Previous:       placeNodes(cl.Previous), // nil in steady state
 				}, true
+			},
+		})
+		// The continuous background scrubber (ADR-0009): every node starts it, but
+		// only the leader actually scrubs (it gates on leadership), so this simply
+		// follows leadership without extra wiring. It finds bitrot and rebuilds
+		// lost shards on its own, paced object-by-object.
+		n.coord.StartScrub(coord.ScrubConfig{
+			Pace:         scrubPace,
+			PassInterval: scrubPassInterval,
+			OnHeal: func(bucket, key string) {
+				log.Printf("cluster: scrub repaired %s/%s", bucket, key)
 			},
 		})
 		built <- err

@@ -33,6 +33,10 @@ type ScrubConfig struct {
 	// PassInterval is the idle delay after a full pass (or when there is nothing
 	// to scrub) before the next pass begins.
 	PassInterval time.Duration
+	// OnHeal, if set, is called on the loop when the scrubber rebuilt, migrated,
+	// or re-encoded a shard of one object — the hook the cluster layer uses to log
+	// repair activity. coord keeps no logger of its own.
+	OnHeal func(bucket, key string)
 }
 
 type scrubber struct {
@@ -135,6 +139,9 @@ func (s *scrubber) tick() {
 			s.c.endSweep()
 			if r.RebuiltShards > 0 || r.MigratedShards > 0 || r.ReEncoded > 0 {
 				s.healed++
+				if s.cfg.OnHeal != nil {
+					s.cfg.OnHeal(item.bucket, item.key)
+				}
 			}
 			next := s.cfg.Pace
 			if len(s.pending) == 0 {
