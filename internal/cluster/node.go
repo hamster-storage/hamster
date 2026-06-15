@@ -484,20 +484,23 @@ func (n *Node) reconcileLayout() {
 	if ok && slices.Equal(cur.EffectiveNodes(), desired) {
 		return // already current, no transition
 	}
-	// A layout change relocates shards — placement is positional (ADR-0004). A
-	// subtractive change (an actively-placed node draining out or removed) would
-	// strand existing data, so it opens a transition: the prior member set is
-	// carried as Previous, so reads dual-read and repair migrates shards old→new
-	// before the old set is dropped. Additive changes (a node joining, a drain
-	// undone) ride the existing rebuild-from-k repair, as capacity weighting
-	// does, so cluster formation never serializes behind a migration.
+	// A layout change relocates shards — placement is positional (ADR-0004), so
+	// any change to the member set reshuffles which node holds shard i. That
+	// strands existing data unless reads can find it at its old home while repair
+	// migrates it, so the change opens a transition carrying the prior member set
+	// as Previous. Both directions need it: a node leaving (subtractive), and a
+	// node joining (additive) — a join inserts at its rendezvous rank and shifts
+	// the positional assignment of every later shard, beyond what rebuild-from-k
+	// can heal. The exception is an empty cluster: with no objects at risk there
+	// is nothing to migrate, so it swaps outright — formation (all additive joins)
+	// never serializes behind a transition.
 	next := uint64(1)
 	pc := uint32(place.DefaultPartitionCount)
 	var previous []meta.LayoutNode
 	if ok {
 		next = cur.Version + 1
 		pc = cur.PartitionCount
-		if subtractiveLayout(cur.EffectiveNodes(), desired) {
+		if subtractiveLayout(cur.EffectiveNodes(), desired) || n.hasStoredObjects() {
 			previous = cur.EffectiveNodes()
 		}
 	}
@@ -937,6 +940,28 @@ func (n *Node) removeBlockedReason(nodeID string) string {
 		return fmt.Sprintf("removing %s would leave %d active node(s), fewer than the widest stored object needs (%d shards); its data has not fully migrated off (re-encoding existing data to a smaller profile is not yet available)", nodeID, active, w)
 	}
 	return ""
+}
+
+// hasStoredObjects reports whether any erasure-coded object exists — the cheap
+// "is there data at risk" check that decides whether an additive layout change
+// opens a transition (ADR-0004). Stops at the first object, so it is cheap on an
+// empty store (formation) and only ever runs when the layout is changing.
+func (n *Node) hasStoredObjects() bool {
+	store := n.raft.Store()
+	found := false
+	for _, b := range store.ListBuckets() {
+		store.ScanVersions(b.Name, func(_ string, e meta.VersionEntry) bool {
+			if e.Kind == meta.KindObject && len(e.Parts) == 0 {
+				found = true
+				return false // first object found — stop the scan
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // maxStoredWidth is the largest shard width (k+m) of any stored object version —
