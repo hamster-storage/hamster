@@ -57,6 +57,8 @@ type Node struct {
 	ready     chan struct{} // closed once the node is built; gates control conns
 	stopSync  chan struct{}
 
+	sweeping bool // loop-owned: a transition repair sweep is in flight (one at a time)
+
 	issueMu sync.Mutex // serializes joins: ID allocation and its durable record
 	stopped sync.Once
 }
@@ -351,7 +353,10 @@ func (n *Node) syncPeers() {
 			// Drive the stored cluster layout toward membership. Only the
 			// leader's proposal commits; every other node's is a benign
 			// no-op (ADR-0028). This is what installs the first layout once
-			// a leader exists and advances it as the cluster forms.
+			// a leader exists and advances it as the cluster forms. While a
+			// transition is in flight reconcileLayout also drives its migration
+			// and close, so no second per-tick post is needed — adding one
+			// perturbs the conf-change pipeline enough to stall formation.
 			n.loop.Post(n.reconcileLayout)
 		}
 	}
@@ -430,21 +435,120 @@ func (n *Node) reconcileLayout() {
 	slices.SortFunc(desired, func(a, b meta.LayoutNode) int { return strings.Compare(a.ID, b.ID) })
 
 	cur, ok := n.raft.Store().ClusterLayout()
-	if ok && slices.Equal(cur.EffectiveNodes(), desired) {
-		return // already current
+	// One transition at a time — the single-pair model (ADR-0004). While one is
+	// in flight, drive it to completion (migrate shards to their new home, then
+	// close it) and open nothing new: a queued change waits for the open one to
+	// finish, then opens on a later tick. Driven from here rather than its own
+	// per-tick post — a second post perturbs the conf-change pipeline enough to
+	// stall formation.
+	if ok && len(cur.Previous) > 0 {
+		n.driveTransitionClose()
+		return
 	}
+	if ok && slices.Equal(cur.EffectiveNodes(), desired) {
+		return // already current, no transition
+	}
+	// A layout change relocates shards — placement is positional (ADR-0004). A
+	// subtractive change (an actively-placed node draining out or removed) would
+	// strand existing data, so it opens a transition: the prior member set is
+	// carried as Previous, so reads dual-read and repair migrates shards old→new
+	// before the old set is dropped. Additive changes (a node joining, a drain
+	// undone) ride the existing rebuild-from-k repair, as capacity weighting
+	// does, so cluster formation never serializes behind a migration.
 	next := uint64(1)
 	pc := uint32(place.DefaultPartitionCount)
+	var previous []meta.LayoutNode
 	if ok {
 		next = cur.Version + 1
 		pc = cur.PartitionCount
+		if subtractiveLayout(cur.EffectiveNodes(), desired) {
+			previous = cur.EffectiveNodes()
+		}
 	}
 	n.raft.Propose(meta.SetClusterLayout{
 		ProposedAtUnixMS: n.clock.Now().UnixMilli(),
 		Version:          next,
 		PartitionCount:   pc,
 		Nodes:            desired,
+		Previous:         previous,
 	}, func(any, error) {}) // stale / not-leader outcomes are benign
+}
+
+// subtractiveLayout reports whether moving from old to new takes a node that was
+// actively placed (present and not draining) and drops or demotes it (absent, or
+// now draining). Those changes relocate shards off a node that may be leaving,
+// so they open a transition (ADR-0004); pure additions — a new node, or a drain
+// undone — do not, and ride the ordinary rebuild-from-k repair.
+func subtractiveLayout(old, next []meta.LayoutNode) bool {
+	activeIn := func(ns []meta.LayoutNode, id string) bool {
+		for _, m := range ns {
+			if m.ID == id {
+				return !m.Draining
+			}
+		}
+		return false
+	}
+	for _, o := range old {
+		if o.Draining {
+			continue
+		}
+		if !activeIn(next, o.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+// driveTransitionClose advances an in-flight layout transition (ADR-0004),
+// called from reconcileLayout only once it has confirmed a transition is open.
+// It sweeps the cluster — which during a transition migrates shards from their
+// old home to their new one — and, once a sweep finds nothing left to move and
+// nothing it cannot heal, closes the transition by installing a layout with
+// Previous dropped. Gated so only the leader sweeps and only one sweep runs at a
+// time. Production scrub scheduling outside a transition is a later pass.
+func (n *Node) driveTransitionClose() {
+	if n.coord == nil || n.sweeping {
+		return
+	}
+	if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
+		return
+	}
+	n.sweeping = true
+	n.coord.RepairSweep(func(rep coord.RepairReport, err error) {
+		n.sweeping = false
+		if err != nil {
+			log.Printf("cluster: transition repair sweep failed: %v", err)
+			return
+		}
+		// Converged: a sweep that moved nothing and left nothing unhealable
+		// means every shard is at its new home — the old set is dead weight.
+		if rep.MigratedShards == 0 && rep.RebuiltShards == 0 &&
+			len(rep.Unrepairable) == 0 && len(rep.Failed) == 0 {
+			n.closeTransition()
+		}
+	})
+}
+
+// closeTransition installs a layout that drops Previous, ending the rebalance.
+// Re-reads the layout so the version is fresh and the close is a no-op if the
+// transition already closed or changed under a slow sweep.
+func (n *Node) closeTransition() {
+	cur, ok := n.raft.Store().ClusterLayout()
+	if !ok || len(cur.Previous) == 0 {
+		return
+	}
+	version := cur.Version + 1
+	n.raft.Propose(meta.SetClusterLayout{
+		ProposedAtUnixMS: n.clock.Now().UnixMilli(),
+		Version:          version,
+		PartitionCount:   cur.PartitionCount,
+		Nodes:            cur.EffectiveNodes(),
+		Previous:         nil,
+	}, func(_ any, err error) {
+		if err == nil {
+			log.Printf("cluster: layout transition complete (version %d)", version)
+		}
+	})
 }
 
 // upsertLabel records a member's labels by node ID, replacing any prior entry
@@ -539,10 +643,17 @@ func (n *Node) handleDrain(conn *tls.Conn, payload []byte) drainResponse {
 
 // proposeSetDraining submits the drain-flag proposal through this node's Raft
 // and waits for its commit. Leader-only: a non-leader's Propose returns
-// ErrNotLeader unchanged for the caller to translate.
+// ErrNotLeader unchanged for the caller to translate. A new drain is refused
+// while one is already underway — one node at a time (drainBlockedReason).
 func (n *Node) proposeSetDraining(nodeID string, draining bool) error {
 	ch := make(chan error, 1)
 	n.loop.Post(func() {
+		if draining {
+			if reason := n.drainBlockedReason(nodeID); reason != "" {
+				ch <- errors.New(reason)
+				return
+			}
+		}
 		n.raft.Propose(meta.SetNodeDraining{
 			ProposedAtUnixMS: n.clock.Now().UnixMilli(), NodeID: nodeID, Draining: draining,
 		}, func(_ any, e error) { ch <- e })
@@ -553,6 +664,25 @@ func (n *Node) proposeSetDraining(nodeID string, draining bool) error {
 	case <-time.After(30 * time.Second):
 		return fmt.Errorf("cluster: drain proposal timed out")
 	}
+}
+
+// drainBlockedReason returns a non-empty explanation when a new drain must be
+// refused: one node drains at a time (ADR-0004, the single-transition model). A
+// layout transition already in flight, or another node already flagged draining
+// (the flag set before its transition has opened), blocks a second so the
+// operator gets a clear error rather than a silent queue. Runs on the loop.
+// Draining multiple nodes at once is future work — the format already supports a
+// set; only the open logic would change. Empty means clear to proceed.
+func (n *Node) drainBlockedReason(nodeID string) string {
+	if cl, ok := n.raft.Store().ClusterLayout(); ok && len(cl.Previous) > 0 {
+		return "a layout transition is already in progress; wait for it to finish before draining another node"
+	}
+	for _, r := range n.raft.Store().Nodes() {
+		if r.Draining && r.NodeID != nodeID {
+			return fmt.Sprintf("node %s is already draining; only one node may drain at a time", r.NodeID)
+		}
+	}
+	return ""
 }
 
 type joinOutcome struct {
