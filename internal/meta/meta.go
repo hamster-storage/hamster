@@ -42,6 +42,7 @@ var (
 	ErrStaleLayout            = errors.New("cluster layout version is not the next generation")
 	ErrInvalidLayout          = errors.New("invalid cluster layout")
 	ErrInvalidNode            = errors.New("invalid node record")
+	ErrInvalidReEncode        = errors.New("version cannot be re-encoded")
 )
 
 // Multipart limits, S3 parity (docs/S3-API.md). Apply enforces both: the

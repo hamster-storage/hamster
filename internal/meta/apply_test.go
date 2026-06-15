@@ -375,3 +375,60 @@ func equal(a, b []string) bool {
 	}
 	return true
 }
+
+// TestApplyReEncodeObject: re-encode rewrites only the EC layout — DataID, the
+// shard counts, and ShardChecksums — leaving content (Size, ETag, checksum) and
+// the object lock untouched, even on a COMPLIANCE-locked version. It is a
+// physical re-representation, not a content edit (ADR-0015).
+func TestApplyReEncodeObject(t *testing.T) {
+	e := newEnv(t)
+	e.mustCreateBucket("docs", true) // lock-enabled → versioning enabled
+	at := e.tick()
+	res, err := e.s.ApplyPutObject(PutObject{
+		ProposedAtUnixMS: at, Bucket: "docs", Key: "report", VersionID: mintAt(at, e.rng),
+		Size: 12345, ETag: []byte{0xE1}, ObjectChecksum: []byte{0xC1},
+		Partition: 7, ECDataShards: 4, ECParityShards: 2,
+		ShardChecksums:    [][]byte{{1}, {2}, {3}, {4}, {5}, {6}},
+		RetentionMode:     RetentionCompliance,
+		RetainUntilUnixMS: at + 1_000_000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vid := res.VersionID
+
+	newDID := mintAt(e.tick(), e.rng)
+	if err := e.s.ApplyReEncodeObject(ReEncodeObject{
+		ProposedAtUnixMS: e.tick(), Bucket: "docs", Key: "report", VersionID: vid,
+		DataID: newDID, ECDataShards: 3, ECParityShards: 2,
+		ShardChecksums: [][]byte{{7}, {8}, {9}, {10}, {11}},
+	}); err != nil {
+		t.Fatalf("re-encode a COMPLIANCE-locked object: %v", err)
+	}
+
+	got, ok := e.s.GetVersion("docs", "report", vid)
+	if !ok {
+		t.Fatal("version gone after re-encode")
+	}
+	// EC layout moved to the new profile.
+	if got.ECDataShards != 3 || got.ECParityShards != 2 || got.DataID != newDID || len(got.ShardChecksums) != 5 {
+		t.Fatalf("EC fields not re-encoded: %+v", got)
+	}
+	// Content and lock untouched.
+	if got.Size != 12345 || string(got.ETag) != "\xE1" || string(got.ObjectChecksum) != "\xC1" {
+		t.Fatalf("re-encode changed content fields: %+v", got)
+	}
+	if got.RetentionMode != RetentionCompliance || got.RetainUntilUnixMS != at+1_000_000 {
+		t.Fatalf("re-encode disturbed the object lock: %+v", got)
+	}
+
+	// A missing version, and a checksum count that disagrees with k+m, are refused.
+	if err := e.s.ApplyReEncodeObject(ReEncodeObject{Bucket: "docs", Key: "report",
+		VersionID: VersionID{0xFF}, ECDataShards: 1, ShardChecksums: [][]byte{{1}}}); !errors.Is(err, ErrNoSuchVersion) {
+		t.Fatalf("re-encode of a missing version: %v", err)
+	}
+	if err := e.s.ApplyReEncodeObject(ReEncodeObject{Bucket: "docs", Key: "report",
+		VersionID: vid, ECDataShards: 3, ECParityShards: 2, ShardChecksums: [][]byte{{1}}}); !errors.Is(err, ErrInvalidReEncode) {
+		t.Fatalf("re-encode with mismatched checksum count: %v", err)
+	}
+}

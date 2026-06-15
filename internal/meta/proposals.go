@@ -123,6 +123,26 @@ type UpdateRetention struct {
 	BypassGovernance  bool
 }
 
+// ReEncodeObject rewrites a committed version's erasure-coded representation to
+// a new storage profile (ADR-0004, ADR-0015): a physical re-representation, not
+// a content edit — the object's bytes, ObjectChecksum, Size, ETag, and object-
+// lock fields are unchanged, and it stays the same version. Only the data-
+// addressing and EC fields move: the new shards live under DataID at the new
+// k+m. The coordinator writes the new shards durably before proposing and drops
+// the old ones only after this commits. Used to step data down to a smaller
+// profile when a cluster shrinks (and up as it grows). COMPLIANCE-safe: it never
+// deletes the object or shortens retention.
+type ReEncodeObject struct {
+	ProposedAtUnixMS int64
+	Bucket           string
+	Key              string
+	VersionID        VersionID
+	DataID           VersionID
+	ECDataShards     uint32
+	ECParityShards   uint32
+	ShardChecksums   [][]byte
+}
+
 // UpdateLegalHold is S3 PutObjectLegalHold. Holds toggle freely by their
 // own rules, independent of retention.
 type UpdateLegalHold struct {

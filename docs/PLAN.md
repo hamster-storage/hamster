@@ -21,21 +21,28 @@ repair outcomes, the PUT skip, and the `cluster status` STATE column) have all
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Repair re-encode + downsize** — existing data re-encoded to a different
-  storage profile, in place. Two directions: climbing *up* as a cluster grows
-  (better efficiency, optional — data is already safe), and stepping *down* so a
-  cluster can shrink *below* an existing object's width. The latter is the
-  operator-facing "downsize": the auto-ladder picks the profile for the target
-  node count (the operator thinks in node counts, not k+m), a re-encode sweep
-  rewrites every object to it (repair-driven, staged-then-marker, COMPLIANCE-safe
-  — same bytes, never deletes/shortens lock), then `cluster drain --reencode`
-  removes the node. Until it lands `cluster remove`/`drain` refuse a shrink that
-  would strand data (k is never downgraded in place). Note the ladder isn't
-  uniform: 6→5 (4+2→3+2) keeps 2-failure tolerance and only costs efficiency, but
-  5→4 (3+2→2+1) drops tolerance to 1 — the confirmation must state the real
-  per-step trade. *Replacing* a node at constant size already works (join with
-  `-replaces <old>`), and needs no re-encode — it's the size-changing case that
-  does.
+- **Repair re-encode + downsize** (in progress) — existing data re-encoded to a
+  different storage profile, in place: stepping *down* so a cluster can shrink
+  *below* an existing object's width (and, optionally, *up* as it grows). A
+  physical re-representation, not a content edit — same bytes, same
+  ObjectChecksum, same object-lock; COMPLIANCE-safe (never deletes/shortens lock,
+  old shards dropped only after new are durable). The slices:
+  - **landed**: the metadata operation — `meta.ReEncodeObject` rewrites a
+    committed version's EC layout (`DataID`, k+m, `ShardChecksums`) and nothing
+    else (`ApplyReEncodeObject`, proven by `TestApplyReEncodeObject` re-encoding a
+    COMPLIANCE-locked object). Architecture-independent foundation.
+  - **next**: the coord `ReEncode` op (fetch → `ec`-decode the framed stream →
+    `ec`-encode at the new profile → write the narrower shards → commit → drop the
+    old), then the repair sweep re-encoding during a downsize (profile follows the
+    active node count; converges, then the node is evacuated), then the CLI —
+    `cluster drain` detects the boundary, prints the before/after profile and the
+    real per-step trade (6→5 keeps 2-failure tolerance, costs efficiency; 5→4
+    drops tolerance to 1), and asks `[y/N]`.
+
+  Until it all lands, `cluster remove`/`drain` refuse a shrink that would strand
+  data (k is never downgraded in place). *Replacing* a node at constant size
+  already works (join with `-replaces <old>`) and needs no re-encode — it's the
+  size-changing case that does.
 
 ## Later versions
 
