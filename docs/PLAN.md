@@ -21,28 +21,16 @@ repair outcomes, the PUT skip, and the `cluster status` STATE column) have all
 landed. Remaining passes, in order — each its own focused change, all building on
 the labeled layout:
 
-- **Repair re-encode + downsize** (in progress) — existing data re-encoded to a
-  different storage profile, in place: stepping *down* so a cluster can shrink
-  *below* an existing object's width (and, optionally, *up* as it grows). A
-  physical re-representation, not a content edit — same bytes, same
-  ObjectChecksum, same object-lock; COMPLIANCE-safe (never deletes/shortens lock,
-  old shards dropped only after new are durable). The slices:
-  - **landed**: the metadata operation — `meta.ReEncodeObject` rewrites a
-    committed version's EC layout (`DataID`, k+m, `ShardChecksums`) and nothing
-    else (`ApplyReEncodeObject`, proven by `TestApplyReEncodeObject` re-encoding a
-    COMPLIANCE-locked object). Architecture-independent foundation.
-  - **next**: the coord `ReEncode` op (fetch → `ec`-decode the framed stream →
-    `ec`-encode at the new profile → write the narrower shards → commit → drop the
-    old), then the repair sweep re-encoding during a downsize (profile follows the
-    active node count; converges, then the node is evacuated), then the CLI —
-    `cluster drain` detects the boundary, prints the before/after profile and the
-    real per-step trade (6→5 keeps 2-failure tolerance, costs efficiency; 5→4
-    drops tolerance to 1), and asks `[y/N]`.
+v0.4's headline work — drain/replace/remove, transition tracking, and downsize
+re-encode ([ADR-0031](adr/0031-reencode-across-profiles.md)) — has landed. What
+remains is the optional other direction:
 
-  Until it all lands, `cluster remove`/`drain` refuse a shrink that would strand
-  data (k is never downgraded in place). *Replacing* a node at constant size
-  already works (join with `-replaces <old>`) and needs no re-encode — it's the
-  size-changing case that does.
+- **Upsize re-encode** — climbing existing data *up* to a larger profile as a
+  cluster grows, for storage efficiency. The same machine as downsize
+  (`coord.ReEncode`), but optional: data is already safe at the smaller profile,
+  so it must never fire automatically on a join (a join can't trigger a full
+  re-encode) — a background, throttled, opt-in pass. Downsize is the safety
+  feature; upsize is the tidy-up.
 
 ## Later versions
 
