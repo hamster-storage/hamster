@@ -11,6 +11,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -271,4 +272,111 @@ func (c *s3Client) getEventually(addrs []string, path string, want []byte) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	c.t.Fatalf("GET %s: no node served the object before the deadline", path)
+}
+
+// tryRun runs the binary and returns its output and error instead of failing —
+// for a command that is expected to be refused until the cluster is ready.
+func tryRun(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	out, err := exec.Command(bin(t), args...).CombinedOutput()
+	return string(out), err
+}
+
+// TestClusterDownsize: a six-node 4+2 cluster shrinks to five. Draining a node
+// crosses a profile boundary, so the cluster re-encodes every object 4+2 → 3+2
+// in place (ADR-0031); once it converges the drained node is removable, and the
+// objects still read — at the new profile, off the five remaining nodes. Proves
+// the whole composition end to end over real processes: the drain CLI's
+// downsize path, the leader's re-encoding sweep, convergence, and removal.
+func TestClusterDownsize(t *testing.T) {
+	const (
+		akid   = "e2e-down"
+		secret = "e2e-down-secret"
+		region = "us-east-1"
+	)
+	env := []string{"HAMSTER_ACCESS_KEY_ID=" + akid, "HAMSTER_SECRET_ACCESS_KEY=" + secret}
+	root := t.TempDir()
+	nodes := []string{"n1", "n2", "n3", "n4", "n5", "n6"}
+	dirs := map[string]string{}
+	procs := map[string]*proc{}
+	s3Addrs := map[string]string{}
+
+	dirs["n1"] = filepath.Join(root, "n1")
+	s3Addrs["n1"] = freeAddr(t)
+	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e-down", "-node", "n1", "-listen", freeAddr(t))
+	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
+	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
+		return len(rows) == 1 && rows[0].leader
+	})
+	for _, id := range nodes[1:] {
+		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		dirs[id] = filepath.Join(root, id)
+		s3Addrs[id] = freeAddr(t)
+		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+			"-listen", freeAddr(t), "-token", token, "-s3", s3Addrs[id])
+	}
+	waitStatus(t, dirs["n1"], "six members, five voters", func(rows []statusRow) bool {
+		return len(rows) == 6 && voterCount(rows) == 5
+	})
+
+	c := &s3Client{t: t, akid: akid, secret: secret, region: region}
+	alive := func() []string {
+		var out []string
+		for _, id := range nodes {
+			if procs[id] != nil {
+				out = append(out, s3Addrs[id])
+			}
+		}
+		return out
+	}
+
+	c.mutate(alive(), "PUT", "/vault", nil, http.StatusOK)
+	rng := rand.New(rand.NewPCG(7, 0))
+	bodies := map[string][]byte{
+		"a": randBytes(rng, 600<<10),
+		"b": randBytes(rng, 700<<10),
+		"c": randBytes(rng, 3<<20+11),
+	}
+	for key, body := range bodies {
+		c.mutate(alive(), "PUT", "/vault/"+key, body, http.StatusOK)
+	}
+	for key, body := range bodies {
+		c.getEventually(alive(), "/vault/"+key, body)
+	}
+
+	// Drain the learner (n6): 6→5 crosses 4+2→3+2, so the cluster re-encodes the
+	// data down. -reencode takes the place of the interactive [y/N].
+	run(t, "cluster", "drain", "-data-dir", dirs["n1"], "-node", "n6", "-reencode")
+
+	// Removal is refused until the re-encode converges (the transition is open and
+	// the data still does not fit five nodes). Poll until it lands.
+	removed := false
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		if _, err := tryRun(t, "cluster", "remove", "-data-dir", dirs["n1"], "-node", "n6"); err == nil {
+			removed = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !removed {
+		t.Fatal("remove never succeeded — the downsize re-encode did not converge")
+	}
+	procs["n6"] = nil // the removed node self-stops; stop routing S3 to it
+
+	// Five members remain, and every object still reads — re-encoded onto them.
+	waitStatus(t, dirs["n1"], "five members after the downsize", func(rows []statusRow) bool {
+		if len(rows) != 5 {
+			return false
+		}
+		for _, r := range rows {
+			if r.node == "n6" {
+				return false
+			}
+		}
+		return true
+	})
+	for key, body := range bodies {
+		c.getEventually(alive(), "/vault/"+key, body)
+	}
 }
