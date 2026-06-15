@@ -33,9 +33,9 @@ the labeled layout:
   would strand data (k is never downgraded in place). Note the ladder isn't
   uniform: 6→5 (4+2→3+2) keeps 2-failure tolerance and only costs efficiency, but
   5→4 (3+2→2+1) drops tolerance to 1 — the confirmation must state the real
-  per-step trade. *Replacing* a node at constant size already works (see git
-  history: `cluster replace`), and needs no re-encode — it's the size-changing
-  case that does.
+  per-step trade. *Replacing* a node at constant size already works (join with
+  `-replaces <old>`), and needs no re-encode — it's the size-changing case that
+  does.
 
 ## Later versions
 

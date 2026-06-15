@@ -671,8 +671,6 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeDrainResponse(n.handleDrain(conn, payload)))
 	case reqRemove:
 		_ = writeFrame(conn, encodeRemoveResponse(n.handleRemove(conn, payload)))
-	case reqReplace:
-		_ = writeFrame(conn, encodeReplaceResponse(n.handleReplace(conn, payload)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }
@@ -758,35 +756,6 @@ func (n *Node) layoutOpInProgress(except string) string {
 // flight — one at a time (ADR-0004).
 func (n *Node) drainBlockedReason(nodeID string) string {
 	return n.layoutOpInProgress(nodeID)
-}
-
-// handleReplace serves a replace request (ADR-0004): a leader-only metadata
-// operation, authenticated by a cluster certificate like drain. It pairs the
-// outgoing node with the incoming one; the operator then joins the new node and
-// the cluster swaps it in at the same size. A non-leader answers with the
-// leader's dial so the client retries there.
-func (n *Node) handleReplace(conn *tls.Conn, payload []byte) replaceResponse {
-	if len(conn.ConnectionState().PeerCertificates) == 0 {
-		return replaceResponse{Error: "replace requires a cluster certificate"}
-	}
-	req, err := decodeReplaceRequest(payload)
-	if err != nil {
-		return replaceResponse{Error: "malformed replace request"}
-	}
-	switch err := n.proposeReplace(req.Old, req.New); {
-	case errors.Is(err, raftnode.ErrNotLeader):
-		resp := replaceResponse{Error: "this node is not the metadata leader"}
-		for _, m := range n.members() {
-			if m.Leader {
-				resp.Leader = m.Dial
-				break
-			}
-		}
-		return resp
-	case err != nil:
-		return replaceResponse{Error: err.Error()}
-	}
-	return replaceResponse{}
 }
 
 // proposeReplace pairs old→new (ADR-0004): old must be a current member, new must
@@ -1046,6 +1015,9 @@ func (n *Node) handleJoin(payload []byte) joinOutcome {
 	if req.NodeID == "" || req.ClusterAddr == "" {
 		return refuse("a node ID and a cluster address are required")
 	}
+	if req.Replaces == req.NodeID {
+		return refuse("a node cannot replace itself")
+	}
 	tok, err := decodeToken(req.Token)
 	if err != nil {
 		return refuse("%v", err)
@@ -1059,6 +1031,44 @@ func (n *Node) handleJoin(payload []byte) joinOutcome {
 	// this call would deadlock the loop until members() times out, handing the
 	// joiner an empty member list and stranding it with no peers to reach.
 	members := n.members()
+	if req.Replaces != "" {
+		// Validate the replacement target before allocating an identity, so a
+		// typo'd or stale name fails fast rather than stranding a wasted ID.
+		found := false
+		for _, m := range members {
+			if m.NodeID == req.Replaces {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return refuse("cannot replace %q: not a cluster member", req.Replaces)
+		}
+	}
+	outcome := n.issueIdentity(req, members)
+	if outcome.Error != "" {
+		return outcome
+	}
+
+	// A replacing join (ADR-0004): now that the identity is issued and issueMu is
+	// released (proposeReplace round-trips the loop, which also takes issueMu),
+	// pair old→new. reconcile then swaps the new node in for the old at constant
+	// size once it joins, so the storage profile never changes. Leader-only and
+	// mutually exclusive with other layout ops, like every layout change.
+	if req.Replaces != "" {
+		if err := n.proposeReplace(req.Replaces, req.NodeID); err != nil {
+			return refuse("declaring replacement of %s: %v", req.Replaces, err)
+		}
+	}
+	return outcome
+}
+
+// issueIdentity allocates the joining node's Raft ID and certificate under
+// issueMu (serializing concurrent joins), recording its failure-domain labels in
+// the durable registry the layout reconcile reads (ADR-0016). Allocates the ID
+// durably before handing it out — a crash between must waste an ID, never reuse
+// one.
+func (n *Node) issueIdentity(req joinRequest, members []Member) joinOutcome {
 	n.issueMu.Lock()
 	defer n.issueMu.Unlock()
 	for _, m := range members {
@@ -1066,12 +1076,6 @@ func (n *Node) handleJoin(payload []byte) joinOutcome {
 			return refuse("node ID %q is already a cluster member", req.NodeID)
 		}
 	}
-
-	// Allocate the Raft ID durably before handing it out: a crash between
-	// the two must waste an ID, never reuse one. Record the joiner's
-	// failure-domain labels in the same durable write (ADR-0016): the issuer
-	// is the one place every member's host/zone is known, and the layout
-	// reconcile reads this registry to compose a labeled layout.
 	raftID := n.cfg.NextRaftID
 	n.cfg.NextRaftID++
 	host, zone := req.Host, req.Zone
@@ -1085,7 +1089,6 @@ func (n *Node) handleJoin(payload []byte) joinOutcome {
 	if err := saveConfig(n.dir, n.cfg); err != nil {
 		return refuse("recording the new member: %v", err)
 	}
-
 	cert, err := n.ca.Issue(req.NodeID, time.Now())
 	if err != nil {
 		return refuse("issuing certificate: %v", err)
