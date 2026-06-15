@@ -60,6 +60,49 @@ func voters(ms []Member) int {
 	return v
 }
 
+// waitLayout polls a node's committed cluster layout — read on its loop, so it
+// reflects what this replica has applied — until pred holds. Same-package
+// access; read the leader for the freshest view.
+func waitLayout(t *testing.T, n *Node, what string, pred func(meta.ClusterLayout) bool) meta.ClusterLayout {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		var cl meta.ClusterLayout
+		var ok bool
+		done := make(chan struct{})
+		n.loop.Post(func() {
+			cl, ok = n.raft.Store().ClusterLayout()
+			close(done)
+		})
+		<-done
+		if ok && pred(cl) {
+			return cl
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waiting for %s: layout %+v (ok %v)", what, cl, ok)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func nodeDraining(cl meta.ClusterLayout, id string) bool {
+	for _, m := range cl.EffectiveNodes() {
+		if m.ID == id {
+			return m.Draining
+		}
+	}
+	return false
+}
+
+func anyDraining(cl meta.ClusterLayout) bool {
+	for _, m := range cl.EffectiveNodes() {
+		if m.Draining {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClusterGrowsByTokenJoin(t *testing.T) {
 	now := time.Now()
 	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
@@ -294,6 +337,12 @@ func TestClusterNodeDraining(t *testing.T) {
 	defer n3.Stop()
 	waitStatus(t, d1, "", "three members", func(ms []Member) bool { return len(ms) == 3 })
 
+	// A settled layout before the drain: three active members, no transition.
+	// n1 led from init, so its store holds the freshest committed layout.
+	settled := waitLayout(t, n1, "settled layout, no transition", func(cl meta.ClusterLayout) bool {
+		return len(cl.Previous) == 0 && len(cl.EffectiveNodes()) == 3 && !anyDraining(cl)
+	})
+
 	// Drain n3, issuing the command from n2 (which is not the leader): Drain
 	// must follow the redirect to the leader and commit.
 	if err := Drain(d2, "", "n3", true); err != nil {
@@ -313,6 +362,26 @@ func TestClusterNodeDraining(t *testing.T) {
 		})
 	}
 
+	// Draining is a subtractive change, so the leader opens a layout transition
+	// and — with no data to migrate here — closes it the moment a repair sweep
+	// converges. Two layout installs (open carrying Previous, then close
+	// dropping it), so the version advances by two and the end state carries no
+	// transition: proof the open/close lifecycle ran, not a bare swap.
+	closed := waitLayout(t, n1, "transition opened then closed", func(cl meta.ClusterLayout) bool {
+		return len(cl.Previous) == 0 && nodeDraining(cl, "n3")
+	})
+	if closed.Version < settled.Version+2 {
+		t.Fatalf("drain should open then close a transition (version +2); got %d from %d", closed.Version, settled.Version)
+	}
+
+	// One node drains at a time (the single-pair model): a second drain is
+	// refused while n3 is draining, with a message that names the conflict.
+	if err := Drain(d2, "", "n2", true); err == nil {
+		t.Fatal("a second concurrent drain should be refused")
+	} else if !strings.Contains(err.Error(), "n3") && !strings.Contains(err.Error(), "transition") {
+		t.Fatalf("refusal should name the in-flight drain: %v", err)
+	}
+
 	// Undrain reverses it: no member draining.
 	if err := Drain(d2, "", "n3", false); err != nil {
 		t.Fatalf("undrain: %v", err)
@@ -325,6 +394,15 @@ func TestClusterNodeDraining(t *testing.T) {
 		}
 		return len(ms) == 3
 	})
+
+	// With the previous drain cleared and its transition closed, a fresh drain
+	// is allowed again — the guard gates concurrent drains, not all drains.
+	waitLayout(t, n1, "no transition after undrain", func(cl meta.ClusterLayout) bool {
+		return len(cl.Previous) == 0 && !anyDraining(cl)
+	})
+	if err := Drain(d2, "", "n2", true); err != nil {
+		t.Fatalf("drain after the previous one cleared: %v", err)
+	}
 }
 
 // TestRecoverRebuildsSingleVoterCluster: a two-node cluster loses n2
