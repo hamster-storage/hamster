@@ -37,22 +37,24 @@ survey of the tree found:
 
 Because it touches the read/write path, v0.7 must clear the deterministic
 simulation harness (invariant 5) the way the EC path did. Passes, data-path-first
-(the S3 surface is last, not first). Pass 1 (the `internal/stream` AES-256-GCM
-transform) has landed — encrypted frames round-trip, are golden-pinned, and reject
-every single-byte tamper and the wrong key; the size/cover arithmetic accounts for
-the per-chunk tag. Remaining:
+(the S3 surface is last, not first). Two passes have landed:
 
-1. **DEK lifecycle and the pluggable KEK (a new `internal/keys`-ish package).** DEK
-   generation from injected entropy (the seam `*rand.Rand` — `crypto/rand` in
-   production, seeded under the simulator, the determinism rule). DEK wrap/unwrap
-   under the KEK. The KEK from a source chosen at init: `--master-key-file`, a
-   passphrase through argon2id (`golang.org/x/crypto/argon2` — permissive,
-   [ADR-0011](adr/0011-permissive-only-dependencies.md) ok), or
-   `--master-key-command` (the exec hook — the zero-dependency KMS/Vault
-   integration point, behind the seam). Pure given inputs; the command hook is the
-   one seam touch.
+- **Pass 1 — the `internal/stream` AES-256-GCM transform.** Encrypted frames
+  round-trip, are golden-pinned, and reject every single-byte tamper and the wrong
+  key; the size/cover arithmetic accounts for the per-chunk tag.
+- **Pass 2 — `internal/keys`: DEK lifecycle and the KEK source.** DEK generation
+  from an injected entropy `io.Reader` (`crypto/rand` in production, a seeded reader
+  under the simulator). DEK wrap/unwrap under the KEK (stdlib AES-256-GCM, the wrap
+  nonce derived by the caller from the object's unique version ID — no random-nonce
+  collision bound, deterministic under sim). One KEK source, `--master-key-file`
+  (raw/hex/base64), behind a "source returns a 32-byte KEK" abstraction so the
+  deferred sources are additive: passphrase/argon2id and `--master-key-command`
+  (Vault/AWS-Secrets) wait for a real ask, and no new dependency was added. Pure,
+  no seam — file *reading* is the boot layer's job, in pass 3.
 
-2. **Encryption in the coordinator (write/read path).** `coord` PUT mints a DEK,
+Remaining:
+
+1. **Encryption in the coordinator (write/read path).** `coord` PUT mints a DEK,
    encrypts through the stream transform, wraps the DEK under the node's loaded
    KEK, and stores the wrapped DEK + algorithm in the `PutObject` proposal → an
    additive `VersionEntry` field. GET reads the wrapped DEK, unwraps, decrypts.
@@ -62,17 +64,17 @@ the per-chunk tag. Remaining:
    and metadata commit for an encrypted object, GCM tag corruption caught on read
    and on scrub.
 
-3. **Cluster posture and key availability.** `cluster init` key-source flags; a
+2. **Cluster posture and key availability.** `cluster init` key-source flags; a
    replicated encryption posture (on/off + algorithm) so every node agrees;
    enable-only (disabling refused, ADR-0021); `cluster status` reports it; a node
    that cannot load its KEK at startup refuses encrypted reads *loudly* rather than
    serving ciphertext or failing quietly. The KEK is never stored or transmitted.
 
-4. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
+3. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
    when the cluster encrypts; the request header accepted; SSE-KMS and SSE-C
    refused honestly (the DEK machinery leaves room for SSE-C later).
 
-5. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
+4. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
    scan (rewrap every DEK under a new KEK — object bytes untouched). Verification:
    stream golden/tamper, key-source units, the coord sim schedules above, a cluster
    e2e (an encrypted cluster, the posture in `status`, the SSE header, a read after
