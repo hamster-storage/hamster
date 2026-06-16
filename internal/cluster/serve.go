@@ -135,6 +135,11 @@ func (c *clusterMetadata) GetVersion(bucket, key string, vid meta.VersionID) (e 
 	return
 }
 
+func (c *clusterMetadata) ListVersions(bucket, key string) (out []meta.VersionEntry) {
+	c.n.on(func() { out = c.n.raft.Store().ListVersions(bucket, key) })
+	return
+}
+
 func (c *clusterMetadata) ListObjects(bucket, prefix, startAfter string, max int) (out []meta.ObjectListing) {
 	c.n.on(func() { out = c.n.raft.Store().ListObjects(bucket, prefix, startAfter, max) })
 	return
@@ -184,6 +189,14 @@ func (c *clusterMetadata) ApplyDeleteObject(p meta.DeleteObject) (meta.DeleteObj
 		return meta.DeleteObjectResult{}, err
 	}
 	return res.(meta.DeleteObjectResult), nil
+}
+
+func (c *clusterMetadata) ApplyDeleteVersion(p meta.DeleteVersion) (meta.DeleteVersionResult, error) {
+	res, err := c.n.propose(p)
+	if err != nil {
+		return meta.DeleteVersionResult{}, err
+	}
+	return res.(meta.DeleteVersionResult), nil
 }
 
 func (c *clusterMetadata) ApplyCreateMultipartUpload(p meta.CreateMultipartUpload) error {

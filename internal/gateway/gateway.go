@@ -77,6 +77,7 @@ type Metadata interface {
 	ListBuckets() []meta.BucketConfig
 	Current(bucket, key string) (meta.CurrentRecord, bool)
 	GetVersion(bucket, key string, vid meta.VersionID) (meta.VersionEntry, bool)
+	ListVersions(bucket, key string) []meta.VersionEntry
 	ListObjects(bucket, prefix, startAfter string, max int) []meta.ObjectListing
 	GetUpload(bucket, key string, uid meta.VersionID) (meta.UploadRecord, bool)
 	ListUploads(bucket, prefix, keyMarker string, uploadMarker meta.VersionID, max int) []meta.UploadListing
@@ -87,6 +88,7 @@ type Metadata interface {
 	ApplySetBucketVersioning(meta.SetBucketVersioning) error
 	ApplyPutObject(meta.PutObject) (meta.PutResult, error)
 	ApplyDeleteObject(meta.DeleteObject) (meta.DeleteObjectResult, error)
+	ApplyDeleteVersion(meta.DeleteVersion) (meta.DeleteVersionResult, error)
 	ApplyCreateMultipartUpload(meta.CreateMultipartUpload) error
 	ApplyUploadPart(meta.UploadPart) (meta.UploadPartResult, error)
 	ApplyCompleteMultipartUpload(meta.CompleteMultipartUpload) (meta.CompleteResult, error)
@@ -217,6 +219,11 @@ func (l *loopMetadata) GetVersion(bucket, key string, vid meta.VersionID) (e met
 	return
 }
 
+func (l *loopMetadata) ListVersions(bucket, key string) (out []meta.VersionEntry) {
+	l.on(func() { out = l.store.ListVersions(bucket, key) })
+	return
+}
+
 func (l *loopMetadata) ListObjects(bucket, prefix, startAfter string, max int) (out []meta.ObjectListing) {
 	l.on(func() { out = l.store.ListObjects(bucket, prefix, startAfter, max) })
 	return
@@ -259,6 +266,11 @@ func (l *loopMetadata) ApplyPutObject(p meta.PutObject) (res meta.PutResult, err
 
 func (l *loopMetadata) ApplyDeleteObject(p meta.DeleteObject) (res meta.DeleteObjectResult, err error) {
 	l.on(func() { res, err = l.store.ApplyDeleteObject(p) })
+	return
+}
+
+func (l *loopMetadata) ApplyDeleteVersion(p meta.DeleteVersion) (res meta.DeleteVersionResult, err error) {
+	l.on(func() { res, err = l.store.ApplyDeleteVersion(p) })
 	return
 }
 
@@ -460,6 +472,10 @@ func hasSubresource(q map[string][]string) bool {
 		case "list-type", "prefix", "delimiter", "max-keys", "encoding-type",
 			"continuation-token", "start-after", "marker", "fetch-owner",
 			"response-content-type", "response-content-disposition":
+			continue
+		case "versionId":
+			// Not a subresource: a parameter selecting a version on the
+			// ordinary GET/HEAD/DELETE verbs (v0.5).
 			continue
 		case "x-id":
 			// aws-sdk-go-v2 (rclone among others) tags every request with

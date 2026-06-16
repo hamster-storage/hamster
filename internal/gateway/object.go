@@ -67,7 +67,9 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
 	}
 
+	state := g.bucketVersioning(bucket)
 	w.Header().Set("ETag", quoteETag(etag))
+	setVersionID(w, state, meta.VersionEntry{VersionID: res.VersionID, NullVersion: state != meta.VersioningEnabled})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -142,32 +144,61 @@ func (g *Gateway) readObjectData(entry meta.VersionEntry) ([]byte, error) {
 }
 
 // getObject serves GET and HEAD. Range and conditional headers are handled
-// by http.ServeContent over the in-memory blob.
+// by http.ServeContent over the in-memory blob. ?versionId selects a specific
+// version; without it, the current version is served.
 func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	var entry meta.VersionEntry
-	var data []byte
-	var err error
+	versionID := r.URL.Query().Get("versionId")
+
 	if g.cfg.Objects != nil {
-		// The cluster path: bytes and entry from one consistent read,
-		// integrity carried by the frame's chunk CRCs end to end.
-		data, entry, err = g.cfg.Objects.Get(bucket, key)
+		// The cluster path does not resolve a specific version or surface
+		// version IDs yet (v0.5 pass 4); refuse ?versionId rather than serve
+		// the current version under a versioned request.
+		if versionID != "" {
+			writeError(w, r, errNotImplemented)
+			return
+		}
+		data, entry, err := g.cfg.Objects.Get(bucket, key)
 		if err != nil {
 			writeError(w, r, err)
 			return
 		}
-	} else {
-		entry, err = g.lookupCurrent(bucket, key)
-		if err != nil {
-			writeError(w, r, err)
-			return
-		}
-		data, err = g.readObjectData(entry)
-		if err != nil {
-			writeError(w, r, err)
-			return
-		}
+		g.serveEntry(w, r, entry, data)
+		return
 	}
 
+	state := g.bucketVersioning(bucket)
+	var entry meta.VersionEntry
+	var err error
+	if versionID != "" {
+		entry, err = g.resolveVersion(bucket, key, versionID)
+	} else {
+		entry, err = g.lookupCurrent(bucket, key)
+	}
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	// A delete marker has no body: a GET or HEAD addressing one is 405, with the
+	// marker's identity in the headers so a client can tell deleted from absent.
+	if entry.Kind == meta.KindDeleteMarker {
+		w.Header().Set("x-amz-delete-marker", "true")
+		setVersionID(w, state, entry)
+		w.Header().Set("Last-Modified", time.UnixMilli(entry.CreatedUnixMS).UTC().Format(http.TimeFormat))
+		writeError(w, r, errMethodNotAllowed)
+		return
+	}
+	data, err := g.readObjectData(entry)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	setVersionID(w, state, entry)
+	g.serveEntry(w, r, entry, data)
+}
+
+// serveEntry writes an object version's headers and body. The caller sets any
+// version-id header first (the cluster path does not yet, single-node does).
+func (g *Gateway) serveEntry(w http.ResponseWriter, r *http.Request, entry meta.VersionEntry, data []byte) {
 	w.Header().Set("ETag", objectETag(entry.ETag, len(entry.Parts)))
 	if entry.ContentType != "" {
 		w.Header().Set("Content-Type", entry.ContentType)
@@ -181,9 +212,16 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	http.ServeContent(w, r, "", time.UnixMilli(entry.CreatedUnixMS).UTC(), bytes.NewReader(data))
 }
 
-// deleteObject is S3 DeleteObject without a version ID. Idempotent: deleting
-// a missing key is 204, exactly like S3.
+// deleteObject is S3 DeleteObject. With ?versionId it permanently destroys that
+// one version; without, it removes the object on an unversioned bucket or inserts
+// a delete marker on a versioned one. Idempotent: deleting a missing key or
+// version is 204, exactly like S3.
 func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	if versionID := r.URL.Query().Get("versionId"); versionID != "" {
+		g.deleteObjectVersion(w, r, bucket, key, versionID)
+		return
+	}
+	state := g.bucketVersioning(bucket)
 	// On the cluster path, shard reclaim needs the displaced version's
 	// parameters; capture them before the delete (best effort — a racing
 	// overwrite leaves an orphan for a future scan, never a wrong delete:
@@ -208,6 +246,52 @@ func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, k
 	g.reclaim(res.RemovedDataIDs, displaced)
 	if res.MarkerCreated {
 		w.Header().Set("x-amz-delete-marker", "true")
+		// A suspended bucket's marker is the null version; an enabled bucket's
+		// carries its minted ID.
+		setVersionID(w, state, meta.VersionEntry{VersionID: res.MarkerID, NullVersion: state == meta.VersioningSuspended})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteObjectVersion permanently removes one version (S3 DELETE with a version
+// ID) — the operation that frees a version's data. A missing version is an
+// idempotent 204. The cluster path's versioned reclaim lands in pass 4.
+func (g *Gateway) deleteObjectVersion(w http.ResponseWriter, r *http.Request, bucket, key, versionID string) {
+	if g.cfg.Objects != nil {
+		writeError(w, r, errNotImplemented)
+		return
+	}
+	entry, err := g.resolveVersion(bucket, key, versionID)
+	if errors.Is(err, meta.ErrNoSuchVersion) {
+		// Deleting a version that is not there echoes the requested id, 204.
+		w.Header().Set("x-amz-version-id", versionID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	res, applyErr := g.cfg.Meta.ApplyDeleteVersion(meta.DeleteVersion{
+		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        entry.VersionID,
+		BypassGovernance: strings.EqualFold(r.Header.Get("x-amz-bypass-governance-retention"), "true"),
+	})
+	if applyErr != nil {
+		writeError(w, r, applyErr)
+		return
+	}
+	// Only an object version holds data; a delete marker frees nothing.
+	if res.Removed && entry.Kind == meta.KindObject {
+		for _, dataID := range entry.DataIDs() {
+			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+		}
+	}
+	w.Header().Set("x-amz-version-id", versionLabel(entry))
+	if entry.Kind == meta.KindDeleteMarker {
+		w.Header().Set("x-amz-delete-marker", "true")
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -231,6 +315,77 @@ func userMetadata(h http.Header) map[string]string {
 
 func quoteETag(etag []byte) string {
 	return `"` + hex.EncodeToString(etag) + `"`
+}
+
+// versionIDString is the wire form of a version ID: the 32-hex-char string S3
+// carries in x-amz-version-id and ?versionId. The literal "null" addresses the
+// null version separately (versionLabel and resolveVersion handle it).
+func versionIDString(id meta.VersionID) string { return hex.EncodeToString(id[:]) }
+
+// parseVersionID decodes the hex wire form. "null" is not an ID and is rejected
+// here; resolveVersion handles it before reaching this.
+func parseVersionID(s string) (meta.VersionID, bool) {
+	raw, err := hex.DecodeString(s)
+	if err != nil || len(raw) != len(meta.VersionID{}) {
+		return meta.VersionID{}, false
+	}
+	var id meta.VersionID
+	copy(id[:], raw)
+	return id, true
+}
+
+// versionLabel is how a version names itself on the wire: "null" for the null
+// version (the one a bucket holds while unversioned or suspended), the hex ID
+// otherwise.
+func versionLabel(e meta.VersionEntry) string {
+	if e.NullVersion {
+		return "null"
+	}
+	return versionIDString(e.VersionID)
+}
+
+// setVersionID writes x-amz-version-id per S3's rules: nothing at all on a bucket
+// that was never versioned (Unversioned), else the version's label.
+func setVersionID(w http.ResponseWriter, state meta.VersioningState, e meta.VersionEntry) {
+	if state == meta.Unversioned {
+		return
+	}
+	w.Header().Set("x-amz-version-id", versionLabel(e))
+}
+
+// bucketVersioning reads a bucket's versioning state, defaulting to Unversioned
+// for a missing bucket (the handlers surface NoSuchBucket on their own path).
+func (g *Gateway) bucketVersioning(bucket string) meta.VersioningState {
+	if cfg, ok := g.cfg.Meta.GetBucket(bucket); ok {
+		return cfg.Versioning
+	}
+	return meta.Unversioned
+}
+
+// resolveVersion finds the version a ?versionId selects: the null version by
+// scan, or the hex ID by direct lookup. The error is writeError-ready
+// (NoSuchBucket, or NoSuchVersion when nothing matches).
+func (g *Gateway) resolveVersion(bucket, key, versionID string) (meta.VersionEntry, error) {
+	if _, ok := g.cfg.Meta.GetBucket(bucket); !ok {
+		return meta.VersionEntry{}, meta.ErrNoSuchBucket
+	}
+	if versionID == "null" {
+		for _, e := range g.cfg.Meta.ListVersions(bucket, key) {
+			if e.NullVersion {
+				return e, nil
+			}
+		}
+		return meta.VersionEntry{}, meta.ErrNoSuchVersion
+	}
+	vid, ok := parseVersionID(versionID)
+	if !ok {
+		return meta.VersionEntry{}, meta.ErrNoSuchVersion
+	}
+	e, found := g.cfg.Meta.GetVersion(bucket, key, vid)
+	if !found {
+		return meta.VersionEntry{}, meta.ErrNoSuchVersion
+	}
+	return e, nil
 }
 
 // objectETag renders a stored object ETag for the wire: hex, quoted, with
