@@ -304,25 +304,13 @@ func Drain(dataDir, addr, nodeID string, draining bool) error {
 	if target == "" {
 		target = cfg.ClusterAddr
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := requestDrain(target, cert, pool, drainRequest{NodeID: nodeID, Draining: draining})
+	return leaderRedirect("drain", target, 0, func(addr string) (controlOutcome, error) {
+		resp, err := requestDrain(addr, cert, pool, drainRequest{NodeID: nodeID, Draining: draining})
 		if err != nil {
-			return err
+			return controlOutcome{}, err
 		}
-		if resp.Error == "" {
-			return nil
-		}
-		// Retry once against the named leader (leader-only, no forwarding yet).
-		if resp.Leader != "" && resp.Leader != target && attempt == 0 {
-			target = resp.Leader
-			continue
-		}
-		if resp.Leader != "" {
-			return fmt.Errorf("cluster: drain refused: %s (leader is %s)", resp.Error, resp.Leader)
-		}
-		return fmt.Errorf("cluster: drain refused: %s", resp.Error)
-	}
-	return fmt.Errorf("cluster: drain could not reach the leader")
+		return controlOutcome{errStr: resp.Error, leader: resp.Leader}, nil
+	})
 }
 
 // requestDrain dials a node's control port with this node's certificate and
@@ -346,24 +334,13 @@ func Remove(dataDir, addr, nodeID string) error {
 	if target == "" {
 		target = cfg.ClusterAddr
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		resp, err := requestRemove(target, cert, pool, removeRequest{NodeID: nodeID})
+	return leaderRedirect("remove", target, 0, func(addr string) (controlOutcome, error) {
+		resp, err := requestRemove(addr, cert, pool, removeRequest{NodeID: nodeID})
 		if err != nil {
-			return err
+			return controlOutcome{}, err
 		}
-		if resp.Error == "" {
-			return nil
-		}
-		if resp.Leader != "" && resp.Leader != target && attempt == 0 {
-			target = resp.Leader
-			continue
-		}
-		if resp.Leader != "" {
-			return fmt.Errorf("cluster: remove refused: %s (leader is %s)", resp.Error, resp.Leader)
-		}
-		return fmt.Errorf("cluster: remove refused: %s", resp.Error)
-	}
-	return fmt.Errorf("cluster: remove could not reach the leader")
+		return controlOutcome{errStr: resp.Error, leader: resp.Leader}, nil
+	})
 }
 
 // OptimizeReport summarizes an optimize sweep for the CLI.
@@ -398,30 +375,19 @@ func Optimize(dataDir, addr string) (OptimizeReport, error) {
 	if target == "" {
 		target = cfg.ClusterAddr
 	}
-	deadline := time.Now().Add(optimizeSettleWait)
-	redirected := false
-	for {
-		resp, err := requestOptimize(target, cert, pool)
+	var report OptimizeReport
+	err = leaderRedirect("optimize", target, optimizeSettleWait, func(addr string) (controlOutcome, error) {
+		resp, err := requestOptimize(addr, cert, pool)
 		if err != nil {
-			return OptimizeReport{}, err
+			return controlOutcome{}, err
 		}
-		if resp.Error == "" {
-			return OptimizeReport{Objects: resp.Objects, ReEncoded: resp.ReEncoded}, nil
-		}
-		if resp.Leader != "" && resp.Leader != target && !redirected {
-			target, redirected = resp.Leader, true
-			continue
-		}
-		// The cluster is still converging a membership change — wait and re-ask.
-		if resp.Retry && time.Now().Before(deadline) {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		if resp.Leader != "" {
-			return OptimizeReport{}, fmt.Errorf("cluster: optimize refused: %s (leader is %s)", resp.Error, resp.Leader)
-		}
-		return OptimizeReport{}, fmt.Errorf("cluster: optimize refused: %s", resp.Error)
+		report = OptimizeReport{Objects: resp.Objects, ReEncoded: resp.ReEncoded}
+		return controlOutcome{errStr: resp.Error, leader: resp.Leader, retry: resp.Retry}, nil
+	})
+	if err != nil {
+		return OptimizeReport{}, err
 	}
+	return report, nil
 }
 
 // optimizeSettleWait bounds how long Optimize waits for a recent membership
@@ -486,6 +452,53 @@ func controlRoundTrip(addr string, cert tls.Certificate, pool *x509.CertPool, re
 		}
 	}
 	return nil, err
+}
+
+// controlSettlePoll is how long leaderRedirect waits between re-asks while the
+// cluster converges a membership change (the server answered "retry").
+const controlSettlePoll = 2 * time.Second
+
+// controlOutcome carries the redirect/refusal fields every leader-only control
+// response shares, extracted so leaderRedirect drives the retry loop uniformly.
+type controlOutcome struct {
+	errStr string // application-level refusal; "" means success
+	leader string // the leader's dial address, when this node is not it
+	retry  bool   // the cluster is converging — re-ask after a wait
+}
+
+// leaderRedirect runs a leader-only control request against target, following a
+// single redirect to the named leader and, when the server reports the cluster is
+// still converging, waiting out the change (up to settleWait) before re-asking.
+// op names the operation for the refusal message; do performs one round trip
+// against an address. Drain, remove, and optimize all share this loop — they
+// differ only in the request do makes and whether the server ever sets retry
+// (settleWait==0 disables the wait).
+func leaderRedirect(op, target string, settleWait time.Duration, do func(addr string) (controlOutcome, error)) error {
+	deadline := time.Now().Add(settleWait)
+	redirected := false
+	for {
+		out, err := do(target)
+		if err != nil {
+			return err
+		}
+		if out.errStr == "" {
+			return nil
+		}
+		// A non-leader answer carries the leader's address; follow it once.
+		if out.leader != "" && out.leader != target && !redirected {
+			target, redirected = out.leader, true
+			continue
+		}
+		// The cluster is still absorbing a membership change — wait and re-ask.
+		if out.retry && time.Now().Before(deadline) {
+			time.Sleep(controlSettlePoll)
+			continue
+		}
+		if out.leader != "" {
+			return fmt.Errorf("cluster: %s refused: %s (leader is %s)", op, out.errStr, out.leader)
+		}
+		return fmt.Errorf("cluster: %s refused: %s", op, out.errStr)
+	}
 }
 
 func requestOptimize(addr string, cert tls.Certificate, pool *x509.CertPool) (optimizeResponse, error) {
