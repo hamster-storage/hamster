@@ -286,6 +286,7 @@ func marshalVersionEntry(e VersionEntry) []byte {
 	}
 	b = putUvarint(b, 20, uint64(e.EncAlgorithm))
 	b = putBytes(b, 21, e.WrappedDEK)
+	b = putUvarint(b, 22, e.KEKFingerprint)
 	return append(b, e.unknown...)
 }
 
@@ -341,6 +342,8 @@ func unmarshalVersionEntry(b []byte) (VersionEntry, error) {
 			e.EncAlgorithm = EncAlgorithm(d.enum8())
 		case 21:
 			e.WrappedDEK = d.bytes()
+		case 22:
+			e.KEKFingerprint = d.uvarint()
 		default:
 			d.skipUnknown(&e.unknown)
 		}
@@ -538,6 +541,11 @@ func marshalEncryptionPosture(p EncryptionPosture) []byte {
 	var b []byte
 	b = putUvarint(b, 1, uint64(p.FormatVersion))
 	b = putUvarint(b, 2, uint64(p.Algorithm))
+	// Fields 3/4 (KEK fingerprints, ADR-0032) are additive and written only
+	// when nonzero, so a posture from before rotation existed — and one with
+	// no rotation open — encodes byte-identically to its pre-rotation form.
+	b = putUvarint(b, 3, p.CurrentKEKFingerprint)
+	b = putUvarint(b, 4, p.RotatingToKEKFingerprint)
 	return append(b, p.unknown...)
 }
 
@@ -550,6 +558,10 @@ func unmarshalEncryptionPosture(b []byte) (EncryptionPosture, error) {
 			p.FormatVersion = d.uint32()
 		case 2:
 			p.Algorithm = EncAlgorithm(d.enum8())
+		case 3:
+			p.CurrentKEKFingerprint = d.uvarint()
+		case 4:
+			p.RotatingToKEKFingerprint = d.uvarint()
 		default:
 			d.skipUnknown(&p.unknown)
 		}

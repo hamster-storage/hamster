@@ -100,6 +100,15 @@ type VersionEntry struct {
 	EncAlgorithm EncAlgorithm
 	WrappedDEK   []byte
 
+	// KEKFingerprint identifies the KEK that wrapped WrappedDEK (ADR-0032):
+	// the keys-package content fingerprint as a big-endian integer. Master-key
+	// rotation rewraps WrappedDEK under a new KEK and restamps this; the count
+	// of versions still on the old fingerprint is the rotation's provable
+	// progress. Zero means "none recorded" — a version wrapped under the
+	// cluster's founding KEK, before any rotation. Additive (invariant 2),
+	// meaningful only when EncAlgorithm is not EncNone.
+	KEKFingerprint uint64
+
 	// NullVersion marks the entry the API renders as version "null":
 	// writes to unversioned and suspended-versioning buckets. At most one
 	// per key.
@@ -379,9 +388,21 @@ type ClusterLayout struct {
 // unaffected by a change. It is enable-only: ApplySetEncryptionPosture
 // refuses a move back to EncNone (a downgrade), so a cluster never silently
 // stops encrypting. The KEK is never part of this row — only the posture.
+//
+// CurrentKEKFingerprint and RotatingToKEKFingerprint track master-key
+// rotation (ADR-0032), both keys-package content fingerprints as big-endian
+// integers. CurrentKEKFingerprint is the KEK new writes wrap under — a node
+// whose loaded KEK does not match refuses encrypted writes (the split-key
+// guard). RotatingToKEKFingerprint is non-zero only while a rotation is open:
+// it names the new KEK the rewrap sweep is moving every version to; the
+// rotation closes (and this returns to zero, with Current advanced) once no
+// version remains on the old fingerprint. Both additive (invariant 2), zero
+// on a posture written before rotation existed — established lazily then.
 type EncryptionPosture struct {
-	FormatVersion uint32
-	Algorithm     EncAlgorithm
+	FormatVersion            uint32
+	Algorithm                EncAlgorithm
+	CurrentKEKFingerprint    uint64
+	RotatingToKEKFingerprint uint64
 
 	unknown []byte
 }

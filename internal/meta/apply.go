@@ -167,6 +167,7 @@ func (s *Store) ApplyPutObject(p PutObject) (res PutResult, err error) {
 		LegalHold:         p.LegalHold,
 		EncAlgorithm:      p.EncAlgorithm,
 		WrappedDEK:        p.WrappedDEK,
+		KEKFingerprint:    p.KEKFingerprint,
 		NullVersion:       cfg.Versioning != VersioningEnabled,
 	}.clone() // own every reference field; the proposer may reuse its buffers
 
@@ -430,15 +431,116 @@ func (s *Store) ApplySetEncryptionPosture(p SetEncryptionPosture) (err error) {
 	if p.Algorithm != EncNone && p.Algorithm != EncAES256GCM {
 		return ErrInvalidEncryption
 	}
+	post := EncryptionPosture{FormatVersion: currentFormatVersion, Algorithm: p.Algorithm}
 	if cur, ok := s.kv.get(encryptionPostureKey); ok {
-		if prev := cur.(EncryptionPosture).Algorithm; prev != EncNone && p.Algorithm == EncNone {
+		prev := cur.(EncryptionPosture)
+		if prev.Algorithm != EncNone && p.Algorithm == EncNone {
 			return ErrEncryptionDowngrade
 		}
+		// Carry the rotation state forward — enabling/affirming the posture
+		// must not drop an open rotation.
+		post.CurrentKEKFingerprint = prev.CurrentKEKFingerprint
+		post.RotatingToKEKFingerprint = prev.RotatingToKEKFingerprint
 	}
-	s.kv.set(encryptionPostureKey, EncryptionPosture{
-		FormatVersion: currentFormatVersion,
-		Algorithm:     p.Algorithm,
-	})
+	// Establish the current KEK fingerprint on first sight (fresh enable, or
+	// lazy establishment on an upgraded v0.7 posture); afterward require a
+	// match — a node holding a different master key is refused (ADR-0032).
+	if p.KEKFingerprint != 0 {
+		switch {
+		case post.CurrentKEKFingerprint == 0:
+			post.CurrentKEKFingerprint = p.KEKFingerprint
+		case post.CurrentKEKFingerprint != p.KEKFingerprint:
+			return ErrKEKMismatch
+		}
+	}
+	s.kv.set(encryptionPostureKey, post)
+	return nil
+}
+
+// ApplyBeginKEKRotation opens a master-key rotation (ADR-0032): it sets the
+// posture's rotating-to fingerprint, the target the rewrap sweep moves every
+// version to. One rotation at a time, and only from the established current
+// key — a stale or wrong From, or a second concurrent target, is refused.
+func (s *Store) ApplyBeginKEKRotation(p BeginKEKRotation) (err error) {
+	defer s.txn(&err)()
+	cur, ok := s.kv.get(encryptionPostureKey)
+	if !ok {
+		return ErrNotEncrypting
+	}
+	post := cur.(EncryptionPosture)
+	if post.Algorithm == EncNone {
+		return ErrNotEncrypting
+	}
+	if p.ToFingerprint == 0 || p.ToFingerprint == post.CurrentKEKFingerprint {
+		return ErrInvalidRewrap // nothing to rotate to
+	}
+	// Guard against a stale leader: From must name the key we are actually on.
+	if post.CurrentKEKFingerprint == 0 || p.FromFingerprint != post.CurrentKEKFingerprint {
+		return ErrKEKMismatch
+	}
+	// One rotation at a time; re-proposing the same target is idempotent.
+	if post.RotatingToKEKFingerprint != 0 && post.RotatingToKEKFingerprint != p.ToFingerprint {
+		return ErrKEKMismatch
+	}
+	post.RotatingToKEKFingerprint = p.ToFingerprint
+	s.kv.set(encryptionPostureKey, post)
+	return nil
+}
+
+// ApplyRewrapDEK rewrites one version's wrapped DEK under the new KEK
+// (ADR-0032). Only WrappedDEK and KEKFingerprint move; the object's bytes,
+// EC layout, checksums, and object-lock fields are left exactly as they are,
+// so it is COMPLIANCE-safe — it runs on a locked version because it neither
+// deletes the object nor shortens retention. A non-encrypted target, a delete
+// marker, or an empty wrap is refused; a version already on the target
+// fingerprint is an idempotent no-op.
+func (s *Store) ApplyRewrapDEK(p RewrapDEK) (err error) {
+	defer s.txn(&err)()
+	row, ok := s.kv.get(versionRowKey(p.Bucket, p.Key, p.VersionID))
+	if !ok {
+		return ErrNoSuchVersion
+	}
+	entry := row.(VersionEntry)
+	if entry.Kind != KindObject || entry.EncAlgorithm == EncNone {
+		return ErrInvalidRewrap
+	}
+	if len(p.WrappedDEK) == 0 || p.KEKFingerprint == 0 {
+		return ErrInvalidRewrap
+	}
+	if entry.KEKFingerprint == p.KEKFingerprint {
+		return nil // idempotent: already on this key
+	}
+	entry.WrappedDEK = append([]byte(nil), p.WrappedDEK...)
+	entry.KEKFingerprint = p.KEKFingerprint
+	s.kv.set(versionRowKey(p.Bucket, p.Key, p.VersionID), entry)
+	return nil
+}
+
+// ApplyCompleteKEKRotation closes an open rotation (ADR-0032): it advances the
+// current fingerprint to the rotated-to key and clears the rotating-to marker.
+// The leader proposes this only after a sweep finds no version left on the old
+// key; apply guards only that the target matches the open rotation. Completing
+// an already-closed rotation whose current equals the target is idempotent.
+func (s *Store) ApplyCompleteKEKRotation(p CompleteKEKRotation) (err error) {
+	defer s.txn(&err)()
+	cur, ok := s.kv.get(encryptionPostureKey)
+	if !ok {
+		return ErrNotEncrypting
+	}
+	post := cur.(EncryptionPosture)
+	if post.RotatingToKEKFingerprint == 0 {
+		// No rotation open: success only if we are already on the target.
+		if post.CurrentKEKFingerprint == p.ToFingerprint {
+			return nil
+		}
+		return ErrKEKMismatch
+	}
+	if post.RotatingToKEKFingerprint != p.ToFingerprint {
+		return ErrKEKMismatch
+	}
+	post.CurrentKEKFingerprint = post.RotatingToKEKFingerprint
+	post.RotatingToKEKFingerprint = 0
+	s.kv.set(encryptionPostureKey, post)
 	return nil
 }
 
