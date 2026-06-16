@@ -28,7 +28,7 @@ func TestPipelineStreamThroughShards(t *testing.T) {
 		}
 
 		// PUT: plaintext streams through the framer into the encoder.
-		frameSize := stream.FrameSize(int64(size), chunkSize)
+		frameSize := stream.FrameSize(int64(size), chunkSize, false)
 		bufs := make([]bytes.Buffer, k+m)
 		sinks := make([]io.Writer, k+m)
 		for i := range bufs {
@@ -38,7 +38,7 @@ func TestPipelineStreamThroughShards(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fw, err := stream.NewWriter(ecw, int64(size), chunkSize)
+		fw, err := stream.NewWriter(ecw, int64(size), chunkSize, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,7 +63,7 @@ func TestPipelineStreamThroughShards(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		fr, err := stream.NewReader(er, er.FrameSize())
+		fr, err := stream.NewReader(er, er.FrameSize(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

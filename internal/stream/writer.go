@@ -19,6 +19,8 @@ type Writer struct {
 	declared  int64
 	written   int64
 	buf       []byte
+	sealBuf   []byte // scratch for one chunk's ciphertext (encrypted frames)
+	crypter   *chunkCrypter
 	lengths   []uint64
 	crcs      []uint32
 	frameSize int64
@@ -27,15 +29,27 @@ type Writer struct {
 
 // NewWriter starts a frame for plaintextSize object bytes, writing the
 // header immediately. chunkSize is recorded in the header; use
-// DefaultChunkSize unless measuring says otherwise.
-func NewWriter(w io.Writer, plaintextSize int64, chunkSize int) (*Writer, error) {
+// DefaultChunkSize unless measuring says otherwise. dek selects the
+// transform: nil writes an identity frame, a 32-byte ([DEKLen]) key writes
+// an AES-256-GCM frame. The DEK must be unique to this object (ADR-0021) —
+// the chunk index is the nonce, so reusing a DEK reuses nonces.
+func NewWriter(w io.Writer, plaintextSize int64, chunkSize int, dek []byte) (*Writer, error) {
 	if plaintextSize < 0 {
 		return nil, fmt.Errorf("stream: negative plaintext size %d", plaintextSize)
 	}
 	if chunkSize <= 0 {
 		return nil, fmt.Errorf("stream: chunk size must be positive, not %d", chunkSize)
 	}
-	hdr := appendHeader(make([]byte, 0, maxHeaderLen), int64(chunkSize), plaintextSize)
+	var crypter *chunkCrypter
+	flags := uint64(0)
+	if dek != nil {
+		var err error
+		if crypter, err = newChunkCrypter(dek); err != nil {
+			return nil, err
+		}
+		flags = flagEncrypted
+	}
+	hdr := appendHeader(make([]byte, 0, maxHeaderLen), flags, int64(chunkSize), plaintextSize)
 	if _, err := w.Write(hdr); err != nil {
 		return nil, fmt.Errorf("stream: writing header: %w", err)
 	}
@@ -43,13 +57,18 @@ func NewWriter(w io.Writer, plaintextSize int64, chunkSize int) (*Writer, error)
 	if plaintextSize < bufCap {
 		bufCap = plaintextSize
 	}
-	return &Writer{
+	wr := &Writer{
 		w:         w,
 		chunkSize: int64(chunkSize),
 		declared:  plaintextSize,
 		buf:       make([]byte, 0, bufCap),
+		crypter:   crypter,
 		frameSize: int64(len(hdr)),
-	}, nil
+	}
+	if crypter != nil {
+		wr.sealBuf = make([]byte, 0, bufCap+gcmTagLen)
+	}
+	return wr, nil
 }
 
 // Write buffers p into chunks, emitting each chunk as it fills. Writing
@@ -81,15 +100,24 @@ func (w *Writer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// flush emits the buffered chunk: its bytes now, its stored length and
-// CRC-32C remembered for the trailer.
+// flush emits the buffered chunk: its stored bytes now (the plaintext for
+// an identity frame, the AES-256-GCM ciphertext-plus-tag for an encrypted
+// one), its stored length and CRC-32C remembered for the trailer. The CRC
+// covers the stored bytes — what lands on disk — so it guards the
+// ciphertext; the GCM tag adds authentication on top.
 func (w *Writer) flush() error {
-	if _, err := w.w.Write(w.buf); err != nil {
-		return fmt.Errorf("stream: writing chunk %d: %w", len(w.lengths), err)
+	i := int64(len(w.lengths))
+	stored := w.buf
+	if w.crypter != nil {
+		w.sealBuf = w.crypter.seal(w.sealBuf[:0], w.buf, i)
+		stored = w.sealBuf
 	}
-	w.lengths = append(w.lengths, uint64(len(w.buf)))
-	w.crcs = append(w.crcs, crc32.Checksum(w.buf, crcTable))
-	w.frameSize += int64(len(w.buf))
+	if _, err := w.w.Write(stored); err != nil {
+		return fmt.Errorf("stream: writing chunk %d: %w", i, err)
+	}
+	w.lengths = append(w.lengths, uint64(len(stored)))
+	w.crcs = append(w.crcs, crc32.Checksum(stored, crcTable))
+	w.frameSize += int64(len(stored))
 	w.buf = w.buf[:0]
 	return nil
 }

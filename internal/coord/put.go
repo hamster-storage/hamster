@@ -129,13 +129,13 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 	for i, s := range op.sinks {
 		sinks[i] = s
 	}
-	frameSize := stream.FrameSize(size, stream.DefaultChunkSize)
+	frameSize := stream.FrameSize(size, stream.DefaultChunkSize, false)
 	ecw, err := ec.NewWriter(vid, k, m, frameSize, sinks)
 	if err != nil {
 		op.abort(fmt.Errorf("coord: encoder: %w", err))
 		return
 	}
-	sw, err := stream.NewWriter(ecw, size, stream.DefaultChunkSize)
+	sw, err := stream.NewWriter(ecw, size, stream.DefaultChunkSize, nil)
 	if err != nil {
 		op.abort(fmt.Errorf("coord: framing: %w", err))
 		return

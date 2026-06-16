@@ -353,7 +353,7 @@ func (c *cluster) readObject(key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sr, err := stream.NewReader(er, er.FrameSize())
+	sr, err := stream.NewReader(er, er.FrameSize(), nil)
 	if err != nil {
 		return nil, err
 	}
