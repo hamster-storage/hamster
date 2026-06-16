@@ -25,7 +25,10 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -45,7 +48,20 @@ const (
 	// WrappedLen is the exact size of a wrapped DEK: nonce, ciphertext (a
 	// DEK is DEKLen bytes), and the GCM tag.
 	WrappedLen = WrapNonceLen + DEKLen + wrapTagLen
+
+	// FingerprintLen is the length of a KEK fingerprint in bytes. A
+	// fingerprint identifies a KEK by its content without revealing it, so a
+	// version's record can name the key that wraps its DEK and a node can
+	// detect a mismatched master key (ADR-0032). 64 bits is ample to tell
+	// apart the handful of keys a cluster sees over its lifetime; collisions
+	// are irrelevant because the operator controls that small key set.
+	FingerprintLen = 8
 )
+
+// fingerprintLabel domain-separates the KEK fingerprint from any other use
+// of the key. It is part of the on-disk-format contract: changing it would
+// change every stored fingerprint, so it is pinned forever (ADR-0032).
+const fingerprintLabel = "hamster-kek-fingerprint-v1"
 
 // A DEK is a per-object data-encryption key.
 type DEK [DEKLen]byte
@@ -67,11 +83,40 @@ func NewDEK(entropy io.Reader) (DEK, error) {
 	return d, nil
 }
 
+// A Fingerprint identifies a KEK by its content without revealing it. It is
+// a truncated HMAC-SHA-256 over a fixed label keyed by the master-key
+// material — a key-check value: preimage resistant, so storing it in
+// replicated metadata or printing it in status leaks nothing usable about
+// the key (ADR-0032). The zero Fingerprint means "none recorded": a version
+// without a fingerprint was wrapped under the cluster's founding KEK,
+// before rotation began.
+type Fingerprint [FingerprintLen]byte
+
+// IsZero reports whether the fingerprint is unset (the founding-KEK / no
+// fingerprint recorded case).
+func (f Fingerprint) IsZero() bool { return f == Fingerprint{} }
+
+// Uint64 returns the fingerprint as a big-endian unsigned integer, the
+// compact form the metadata codec stores (a single varint field). A zero
+// value round-trips as "no fingerprint recorded".
+func (f Fingerprint) Uint64() uint64 { return binary.BigEndian.Uint64(f[:]) }
+
+// FingerprintFromUint64 rebuilds a Fingerprint from its stored integer form.
+func FingerprintFromUint64(v uint64) Fingerprint {
+	var f Fingerprint
+	binary.BigEndian.PutUint64(f[:], v)
+	return f
+}
+
+// String renders the fingerprint as hex, for status and logs.
+func (f Fingerprint) String() string { return hex.EncodeToString(f[:]) }
+
 // A KEK is the cluster key-encryption key, held only in memory. It is
 // built once from raw key material and reused to wrap and unwrap every
 // object's DEK.
 type KEK struct {
 	aead cipher.AEAD
+	fp   Fingerprint
 }
 
 // LoadKEK builds a KEK from raw key material. The material is the 32 key
@@ -97,7 +142,26 @@ func LoadKEK(material []byte) (KEK, error) {
 	if aead.NonceSize() != WrapNonceLen || aead.Overhead() != wrapTagLen {
 		return KEK{}, fmt.Errorf("keys: unexpected GCM geometry (nonce %d, tag %d)", aead.NonceSize(), aead.Overhead())
 	}
-	return KEK{aead: aead}, nil
+	return KEK{aead: aead, fp: fingerprint(raw)}, nil
+}
+
+// Fingerprint returns the content fingerprint of the loaded KEK. The zero
+// KEK (none loaded) returns the zero fingerprint.
+func (k KEK) Fingerprint() Fingerprint { return k.fp }
+
+// fingerprint computes a KEK's content fingerprint: the first FingerprintLen
+// bytes of HMAC-SHA-256(material, fingerprintLabel). Keying the HMAC with
+// the secret and hashing a fixed public label is the standard key-check-value
+// construction — deterministic across nodes and builds (so every node maps a
+// given key to the identical fingerprint), and preimage resistant (so the
+// fingerprint reveals nothing about the key).
+func fingerprint(material []byte) Fingerprint {
+	mac := hmac.New(sha256.New, material)
+	mac.Write([]byte(fingerprintLabel))
+	sum := mac.Sum(nil)
+	var f Fingerprint
+	copy(f[:], sum[:FingerprintLen])
+	return f
 }
 
 // Loaded reports whether the KEK holds a key. The zero KEK is not loaded;

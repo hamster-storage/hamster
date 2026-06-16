@@ -228,6 +228,74 @@ func TestZeroKEKRefuses(t *testing.T) {
 	}
 }
 
+// TestFingerprintEncodingInvariantAndGolden: the fingerprint is a function
+// of the key's content, so every encoding of the same key yields the same
+// fingerprint, and the value is golden-pinned — it lands in metadata forever
+// (ADR-0032), so a drift in the derivation must fail loudly here.
+func TestFingerprintEncodingInvariantAndGolden(t *testing.T) {
+	raw := testKEKMaterial()
+	forms := [][]byte{
+		raw,
+		[]byte(hex.EncodeToString(raw)),
+		[]byte(base64.StdEncoding.EncodeToString(raw)),
+		[]byte("  " + base64.StdEncoding.EncodeToString(raw) + "\n"),
+	}
+	want := mustKEK(t, raw).Fingerprint()
+	for _, form := range forms {
+		if got := mustKEK(t, form).Fingerprint(); got != want {
+			t.Errorf("encoding %q gave fingerprint %s, want %s", form, got, want)
+		}
+	}
+
+	// Golden: the exact fingerprint of testKEKMaterial(). Pinned so the
+	// derivation (label, HMAC construction, truncation) can never silently
+	// change under stored data.
+	const goldenHex = "6768db163ce45521"
+	if want.String() != goldenHex {
+		t.Errorf("golden fingerprint = %s, want %s", want, goldenHex)
+	}
+}
+
+// TestFingerprintDistinct: different keys fingerprint differently, and the
+// fingerprint is not just a slice of the key (it is hashed, not the prefix).
+func TestFingerprintDistinct(t *testing.T) {
+	a := testKEKMaterial()
+	b := testKEKMaterial()
+	b[0] ^= 0xFF
+	fa := mustKEK(t, a).Fingerprint()
+	fb := mustKEK(t, b).Fingerprint()
+	if fa == fb {
+		t.Error("distinct keys produced the same fingerprint")
+	}
+	if bytes.Equal(fa[:], a[:FingerprintLen]) {
+		t.Error("fingerprint is the raw key prefix, not a hash of it")
+	}
+}
+
+// TestFingerprintUint64RoundTrip: the compact integer form the codec stores
+// round-trips, and the zero value is the "none recorded" sentinel.
+func TestFingerprintUint64RoundTrip(t *testing.T) {
+	f := mustKEK(t, testKEKMaterial()).Fingerprint()
+	if got := FingerprintFromUint64(f.Uint64()); got != f {
+		t.Errorf("uint64 round-trip: got %s, want %s", got, f)
+	}
+	if f.IsZero() {
+		t.Error("a real key fingerprinted to zero (the none sentinel)")
+	}
+	if !(Fingerprint{}).IsZero() || (Fingerprint{}).Uint64() != 0 {
+		t.Error("zero fingerprint is not the zero sentinel")
+	}
+}
+
+// TestZeroKEKFingerprint: a node that never loaded a key has the zero
+// fingerprint, matching the founding/none sentinel.
+func TestZeroKEKFingerprint(t *testing.T) {
+	var k KEK
+	if !k.Fingerprint().IsZero() {
+		t.Error("zero KEK has a non-zero fingerprint")
+	}
+}
+
 // TestDEKThroughStream is the end-to-end check that ties this package to
 // the stream transform: a DEK is generated, wrapped, unwrapped, and the
 // recovered DEK decrypts a frame the original encrypted. This is the real
