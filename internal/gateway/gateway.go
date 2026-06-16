@@ -128,13 +128,24 @@ type Config struct {
 	Objects ObjectBackend
 }
 
+// PutObjectOptions carries the request facts a cluster PUT records beyond the
+// body: content type, user metadata, and the object-lock fields from the
+// x-amz-object-lock-* headers (ADR-0006).
+type PutObjectOptions struct {
+	ContentType       string
+	UserMetadata      map[string]string
+	RetentionMode     meta.RetentionMode
+	RetainUntilUnixMS int64
+	LegalHold         bool
+}
+
 // ObjectBackend is the cluster data path's face (internal/coord behind a
 // cluster composition). Implementations own their synchronization, like
 // Metadata. Get returns the served version's entry alongside its bytes —
 // one consistent read, so response headers can never describe a different
 // version than the body.
 type ObjectBackend interface {
-	Put(bucket, key string, body []byte, contentType string, userMeta map[string]string) (etag []byte, versionID meta.VersionID, err error)
+	Put(bucket, key string, body []byte, opts PutObjectOptions) (etag []byte, versionID meta.VersionID, err error)
 	Get(bucket, key string) (data []byte, entry meta.VersionEntry, err error)
 	// GetVersion serves a specific version's bytes (the ?versionId read).
 	GetVersion(bucket, key string, vid meta.VersionID) (data []byte, err error)
