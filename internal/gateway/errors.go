@@ -53,6 +53,14 @@ var (
 		"Object Lock configuration cannot be set on a bucket where it is not enabled; enable object lock when creating the bucket."}
 	errNoRetention = &s3Error{"NoSuchObjectLockConfiguration", http.StatusNotFound,
 		"The specified object does not have a retention configuration."}
+	errInvalidSSE = &s3Error{"InvalidArgument", http.StatusBadRequest,
+		"The server-side encryption value is invalid; this server supports only AES256 (SSE-S3)."}
+	errSSEKMSNotSupported = &s3Error{"NotImplemented", http.StatusNotImplemented,
+		"SSE-KMS is not supported; this server provides SSE-S3 (AES256)."}
+	errSSECNotSupported = &s3Error{"NotImplemented", http.StatusNotImplemented,
+		"SSE-C (customer-provided encryption keys) is not supported."}
+	errSSENotEnabled = &s3Error{"NotImplemented", http.StatusNotImplemented,
+		"Server-side encryption is not enabled on this server; encryption at rest is a cluster feature an operator turns on (cluster encrypt)."}
 )
 
 // ErrNoSuchKey is the missing-key miss, exported for object backends.

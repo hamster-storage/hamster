@@ -59,6 +59,12 @@ func (n *Node) ServeS3(cfg S3Config) (addr string, err error) {
 		Meta:    &clusterMetadata{n: n},
 		Blobs:   refuseBlobs{}, // every object rides the cluster path
 		Objects: &clusterObjects{n: n},
+		// The SSE-S3 surface (ADR-0021): report the cluster's replicated
+		// encryption posture so the gateway echoes the header and refuses an
+		// AES256 request the cluster cannot honor.
+		EncryptionEnabled: func() bool {
+			return n.raft.Store().EncryptionAlgorithm() != meta.EncNone
+		},
 	})
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {

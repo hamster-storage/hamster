@@ -66,21 +66,23 @@ simulation harness (invariant 5) the way the EC path did. Passes, data-path-firs
   enabling on a leader with no key is refused (the footgun guard). Proven by an
   in-process cluster test: enable via a non-leader redirect, the posture replicated
   to every node and surviving a node restart (KEK reloaded), and the no-key refusal.
+- **Pass 5 — the SSE-S3 surface (`internal/gateway`).** `x-amz-server-side-encryption:
+  AES256` echoed on PUT/GET/HEAD when the served version is encrypted (read from the
+  per-object record); the request header validated against the cluster posture — an
+  AES256 request the server cannot honor (single node, or posture off) is refused
+  rather than silently storing plaintext; SSE-KMS and SSE-C refused honestly. The
+  gateway gains an `EncryptionEnabled` posture callback (nil = single-node). Pure
+  `parseSSEHeaders`/`setSSEHeader` unit-tested across every branch, plus a single-node
+  refusal integration test.
 
 Remaining:
 
-1. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
-   when the cluster encrypts; the request header accepted; SSE-KMS and SSE-C
-   refused honestly (the DEK machinery leaves room for SSE-C later).
-
-2. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
+1. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
    scan (rewrap every DEK under a new KEK — object bytes untouched). Verification:
-   stream golden/tamper, key-source units, the coord sim schedules above, a cluster
-   e2e (an encrypted cluster, the posture in `status`, the SSE header, a read after
-   a node restart that must reload its KEK), and the `aws` CLI SSE round-trip under
-   `compat`. Docs: DATA-STREAM.md (encryption wired), S3-API.md (SSE surface);
-   ADR-0021 moves Proposed → Accepted, with a KEK-rotation ADR if the flow makes a
-   real decision.
+   the `aws` CLI SSE round-trip under `compat`, and a cluster e2e (an encrypted
+   cluster, the posture in `status`, the SSE header, a read after a node restart
+   that must reload its KEK). Docs: ADR-0021 moves Proposed → Accepted, with a
+   KEK-rotation ADR if the flow makes a real decision.
 
 **Open design questions — settled 2026-06-16:**
 
