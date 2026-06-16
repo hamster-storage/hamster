@@ -79,6 +79,7 @@ type Metadata interface {
 	GetVersion(bucket, key string, vid meta.VersionID) (meta.VersionEntry, bool)
 	ListVersions(bucket, key string) []meta.VersionEntry
 	ListObjects(bucket, prefix, startAfter string, max int) []meta.ObjectListing
+	ListObjectVersions(bucket, prefix, keyMarker string, versionIDMarker meta.VersionID, max int) ([]meta.VersionListing, bool)
 	GetUpload(bucket, key string, uid meta.VersionID) (meta.UploadRecord, bool)
 	ListUploads(bucket, prefix, keyMarker string, uploadMarker meta.VersionID, max int) []meta.UploadListing
 	ListUploadParts(bucket, key string, uid meta.VersionID, afterPart uint32, max int) ([]meta.PartRecord, bool)
@@ -226,6 +227,11 @@ func (l *loopMetadata) ListVersions(bucket, key string) (out []meta.VersionEntry
 
 func (l *loopMetadata) ListObjects(bucket, prefix, startAfter string, max int) (out []meta.ObjectListing) {
 	l.on(func() { out = l.store.ListObjects(bucket, prefix, startAfter, max) })
+	return
+}
+
+func (l *loopMetadata) ListObjectVersions(bucket, prefix, keyMarker string, versionIDMarker meta.VersionID, max int) (out []meta.VersionListing, truncated bool) {
+	l.on(func() { out, truncated = l.store.ListObjectVersions(bucket, prefix, keyMarker, versionIDMarker, max) })
 	return
 }
 
@@ -382,6 +388,8 @@ func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, id *sigv4.
 			g.getBucketLocation(w, r, bucket)
 		case q.Has("versioning"):
 			g.getBucketVersioning(w, r, bucket)
+		case q.Has("versions"):
+			g.listObjectVersions(w, r, bucket)
 		case q.Has("uploads"):
 			g.listMultipartUploads(w, r, bucket)
 		case q.Get("list-type") == "2":

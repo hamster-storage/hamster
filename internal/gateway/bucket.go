@@ -374,6 +374,184 @@ func (g *Gateway) listObjectsV1(w http.ResponseWriter, r *http.Request, bucket s
 	writeXML(w, http.StatusOK, out)
 }
 
+type versionEntryXML struct {
+	Key          string `xml:"Key"`
+	VersionID    string `xml:"VersionId"`
+	IsLatest     bool   `xml:"IsLatest"`
+	LastModified string `xml:"LastModified"`
+	ETag         string `xml:"ETag"`
+	Size         int64  `xml:"Size"`
+	StorageClass string `xml:"StorageClass"`
+}
+
+type deleteMarkerXML struct {
+	Key          string `xml:"Key"`
+	VersionID    string `xml:"VersionId"`
+	IsLatest     bool   `xml:"IsLatest"`
+	LastModified string `xml:"LastModified"`
+}
+
+type listVersionsResult struct {
+	XMLName             xml.Name            `xml:"ListVersionsResult"`
+	Xmlns               string              `xml:"xmlns,attr"`
+	Name                string              `xml:"Name"`
+	Prefix              string              `xml:"Prefix"`
+	KeyMarker           string              `xml:"KeyMarker"`
+	VersionIdMarker     string              `xml:"VersionIdMarker"`
+	NextKeyMarker       string              `xml:"NextKeyMarker,omitempty"`
+	NextVersionIdMarker string              `xml:"NextVersionIdMarker,omitempty"`
+	Delimiter           string              `xml:"Delimiter,omitempty"`
+	MaxKeys             int                 `xml:"MaxKeys"`
+	EncodingType        string              `xml:"EncodingType,omitempty"`
+	IsTruncated         bool                `xml:"IsTruncated"`
+	Versions            []versionEntryXML   `xml:"Version"`
+	DeleteMarkers       []deleteMarkerXML   `xml:"DeleteMarker"`
+	CommonPrefixes      []commonPrefixEntry `xml:"CommonPrefixes"`
+}
+
+// versionListing accumulates a ListObjectVersions page: object versions, delete
+// markers, and delimiter-collapsed common prefixes, with the resume cursor when
+// truncated (nextVID is zero for a common-prefix boundary).
+type versionListing struct {
+	versions  []meta.VersionListing
+	markers   []meta.VersionListing
+	prefixes  []string
+	truncated bool
+	nextKey   string
+	nextVID   meta.VersionID
+}
+
+// collectVersionListing walks the version keyspace through the paged meta read,
+// grouping by delimiter and stopping at max emitted rows (versions + markers +
+// common prefixes). It mirrors collectListing, but over every version rather than
+// the current-object index.
+func collectVersionListing(s Metadata, bucket, prefix, delimiter, keyMarker string, versionIDMarker meta.VersionID, max int) (versionListing, error) {
+	if _, ok := s.GetBucket(bucket); !ok {
+		return versionListing{}, meta.ErrNoSuchBucket
+	}
+	var out versionListing
+	if max <= 0 {
+		return out, nil
+	}
+	// Resuming into a common-prefix group: a key marker that is itself a group
+	// prefix means its members were already collapsed — skip them.
+	lastGroup := ""
+	if delimiter != "" && keyMarker != "" && strings.HasPrefix(keyMarker, prefix) && strings.HasSuffix(keyMarker, delimiter) {
+		lastGroup = keyMarker
+	}
+	emitted := 0
+	var lastKey string
+	var lastVID meta.VersionID
+	curKey, curVID := keyMarker, versionIDMarker
+	for {
+		batch, more := s.ListObjectVersions(bucket, prefix, curKey, curVID, listBatch)
+		for _, vl := range batch {
+			curKey, curVID = vl.Key, vl.Entry.VersionID // advance past skipped rows too
+			if lastGroup != "" && strings.HasPrefix(vl.Key, lastGroup) {
+				continue
+			}
+			group, isGroup := "", false
+			if delimiter != "" {
+				if i := strings.Index(vl.Key[len(prefix):], delimiter); i >= 0 {
+					group = vl.Key[:len(prefix)+i+len(delimiter)]
+					isGroup = true
+				}
+			}
+			if emitted == max {
+				out.truncated = true
+				out.nextKey, out.nextVID = lastKey, lastVID
+				return out, nil
+			}
+			switch {
+			case isGroup:
+				out.prefixes = append(out.prefixes, group)
+				lastGroup = group
+				lastKey, lastVID = group, meta.VersionID{}
+			case vl.Entry.Kind == meta.KindDeleteMarker:
+				out.markers = append(out.markers, vl)
+				lastKey, lastVID = vl.Key, vl.Entry.VersionID
+			default:
+				out.versions = append(out.versions, vl)
+				lastKey, lastVID = vl.Key, vl.Entry.VersionID
+			}
+			emitted++
+		}
+		if !more {
+			return out, nil
+		}
+	}
+}
+
+func (g *Gateway) listObjectVersions(w http.ResponseWriter, r *http.Request, bucket string) {
+	q := r.URL.Query()
+	prefix := q.Get("prefix")
+	delimiter := q.Get("delimiter")
+	keyMarker := q.Get("key-marker")
+	encode := q.Get("encoding-type") == "url"
+	maxKeys, ok := parseMaxKeys(q.Get("max-keys"))
+	if !ok {
+		writeError(w, r, errInvalidArgument)
+		return
+	}
+	// The version-id marker is the hex ID we emit in NextVersionIdMarker; an
+	// empty or "null" value resumes after the whole key marker.
+	var vidMarker meta.VersionID
+	if vm := q.Get("version-id-marker"); vm != "" && vm != "null" {
+		if id, ok := parseVersionID(vm); ok {
+			vidMarker = id
+		}
+	}
+
+	l, err := collectVersionListing(g.cfg.Meta, bucket, prefix, delimiter, keyMarker, vidMarker, maxKeys)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+
+	out := listVersionsResult{
+		Xmlns:           s3Xmlns,
+		Name:            bucket,
+		Prefix:          listEncode(prefix, encode),
+		KeyMarker:       listEncode(keyMarker, encode),
+		VersionIdMarker: q.Get("version-id-marker"),
+		Delimiter:       listEncode(delimiter, encode),
+		MaxKeys:         maxKeys,
+		IsTruncated:     l.truncated,
+	}
+	if encode {
+		out.EncodingType = "url"
+	}
+	if l.truncated {
+		out.NextKeyMarker = listEncode(l.nextKey, encode)
+		if l.nextVID != (meta.VersionID{}) {
+			out.NextVersionIdMarker = versionIDString(l.nextVID)
+		}
+	}
+	for _, vl := range l.versions {
+		out.Versions = append(out.Versions, versionEntryXML{
+			Key:          listEncode(vl.Key, encode),
+			VersionID:    versionLabel(vl.Entry),
+			IsLatest:     vl.IsLatest,
+			LastModified: iso8601(vl.Entry.CreatedUnixMS),
+			ETag:         objectETag(vl.Entry.ETag, len(vl.Entry.Parts)),
+			Size:         vl.Entry.Size,
+			StorageClass: "STANDARD",
+		})
+	}
+	for _, vl := range l.markers {
+		out.DeleteMarkers = append(out.DeleteMarkers, deleteMarkerXML{
+			Key:          listEncode(vl.Key, encode),
+			VersionID:    versionLabel(vl.Entry),
+			IsLatest:     vl.IsLatest,
+			LastModified: iso8601(vl.Entry.CreatedUnixMS),
+		})
+	}
+	for _, p := range l.prefixes {
+		out.CommonPrefixes = append(out.CommonPrefixes, commonPrefixEntry{Prefix: listEncode(p, encode)})
+	}
+	writeXML(w, http.StatusOK, out)
+}
+
 func fillListing(contents *[]contentsEntry, prefixes *[]commonPrefixEntry, l listing, encode bool) {
 	for _, o := range l.objects {
 		*contents = append(*contents, contentsEntry{
