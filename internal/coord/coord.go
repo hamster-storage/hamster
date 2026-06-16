@@ -70,6 +70,15 @@ type Config struct {
 	// under the simulator, so the encrypted write path stays deterministic —
 	// the DEK is its only random input. Read only when Encryption reports on.
 	Entropy io.Reader
+
+	// Keyring resolves the node's loaded KEKs by fingerprint (ADR-0032).
+	// Normally the node holds one (its master key); during a master-key
+	// rotation it holds two — the old, to unwrap each DEK, and the new, to
+	// rewrap it. The rewrap sweep looks both up by the posture's current and
+	// rotating-to fingerprints. nil (or a fingerprint the node does not hold)
+	// reports not-found — an unencrypted cluster, and the default in tests.
+	// Loop-safe — called on the loop.
+	Keyring func(fingerprint uint64) (keys.KEK, bool)
 }
 
 // Coordinator runs data-path operations for one node.
@@ -107,6 +116,15 @@ func (c *Coordinator) encryption() (keys.KEK, bool) {
 		return keys.KEK{}, false
 	}
 	return c.cfg.Encryption()
+}
+
+// keyFor resolves a loaded KEK by fingerprint for the rewrap sweep, tolerating
+// an unset keyring (no key machinery).
+func (c *Coordinator) keyFor(fingerprint uint64) (keys.KEK, bool) {
+	if c.cfg.Keyring == nil {
+		return keys.KEK{}, false
+	}
+	return c.cfg.Keyring(fingerprint)
 }
 
 // wrapNonce derives a DEK-wrap nonce from a version ID: its first bytes.

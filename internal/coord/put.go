@@ -103,10 +103,23 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		encAlg     meta.EncAlgorithm
 		wrappedDEK []byte
 		dekBytes   []byte
+		kekFP      uint64
 	)
 	if encOn {
 		if !kek.Loaded() {
 			done(PutResult{}, fmt.Errorf("coord: encryption enabled but no KEK loaded: %w", ErrRefused))
+			return
+		}
+		kekFP = kek.Fingerprint().Uint64()
+		// Write-time KEK guard (ADR-0032): once the cluster has established its
+		// current KEK fingerprint, a node whose loaded key does not match it (nor
+		// the key a rotation is moving to) holds the wrong master key — refuse
+		// rather than write an object no other node could read. Skipped while the
+		// fingerprint is unestablished (a fresh or just-upgraded cluster).
+		post := c.cfg.Raft.Store().EncryptionPosture()
+		if post.CurrentKEKFingerprint != 0 &&
+			kekFP != post.CurrentKEKFingerprint && kekFP != post.RotatingToKEKFingerprint {
+			done(PutResult{}, fmt.Errorf("coord: loaded KEK %016x is not the cluster key: %w", kekFP, ErrRefused))
 			return
 		}
 		dek, err := keys.NewDEK(c.cfg.Entropy)
@@ -131,7 +144,7 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		partition: partition,
 		nodes:     nodes,
 		etag:      etag[:], objSum: objSum[:],
-		encAlg: encAlg, wrappedDEK: wrappedDEK,
+		encAlg: encAlg, wrappedDEK: wrappedDEK, kekFP: kekFP,
 		failed: make([]bool, k+m),
 	}
 
@@ -210,6 +223,7 @@ type putOp struct {
 	objSum      []byte
 	encAlg      meta.EncAlgorithm
 	wrappedDEK  []byte
+	kekFP       uint64
 
 	streams []*datapath.WriteStream
 	sinks   []*sink
@@ -337,6 +351,7 @@ func (op *putOp) evaluate(lastErr error) {
 		LegalHold:         op.opts.LegalHold,
 		EncAlgorithm:      op.encAlg,
 		WrappedDEK:        op.wrappedDEK,
+		KEKFingerprint:    op.kekFP,
 	}, func(res any, err error) {
 		if err != nil {
 			// Durable shards without metadata are orphans; reclaim what
