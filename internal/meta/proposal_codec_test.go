@@ -30,7 +30,7 @@ func fullProposals() []any {
 			Partition:    77, ECDataShards: 4, ECParityShards: 2,
 			ObjectChecksum: []byte{0xC1}, ShardChecksums: [][]byte{{0x51}, {0x52}},
 			RetentionMode: RetentionCompliance, RetainUntilUnixMS: 1800000000000, LegalHold: true,
-			EncAlgorithm: EncAES256GCM, WrappedDEK: []byte{0x60, 0x61, 0x62},
+			EncAlgorithm: EncAES256GCM, WrappedDEK: []byte{0x60, 0x61, 0x62}, KEKFingerprint: 0x1122334455667788,
 		},
 		DeleteObject{ProposedAtUnixMS: 1700000000005, Bucket: "docs", Key: "k", VersionID: vid},
 		DeleteVersion{ProposedAtUnixMS: 1700000000006, Bucket: "docs", Key: "k", VersionID: vid, BypassGovernance: true},
@@ -54,7 +54,11 @@ func fullProposals() []any {
 		ReEncodeObject{ProposedAtUnixMS: 1700000000017, Bucket: "docs", Key: "dir/report.pdf",
 			VersionID: vid, DataID: did, ECDataShards: 3, ECParityShards: 2,
 			ShardChecksums: [][]byte{{0x51}, {0x52}, {0x53}, {0x54}, {0x55}}},
-		SetEncryptionPosture{ProposedAtUnixMS: 1700000000018, Algorithm: EncAES256GCM},
+		SetEncryptionPosture{ProposedAtUnixMS: 1700000000018, Algorithm: EncAES256GCM, KEKFingerprint: 0x0102030405060708},
+		BeginKEKRotation{ProposedAtUnixMS: 1700000000019, FromFingerprint: 0x0102030405060708, ToFingerprint: 0x1112131415161718},
+		RewrapDEK{ProposedAtUnixMS: 1700000000020, Bucket: "docs", Key: "dir/report.pdf",
+			VersionID: vid, WrappedDEK: []byte{0x70, 0x71, 0x72}, KEKFingerprint: 0x1112131415161718},
+		CompleteKEKRotation{ProposedAtUnixMS: 1700000000021, ToFingerprint: 0x1112131415161718},
 	}
 }
 
@@ -135,9 +139,9 @@ func TestProposalDecodeErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":      {},
 		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		// Field 22 is the next unassigned command slot — a newer node's
+		// Field 25 is the next unassigned command slot — a newer node's
 		// command this build does not know, which must refuse, not half-apply.
-		"unknown_command": encode(envelope(22)),
+		"unknown_command": encode(envelope(25)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -149,7 +153,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(22)))
+	_, err := DecodeProposal(encode(envelope(25)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

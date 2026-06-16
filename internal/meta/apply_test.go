@@ -141,6 +141,157 @@ func TestEncryptionPostureEnableOnly(t *testing.T) {
 	}
 }
 
+// putEncrypted commits an encrypted version with the given wrapped DEK,
+// fingerprint, and optional COMPLIANCE lock — the shape master-key rotation
+// rewraps.
+func (e *env) putEncrypted(bucket, key string, wrapped []byte, fp uint64, until int64) VersionID {
+	e.t.Helper()
+	at := e.tick()
+	res, err := e.s.ApplyPutObject(PutObject{
+		ProposedAtUnixMS: at, Bucket: bucket, Key: key, VersionID: mintAt(at, e.rng),
+		Size: 3, ETag: []byte{1, 2, 3}, EncAlgorithm: EncAES256GCM, WrappedDEK: wrapped, KEKFingerprint: fp,
+		RetentionMode: func() RetentionMode {
+			if until > 0 {
+				return RetentionCompliance
+			}
+			return RetentionNone
+		}(),
+		RetainUntilUnixMS: until,
+	})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return res.VersionID
+}
+
+// TestKEKFingerprintEstablishAndGuard: enabling encryption establishes the
+// cluster's current KEK fingerprint, and afterward a posture write carrying a
+// different fingerprint — a node holding the wrong master key — is refused
+// (ADR-0032), while the matching one stays idempotent.
+func TestKEKFingerprintEstablishAndGuard(t *testing.T) {
+	e := newEnv(t)
+	const fpA, fpB = uint64(0xAAAA), uint64(0xBBBB)
+
+	// Enable with fingerprint A: it becomes the established current.
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncAES256GCM, KEKFingerprint: fpA}); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.s.EncryptionPosture().CurrentKEKFingerprint; got != fpA {
+		t.Fatalf("current fingerprint %x, want %x", got, fpA)
+	}
+	// Re-affirm with A: idempotent.
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncAES256GCM, KEKFingerprint: fpA}); err != nil {
+		t.Fatalf("re-affirm A: %v", err)
+	}
+	// A different fingerprint is the split-key footgun: refused.
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncAES256GCM, KEKFingerprint: fpB}); !errors.Is(err, ErrKEKMismatch) {
+		t.Fatalf("mismatched key: got %v, want ErrKEKMismatch", err)
+	}
+	if got := e.s.EncryptionPosture().CurrentKEKFingerprint; got != fpA {
+		t.Fatal("current fingerprint changed after a refused mismatch")
+	}
+}
+
+// TestKEKRotationLifecycle walks a full rotation: begin, rewrap a version
+// (COMPLIANCE-locked, to prove it stays lock- and byte-safe), complete, and
+// the guards around each step (ADR-0032).
+func TestKEKRotationLifecycle(t *testing.T) {
+	e := newEnv(t)
+	e.mustCreateBucket("vault", true) // object lock enabled
+	const fpOld, fpNew, fpOther = uint64(0x1111), uint64(0x2222), uint64(0x3333)
+
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncAES256GCM, KEKFingerprint: fpOld}); err != nil {
+		t.Fatal(err)
+	}
+	until := e.now + 100*365*24*3600*1000 // far future
+	vid := e.putEncrypted("vault", "k", []byte("OLD-WRAP"), fpOld, until)
+
+	// Begin must name the real current key; a stale From is refused.
+	if err := e.s.ApplyBeginKEKRotation(BeginKEKRotation{ProposedAtUnixMS: e.tick(), FromFingerprint: fpOther, ToFingerprint: fpNew}); !errors.Is(err, ErrKEKMismatch) {
+		t.Fatalf("stale From: got %v, want ErrKEKMismatch", err)
+	}
+	// Open the rotation.
+	if err := e.s.ApplyBeginKEKRotation(BeginKEKRotation{ProposedAtUnixMS: e.tick(), FromFingerprint: fpOld, ToFingerprint: fpNew}); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.s.EncryptionPosture().RotatingToKEKFingerprint; got != fpNew {
+		t.Fatalf("rotating-to %x, want %x", got, fpNew)
+	}
+	// Re-begin to the same target is idempotent; a second, different target is refused.
+	if err := e.s.ApplyBeginKEKRotation(BeginKEKRotation{ProposedAtUnixMS: e.tick(), FromFingerprint: fpOld, ToFingerprint: fpNew}); err != nil {
+		t.Fatalf("idempotent re-begin: %v", err)
+	}
+	if err := e.s.ApplyBeginKEKRotation(BeginKEKRotation{ProposedAtUnixMS: e.tick(), FromFingerprint: fpOld, ToFingerprint: fpOther}); !errors.Is(err, ErrKEKMismatch) {
+		t.Fatalf("second concurrent target: got %v, want ErrKEKMismatch", err)
+	}
+
+	// Rewrap the locked version: only WrappedDEK and the fingerprint change.
+	before, _ := e.s.GetVersion("vault", "k", vid)
+	if err := e.s.ApplyRewrapDEK(RewrapDEK{ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid, WrappedDEK: []byte("NEW-WRAP"), KEKFingerprint: fpNew}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := e.s.GetVersion("vault", "k", vid)
+	if string(after.WrappedDEK) != "NEW-WRAP" || after.KEKFingerprint != fpNew {
+		t.Fatalf("rewrap did not update the wrap: %q / %x", after.WrappedDEK, after.KEKFingerprint)
+	}
+	// COMPLIANCE-safe: lock, retention, bytes, and EC layout untouched.
+	if after.RetentionMode != before.RetentionMode || after.RetainUntilUnixMS != before.RetainUntilUnixMS ||
+		after.Size != before.Size || string(after.ETag) != string(before.ETag) || after.DataID != before.DataID {
+		t.Fatal("rewrap changed a field other than the wrapped DEK")
+	}
+	// Idempotent: rewrapping to the same fingerprint is a no-op success.
+	if err := e.s.ApplyRewrapDEK(RewrapDEK{ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid, WrappedDEK: []byte("IGNORED"), KEKFingerprint: fpNew}); err != nil {
+		t.Fatalf("idempotent rewrap: %v", err)
+	}
+	if again, _ := e.s.GetVersion("vault", "k", vid); string(again.WrappedDEK) != "NEW-WRAP" {
+		t.Fatal("idempotent rewrap overwrote the wrap")
+	}
+
+	// Complete: a mismatched target is refused; the right one advances current.
+	if err := e.s.ApplyCompleteKEKRotation(CompleteKEKRotation{ProposedAtUnixMS: e.tick(), ToFingerprint: fpOther}); !errors.Is(err, ErrKEKMismatch) {
+		t.Fatalf("complete wrong target: got %v, want ErrKEKMismatch", err)
+	}
+	if err := e.s.ApplyCompleteKEKRotation(CompleteKEKRotation{ProposedAtUnixMS: e.tick(), ToFingerprint: fpNew}); err != nil {
+		t.Fatal(err)
+	}
+	post := e.s.EncryptionPosture()
+	if post.CurrentKEKFingerprint != fpNew || post.RotatingToKEKFingerprint != 0 {
+		t.Fatalf("after complete: current %x rotating %x", post.CurrentKEKFingerprint, post.RotatingToKEKFingerprint)
+	}
+	// Completing again (already closed, on target) is idempotent.
+	if err := e.s.ApplyCompleteKEKRotation(CompleteKEKRotation{ProposedAtUnixMS: e.tick(), ToFingerprint: fpNew}); err != nil {
+		t.Fatalf("idempotent complete: %v", err)
+	}
+}
+
+// TestKEKRotationRejections: rotation refuses a cluster that is not encrypting
+// and a rewrap of a non-encrypted or missing version (ADR-0032).
+func TestKEKRotationRejections(t *testing.T) {
+	e := newEnv(t)
+	e.mustCreateBucket("docs", false)
+
+	// Not encrypting: begin is refused.
+	if err := e.s.ApplyBeginKEKRotation(BeginKEKRotation{ProposedAtUnixMS: e.tick(), FromFingerprint: 1, ToFingerprint: 2}); !errors.Is(err, ErrNotEncrypting) {
+		t.Fatalf("begin without encryption: got %v, want ErrNotEncrypting", err)
+	}
+
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncAES256GCM, KEKFingerprint: 0x1111}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.s.ApplyBeginKEKRotation(BeginKEKRotation{ProposedAtUnixMS: e.tick(), FromFingerprint: 0x1111, ToFingerprint: 0x2222}); err != nil {
+		t.Fatal(err)
+	}
+	// Rewrap of a plaintext version is refused.
+	plain := e.put("docs", "plain")
+	if err := e.s.ApplyRewrapDEK(RewrapDEK{ProposedAtUnixMS: e.tick(), Bucket: "docs", Key: "plain", VersionID: plain.VersionID, WrappedDEK: []byte("x"), KEKFingerprint: 0x2222}); !errors.Is(err, ErrInvalidRewrap) {
+		t.Fatalf("rewrap plaintext: got %v, want ErrInvalidRewrap", err)
+	}
+	// Rewrap of a missing version is refused.
+	if err := e.s.ApplyRewrapDEK(RewrapDEK{ProposedAtUnixMS: e.tick(), Bucket: "docs", Key: "ghost", VersionID: plain.VersionID, WrappedDEK: []byte("x"), KEKFingerprint: 0x2222}); !errors.Is(err, ErrNoSuchVersion) {
+		t.Fatalf("rewrap missing: got %v, want ErrNoSuchVersion", err)
+	}
+}
+
 // TestComplianceLockIsAbsolute is invariant 4 made executable: no path may
 // destroy or weaken a COMPLIANCE-locked version, with or without a governance
 // bypass, until its retention expires.

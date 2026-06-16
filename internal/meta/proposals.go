@@ -78,9 +78,12 @@ type PutObject struct {
 
 	// Encryption at rest (ADR-0021): set when the coordinator encrypted the
 	// object, carrying the algorithm and the DEK wrapped under the cluster
-	// KEK. Zero/empty for a plaintext write.
-	EncAlgorithm EncAlgorithm
-	WrappedDEK   []byte
+	// KEK. Zero/empty for a plaintext write. KEKFingerprint names the KEK the
+	// DEK was wrapped under (ADR-0032), so rotation can find versions still on
+	// an old key; zero for a plaintext write.
+	EncAlgorithm   EncAlgorithm
+	WrappedDEK     []byte
+	KEKFingerprint uint64
 }
 
 // PutResult reports the committed version ID, after any monotonicity bump,
@@ -235,7 +238,55 @@ type SetClusterLayout struct {
 // that has started encrypting never silently stops. Setting the same
 // algorithm again is idempotent. Only the posture is replicated; the KEK is
 // never part of this.
+//
+// KEKFingerprint establishes the cluster's current KEK fingerprint (ADR-0032)
+// when enabling: the leader supplies its loaded KEK's fingerprint, so the
+// posture knows which key new writes wrap under. Apply sets it if unset (the
+// fresh-enable and the upgraded-v0.7 lazy-establishment cases) and otherwise
+// requires it to match — a mismatch (a node holding the wrong master key)
+// is refused. Zero leaves the current fingerprint untouched.
 type SetEncryptionPosture struct {
 	ProposedAtUnixMS int64
 	Algorithm        EncAlgorithm
+	KEKFingerprint   uint64
+}
+
+// BeginKEKRotation opens a master-key rotation (ADR-0032): it records the new
+// KEK fingerprint the rewrap sweep is moving every version to. Apply requires
+// the cluster to be encrypting, the current fingerprint to be established and
+// to match From (a stale-leader guard), the target to differ from it, and no
+// rotation already open (one at a time) — re-proposing the same target is
+// idempotent. The sweep then rewraps each version (RewrapDEK) and closes the
+// rotation (CompleteKEKRotation) once none remain on the old key.
+type BeginKEKRotation struct {
+	ProposedAtUnixMS int64
+	FromFingerprint  uint64
+	ToFingerprint    uint64
+}
+
+// RewrapDEK rewrites one version's wrapped DEK under a new KEK (ADR-0032): the
+// leader unwraps the DEK under the old KEK and rewraps it under the new one,
+// and this commits the result. Only WrappedDEK and KEKFingerprint change — the
+// object's bytes, shards, checksums, and object-lock fields are untouched, so
+// it is COMPLIANCE-safe (it can run on a locked version). Idempotent: rewrapping
+// a version already on the new fingerprint is a no-op success.
+type RewrapDEK struct {
+	ProposedAtUnixMS int64
+	Bucket           string
+	Key              string
+	VersionID        VersionID
+	WrappedDEK       []byte
+	KEKFingerprint   uint64
+}
+
+// CompleteKEKRotation closes an open rotation (ADR-0032): it advances the
+// posture's current fingerprint to the rotated-to key and clears the
+// rotating-to marker. The leader proposes it only after a sweep finds no
+// version left on the old fingerprint — apply trusts that determination (like
+// closing a layout transition) and only guards that ToFingerprint matches the
+// open rotation. Idempotent: completing an already-closed rotation whose
+// current equals ToFingerprint is a no-op success.
+type CompleteKEKRotation struct {
+	ProposedAtUnixMS int64
+	ToFingerprint    uint64
 }

@@ -31,6 +31,7 @@ func fullVersionEntry() VersionEntry {
 		LegalHold:         true,
 		EncAlgorithm:      EncAES256GCM,
 		WrappedDEK:        []byte{0x77, 0x88, 0x99, 0xAB},
+		KEKFingerprint:    0xA1A2A3A4A5A6A7A8,
 		NullVersion:       true,
 		Parts: []PartRef{
 			{DataID: VersionID{0x01}, Size: 5 << 20, Checksum: []byte{0xCA, 0xFE}},
@@ -90,6 +91,21 @@ func TestCodecRoundTrip(t *testing.T) {
 			t.Fatalf("round trip: %+v, %v", out, err)
 		}
 	})
+	t.Run("EncryptionPosture", func(t *testing.T) {
+		// A posture mid-rotation: both fingerprints set (ADR-0032).
+		in := EncryptionPosture{FormatVersion: 1, Algorithm: EncAES256GCM, CurrentKEKFingerprint: 0x1111, RotatingToKEKFingerprint: 0x2222}
+		out, err := unmarshalEncryptionPosture(marshalEncryptionPosture(in))
+		if err != nil || !reflect.DeepEqual(in, out) {
+			t.Fatalf("round trip: %+v, %v", out, err)
+		}
+		// A pre-rotation posture (no fingerprints) still round-trips, and a
+		// record from before the fields existed decodes to zero fingerprints.
+		bare := EncryptionPosture{FormatVersion: 1, Algorithm: EncAES256GCM}
+		out2, err := unmarshalEncryptionPosture(marshalEncryptionPosture(bare))
+		if err != nil || !reflect.DeepEqual(bare, out2) {
+			t.Fatalf("bare round trip: %+v, %v", out2, err)
+		}
+	})
 }
 
 // TestCodecGolden pins the exact bytes. A failure here means the on-disk
@@ -105,7 +121,10 @@ func TestCodecGolden(t *testing.T) {
 		{"CurrentRecord", marshalCurrentRecord(CurrentRecord{FormatVersion: 1, VersionID: VersionID{9}, Size: 3, ETag: []byte{1, 2}, CreatedUnixMS: 5, PartCount: 4}),
 			"080112100900000000000000000000000000000018032202010228053004"},
 		{"VersionEntry", marshalVersionEntry(fullVersionEntry()),
-			"08011210010203ff00100000000000000000000020808080801428f292d0dfb0333204deadbeef3a186170706c69636174696f6e2f6f637465742d73747265616d420c0a05612d6b657912036f6e65420c0a05622d6b6579120374776f42070a05656d707479482a50045802620211226a01016a01026a0103700278ffefcc86a637800101880101920110aa00bb000000000000000000000000009a011b0a1001000000000000000000000000000000108080c0021a02cafe9a01170a100200000000000000000000000000000010071a01f0a00101aa0104778899ab"},
+			"08011210010203ff00100000000000000000000020808080801428f292d0dfb0333204deadbeef3a186170706c69636174696f6e2f6f637465742d73747265616d420c0a05612d6b657912036f6e65420c0a05622d6b6579120374776f42070a05656d707479482a50045802620211226a01016a01026a0103700278ffefcc86a637800101880101920110aa00bb000000000000000000000000009a011b0a1001000000000000000000000000000000108080c0021a02cafe9a01170a100200000000000000000000000000000010071a01f0a00101aa0104778899abb001a8cf9aadcaf4a8d1a101"},
+		// EncryptionPosture mid-rotation (ADR-0032): field 3 current = 0x1111, field 4 rotating-to = 0x2222.
+		{"EncryptionPosture", marshalEncryptionPosture(EncryptionPosture{FormatVersion: 1, Algorithm: EncAES256GCM, CurrentKEKFingerprint: 0x1111, RotatingToKEKFingerprint: 0x2222}),
+			"0801100118912220a244"},
 	}
 	for _, c := range cases {
 		if got := hex.EncodeToString(c.got); got != c.want {

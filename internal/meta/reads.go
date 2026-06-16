@@ -59,6 +59,20 @@ func (s *Store) EncryptionAlgorithm() EncAlgorithm {
 	return v.(EncryptionPosture).Algorithm
 }
 
+// EncryptionPosture returns the cluster's full encryption-at-rest posture
+// (ADR-0021, ADR-0032): the algorithm plus the current and rotating-to KEK
+// fingerprints. The zero value (Algorithm EncNone, both fingerprints zero) is
+// returned before any posture is committed. The coordinator reads it to stamp
+// new writes with the current fingerprint and to drive a rotation; status
+// reports it.
+func (s *Store) EncryptionPosture() EncryptionPosture {
+	v, ok := s.kv.get(encryptionPostureKey)
+	if !ok {
+		return EncryptionPosture{}
+	}
+	return v.(EncryptionPosture)
+}
+
 // Node returns a member's registration row (ADR-0016, ADR-0004), present
 // once the issuer has committed it through RegisterNode.
 func (s *Store) Node(id string) (NodeRecord, bool) {

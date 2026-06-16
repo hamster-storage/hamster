@@ -45,6 +45,14 @@ const (
 	propReEncodeObject    = 19 // version EC re-encode (ADR-0004, ADR-0015)
 	propSetObjectLock     = 20 // bucket object-lock default retention (ADR-0006)
 	propSetEncryption     = 21 // cluster encryption-at-rest posture (ADR-0021)
+	propBeginKEKRotation  = 22 // open a master-key rotation (ADR-0032)
+	propRewrapDEK         = 23 // rewrap one version's DEK under a new KEK (ADR-0032)
+	propCompleteKEKRot    = 24 // close a master-key rotation (ADR-0032)
+
+	// propMax is the highest command number this binary knows. The decoder
+	// admits the envelope command range [propCreateBucket, propMax]; a higher
+	// number is a newer node's command this binary cannot safely apply.
+	propMax = propCompleteKEKRot
 )
 
 // EncodeProposal encodes one proposal for the Raft log. p must be one of
@@ -94,6 +102,7 @@ func EncodeProposal(p any) []byte {
 		cmd = putBool(cmd, 15, c.LegalHold)
 		cmd = putUvarint(cmd, 16, uint64(c.EncAlgorithm))
 		cmd = putBytes(cmd, 17, c.WrappedDEK)
+		cmd = putUvarint(cmd, 18, c.KEKFingerprint)
 	case DeleteObject:
 		atMS, num = c.ProposedAtUnixMS, propDeleteObject
 		cmd = putString(cmd, 1, c.Bucket)
@@ -158,6 +167,21 @@ func EncodeProposal(p any) []byte {
 	case SetEncryptionPosture:
 		atMS, num = c.ProposedAtUnixMS, propSetEncryption
 		cmd = putUvarint(cmd, 1, uint64(c.Algorithm))
+		cmd = putUvarint(cmd, 2, c.KEKFingerprint)
+	case BeginKEKRotation:
+		atMS, num = c.ProposedAtUnixMS, propBeginKEKRotation
+		cmd = putUvarint(cmd, 1, c.FromFingerprint)
+		cmd = putUvarint(cmd, 2, c.ToFingerprint)
+	case RewrapDEK:
+		atMS, num = c.ProposedAtUnixMS, propRewrapDEK
+		cmd = putString(cmd, 1, c.Bucket)
+		cmd = putString(cmd, 2, c.Key)
+		cmd = putID(cmd, 3, c.VersionID)
+		cmd = putBytes(cmd, 4, c.WrappedDEK)
+		cmd = putUvarint(cmd, 5, c.KEKFingerprint)
+	case CompleteKEKRotation:
+		atMS, num = c.ProposedAtUnixMS, propCompleteKEKRot
+		cmd = putUvarint(cmd, 1, c.ToFingerprint)
 	case SetClusterLayout:
 		atMS, num = c.ProposedAtUnixMS, propSetLayout
 		cmd = putUvarint(cmd, 1, c.Version)
@@ -229,7 +253,7 @@ func DecodeProposal(b []byte) (any, error) {
 			d.uint32() // format_version: additive, no branching yet
 		case d.num == propAt:
 			atMS = d.int64()
-		case d.num >= propCreateBucket && d.num <= propSetEncryption:
+		case d.num >= propCreateBucket && d.num <= propMax:
 			if seen {
 				d.fail("proposal carries more than one command")
 				break
@@ -346,6 +370,8 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.EncAlgorithm = EncAlgorithm(d.enum8())
 			case 17:
 				c.WrappedDEK = d.bytes()
+			case 18:
+				c.KEKFingerprint = d.uvarint()
 			default:
 				d.skipUnknown(nil)
 			}
@@ -512,6 +538,51 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 			switch d.num {
 			case 1:
 				c.Algorithm = EncAlgorithm(d.enum8())
+			case 2:
+				c.KEKFingerprint = d.uvarint()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propBeginKEKRotation:
+		c := BeginKEKRotation{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.FromFingerprint = d.uvarint()
+			case 2:
+				c.ToFingerprint = d.uvarint()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propRewrapDEK:
+		c := RewrapDEK{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.Bucket = d.str()
+			case 2:
+				c.Key = d.str()
+			case 3:
+				c.VersionID = d.id()
+			case 4:
+				c.WrappedDEK = d.bytes()
+			case 5:
+				c.KEKFingerprint = d.uvarint()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propCompleteKEKRot:
+		c := CompleteKEKRotation{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.ToFingerprint = d.uvarint()
 			default:
 				d.skipUnknown(nil)
 			}

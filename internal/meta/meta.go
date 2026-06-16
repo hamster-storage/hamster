@@ -45,6 +45,9 @@ var (
 	ErrInvalidReEncode        = errors.New("version cannot be re-encoded")
 	ErrInvalidEncryption      = errors.New("invalid encryption algorithm")
 	ErrEncryptionDowngrade    = errors.New("encryption is enable-only: cannot disable it once enabled")
+	ErrKEKMismatch            = errors.New("KEK fingerprint does not match the cluster's current key")
+	ErrNotEncrypting          = errors.New("cluster is not encrypting: nothing to rotate")
+	ErrInvalidRewrap          = errors.New("version cannot be rewrapped")
 )
 
 // Multipart limits, S3 parity (docs/S3-API.md). Apply enforces both: the

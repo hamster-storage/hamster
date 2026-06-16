@@ -39,6 +39,12 @@ func (s *Store) Apply(p any) (any, error) {
 		return nil, s.ApplySetClusterLayout(c)
 	case SetEncryptionPosture:
 		return nil, s.ApplySetEncryptionPosture(c)
+	case BeginKEKRotation:
+		return nil, s.ApplyBeginKEKRotation(c)
+	case RewrapDEK:
+		return nil, s.ApplyRewrapDEK(c)
+	case CompleteKEKRotation:
+		return nil, s.ApplyCompleteKEKRotation(c)
 	case RegisterNode:
 		return nil, s.ApplyRegisterNode(c)
 	case SetNodeDraining:
