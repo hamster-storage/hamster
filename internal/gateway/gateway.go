@@ -91,6 +91,7 @@ type Metadata interface {
 	ApplyPutObject(meta.PutObject) (meta.PutResult, error)
 	ApplyDeleteObject(meta.DeleteObject) (meta.DeleteObjectResult, error)
 	ApplyDeleteVersion(meta.DeleteVersion) (meta.DeleteVersionResult, error)
+	ApplyUpdateRetention(meta.UpdateRetention) error
 	ApplyCreateMultipartUpload(meta.CreateMultipartUpload) error
 	ApplyUploadPart(meta.UploadPart) (meta.UploadPartResult, error)
 	ApplyCompleteMultipartUpload(meta.CompleteMultipartUpload) (meta.CompleteResult, error)
@@ -288,6 +289,11 @@ func (l *loopMetadata) ApplyDeleteVersion(p meta.DeleteVersion) (res meta.Delete
 	return
 }
 
+func (l *loopMetadata) ApplyUpdateRetention(p meta.UpdateRetention) (err error) {
+	l.on(func() { err = l.store.ApplyUpdateRetention(p) })
+	return
+}
+
 func (l *loopMetadata) ApplyCreateMultipartUpload(p meta.CreateMultipartUpload) (err error) {
 	l.on(func() { err = l.store.ApplyCreateMultipartUpload(p) })
 	return
@@ -458,6 +464,17 @@ func (g *Gateway) serveObject(w http.ResponseWriter, r *http.Request, id *sigv4.
 			g.listParts(w, r, bucket, key, uid)
 		case http.MethodDelete:
 			g.abortMultipartUpload(w, r, bucket, key, uid)
+		default:
+			writeError(w, r, errMethodNotAllowed)
+		}
+		return
+	}
+	if q.Has("retention") {
+		switch r.Method {
+		case http.MethodGet:
+			g.getObjectRetention(w, r, bucket, key)
+		case http.MethodPut:
+			g.putObjectRetention(w, r, id, bucket, key)
 		default:
 			writeError(w, r, errMethodNotAllowed)
 		}

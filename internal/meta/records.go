@@ -3,6 +3,7 @@ package meta
 import (
 	"maps"
 	"slices"
+	"time"
 )
 
 // currentFormatVersion stamps every new record, per the additive-formats
@@ -167,6 +168,15 @@ func (e VersionEntry) lockedAt(atUnixMS int64, bypassGovernance bool) bool {
 		return !bypassGovernance
 	}
 	return false
+}
+
+// retainUntilFromDefault computes an object's absolute retain-until from a
+// bucket default rule's duration and the write's proposal time (ADR-0006). Days
+// add as calendar days, years as calendar years (AddDate), matching how S3
+// resolves Days/Years defaults. Deterministic: a pure function of its inputs, so
+// every replica derives the same date.
+func retainUntilFromDefault(atUnixMS int64, days, years uint32) int64 {
+	return time.UnixMilli(atUnixMS).UTC().AddDate(int(years), 0, int(days)).UnixMilli()
 }
 
 // CurrentRecord is one row under c/ — the derived listing row for a key
