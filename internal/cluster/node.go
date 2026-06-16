@@ -64,6 +64,7 @@ type Node struct {
 	coord     *coord.Coordinator
 	s3        *s3Server     // nil unless ServeS3 was asked for
 	masterKey keys.KEK      // the cluster KEK (ADR-0021), loaded from the operator's key source; zero if none
+	newKey    keys.KEK      // the incoming KEK during a master-key rotation (ADR-0032), loaded from -new-master-key-file; zero otherwise
 	ready     chan struct{} // closed once the node is built; gates control conns
 	stopSync  chan struct{}
 
@@ -80,6 +81,7 @@ type Option func(*nodeOptions)
 
 type nodeOptions struct {
 	masterKey keys.KEK
+	newKey    keys.KEK
 }
 
 // WithMasterKey supplies the loaded cluster KEK the node uses to wrap and
@@ -88,6 +90,31 @@ type nodeOptions struct {
 // startup. Omit it for an unencrypted cluster.
 func WithMasterKey(kek keys.KEK) Option {
 	return func(o *nodeOptions) { o.masterKey = kek }
+}
+
+// WithNewMasterKey supplies the incoming KEK during a master-key rotation
+// (ADR-0032): the key the cluster is rotating to, loaded from
+// -new-master-key-file. Held in memory only, like the master key, and never
+// sent over the wire — the operator provisions it on every node out of band
+// (the same way the master key arrives). Omit it when no rotation is in flight.
+func WithNewMasterKey(kek keys.KEK) Option {
+	return func(o *nodeOptions) { o.newKey = kek }
+}
+
+// keyByFingerprint resolves one of the node's loaded KEKs by its content
+// fingerprint (ADR-0032): the master key, or the new key during a rotation.
+// A zero fingerprint, or one the node does not hold, reports not-found.
+func (n *Node) keyByFingerprint(fingerprint uint64) (keys.KEK, bool) {
+	if fingerprint == 0 {
+		return keys.KEK{}, false
+	}
+	if n.masterKey.Loaded() && n.masterKey.Fingerprint().Uint64() == fingerprint {
+		return n.masterKey, true
+	}
+	if n.newKey.Loaded() && n.newKey.Fingerprint().Uint64() == fingerprint {
+		return n.newKey, true
+	}
+	return keys.KEK{}, false
 }
 
 // Run starts a cluster node from its data directory. The caller owns it
@@ -136,7 +163,7 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 		}
 	}
 	loop := sys.NewLoop()
-	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, masterKey: o.masterKey, ready: make(chan struct{}), stopSync: make(chan struct{})}
+	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, masterKey: o.masterKey, newKey: o.newKey, ready: make(chan struct{}), stopSync: make(chan struct{})}
 
 	peers := make(map[seam.NodeID]string)
 	raftPeers := make(map[uint64]seam.NodeID)
@@ -263,15 +290,32 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 					Previous:       placeNodes(cl.Previous), // nil in steady state
 				}, true
 			},
-			// Encryption at rest (ADR-0021): the write posture is the
-			// replicated cluster fact; the KEK is this node's in-memory key.
-			// A node whose posture is on but whose KEK never loaded carries a
-			// zero KEK here, so the coordinator refuses encrypted work loudly
-			// rather than serving ciphertext. Entropy is crypto/rand in
-			// production (the DEK's only randomness).
+			// Encryption at rest (ADR-0021, ADR-0032): the write posture is the
+			// replicated cluster fact; the KEK is this node's in-memory key. The
+			// write key is the rotating-to key while a master-key rotation is open
+			// (so new writes land on the new key and never extend the rotation),
+			// else the cluster's current key. A node whose posture is on but whose
+			// key never loaded carries a zero KEK here, so the coordinator refuses
+			// encrypted work loudly rather than serving ciphertext. Entropy is
+			// crypto/rand in production (the DEK's only randomness).
 			Encryption: func() (keys.KEK, bool) {
-				return n.masterKey, rn.Store().EncryptionAlgorithm() != meta.EncNone
+				post := rn.Store().EncryptionPosture()
+				if post.Algorithm == meta.EncNone {
+					return keys.KEK{}, false
+				}
+				target := post.CurrentKEKFingerprint
+				if post.RotatingToKEKFingerprint != 0 {
+					target = post.RotatingToKEKFingerprint
+				}
+				if k, ok := n.keyByFingerprint(target); ok {
+					return k, true
+				}
+				return n.masterKey, true // current unestablished, or key not held: fail-closed on the master key
 			},
+			// Keyring resolves a loaded KEK by fingerprint (ADR-0032): a GET reads
+			// an object under whichever key wrapped it, and the rewrap sweep needs
+			// the old key to unwrap and the new to rewrap.
+			Keyring: n.keyByFingerprint,
 			Entropy: rand.Reader,
 		})
 		// The continuous background scrubber (ADR-0009): every node starts it, but

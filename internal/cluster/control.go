@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/coord"
+	"github.com/hamster-storage/hamster/internal/keys"
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/raftnode"
 )
@@ -55,7 +56,7 @@ func (n *Node) handleConn(conn *tls.Conn) {
 			resp.Error = "status requires a cluster certificate"
 		} else {
 			resp.Members = n.members()
-			resp.Encryption = n.encryptionLabel()
+			resp.Encryption, resp.KEKFingerprint, resp.RotatingTo, resp.Remaining = n.encryptionStatus()
 		}
 		_ = writeFrame(conn, encodeStatusResponse(resp))
 	case reqDrain:
@@ -66,6 +67,8 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeOptimizeResponse(n.handleOptimize(conn)))
 	case reqEncrypt:
 		_ = writeFrame(conn, encodeEncryptResponse(n.handleEncrypt(conn)))
+	case reqRotateKey:
+		_ = writeFrame(conn, encodeRotateKeyResponse(n.handleRotateKey(conn)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }
@@ -283,17 +286,49 @@ func (n *Node) removeAttempt(nodeID string) error {
 // objects written when the cluster was smaller spread across the nodes added
 // since. Authenticated by a cluster certificate like drain; a non-leader answers
 // with the leader's dial address so the client can retry there.
-// encryptionLabel reads the cluster's encryption-at-rest posture (ADR-0021)
-// for `cluster status`: the algorithm name, or "" when the cluster does not
-// encrypt. Runs on the loop.
-func (n *Node) encryptionLabel() string {
-	label, _ := onLoop(n, 5*time.Second, func() string {
-		if n.raft.Store().EncryptionAlgorithm() == meta.EncAES256GCM {
-			return "AES256GCM"
+// encryptionStatus reads the cluster's encryption-at-rest posture (ADR-0021,
+// ADR-0032) for `cluster status`: the algorithm name (or "" when the cluster
+// does not encrypt), the current master-key fingerprint, and — while a rotation
+// is open — the fingerprint it is rotating to and the count of versions still on
+// the old key (the rotation's observable progress, from this node's replica).
+// Runs on the loop.
+func (n *Node) encryptionStatus() (label, fingerprint, rotatingTo string, remaining uint64) {
+	type out struct {
+		label, fingerprint, rotatingTo string
+		remaining                      uint64
+	}
+	o, _ := onLoop(n, 5*time.Second, func() out {
+		post := n.raft.Store().EncryptionPosture()
+		if post.Algorithm != meta.EncAES256GCM {
+			return out{}
 		}
-		return ""
+		r := out{label: "AES256GCM"}
+		if post.CurrentKEKFingerprint != 0 {
+			r.fingerprint = keys.FingerprintFromUint64(post.CurrentKEKFingerprint).String()
+		}
+		if post.RotatingToKEKFingerprint != 0 {
+			r.rotatingTo = keys.FingerprintFromUint64(post.RotatingToKEKFingerprint).String()
+			r.remaining = n.stragglerCount(post.RotatingToKEKFingerprint)
+		}
+		return r
 	})
-	return label
+	return o.label, o.fingerprint, o.rotatingTo, o.remaining
+}
+
+// stragglerCount counts the encrypted versions not yet on fingerprint target —
+// the rotation's remaining work, read from the local replica. Loop-only.
+func (n *Node) stragglerCount(target uint64) uint64 {
+	store := n.raft.Store()
+	var n64 uint64
+	for _, b := range store.ListBuckets() {
+		store.ScanVersions(b.Name, func(_ string, e meta.VersionEntry) bool {
+			if e.Kind == meta.KindObject && len(e.Parts) == 0 && e.EncAlgorithm != meta.EncNone && e.KEKFingerprint != target {
+				n64++
+			}
+			return true
+		})
+	}
+	return n64
 }
 
 // handleEncrypt serves `cluster encrypt`: a leader-only proposal that turns on
@@ -328,8 +363,14 @@ func (n *Node) proposeEnableEncryption() (string, error) {
 			done(errors.New("this node has no master key loaded; pass -master-key-file on every node before enabling encryption"))
 			return
 		}
+		// Establish the cluster's current KEK fingerprint (ADR-0032) from the
+		// leader's key, so master-key rotation has a key to move from and a node
+		// holding a different master key is caught at write time. Idempotent: on
+		// an already-encrypting cluster this affirms the fingerprint (and on an
+		// upgraded v0.7 posture with none yet recorded, establishes it).
 		n.raft.Propose(meta.SetEncryptionPosture{
 			ProposedAtUnixMS: n.clock.Now().UnixMilli(), Algorithm: meta.EncAES256GCM,
+			KEKFingerprint: n.masterKey.Fingerprint().Uint64(),
 		}, func(_ any, e error) {
 			if e == nil {
 				label = "AES256GCM"
@@ -341,6 +382,140 @@ func (n *Node) proposeEnableEncryption() (string, error) {
 		return "", fmt.Errorf("cluster: encryption proposal timed out")
 	}
 	return label, err
+}
+
+// errSweepBusy marks a rewrap sweep deferred because the single-flight guard is
+// held (a transition migration or scrub); runRotateKey retries.
+var errSweepBusy = errors.New("a sweep is already running")
+
+// handleRotateKey serves `cluster rotate-key` (ADR-0032): a leader-only
+// master-key rotation, authenticated by a cluster certificate. It opens the
+// rotation and drives the rewrap sweep to convergence. A non-leader redirects.
+func (n *Node) handleRotateKey(conn *tls.Conn) rotateKeyResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return rotateKeyResponse{Error: "rotate-key requires a cluster certificate"}
+	}
+	// A rotation rewraps every encrypted version and can outrun the default
+	// control deadline; extend it for the duration.
+	conn.SetDeadline(time.Now().Add(30 * time.Minute))
+	switch rep, err := n.runRotateKey(); {
+	case errors.Is(err, raftnode.ErrNotLeader):
+		return rotateKeyResponse{Error: notLeaderMsg, Leader: n.leaderDial()}
+	case err != nil:
+		return rotateKeyResponse{Error: err.Error()}
+	default:
+		resp := rotateKeyResponse{Rewrapped: uint64(rep.Rewrapped), Remaining: uint64(rep.Remaining), Completed: rep.Completed}
+		if len(rep.Failed) > 0 {
+			resp.Error = fmt.Sprintf("%d version(s) could not be rewrapped: %s", len(rep.Failed), strings.Join(rep.Failed, "; "))
+		}
+		return resp
+	}
+}
+
+// runRotateKey opens a master-key rotation to this node's loaded new key and
+// drives the rewrap sweep to convergence (ADR-0032). Leader-only. The new key
+// must be loaded here (and, for reads after the rotation, on every node) via
+// -new-master-key-file; the key never travels the wire. It is resumable: a
+// re-run continues an open rotation, skipping versions already rewrapped.
+func (n *Node) runRotateKey() (rep coord.RewrapReport, err error) {
+	if n.coord == nil {
+		return coord.RewrapReport{}, errors.New("this node has no data-path coordinator")
+	}
+	if !n.newKey.Loaded() {
+		return coord.RewrapReport{}, errors.New("this node has no new master key loaded; pass -new-master-key-file on every node before rotating")
+	}
+	newFP := n.newKey.Fingerprint().Uint64()
+
+	// Open (or affirm) the rotation. Establish the current fingerprint first if
+	// an upgraded posture never recorded one — then begin to the new key.
+	beginErr, ok := onLoopAsync(n, 30*time.Second, func(done func(error)) {
+		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
+			done(raftnode.ErrNotLeader)
+			return
+		}
+		if !n.masterKey.Loaded() {
+			done(errors.New("this node has no current master key loaded"))
+			return
+		}
+		post := n.raft.Store().EncryptionPosture()
+		if post.Algorithm == meta.EncNone {
+			done(errors.New("cluster does not encrypt; nothing to rotate (run `cluster encrypt` first)"))
+			return
+		}
+		curFP := post.CurrentKEKFingerprint
+		if curFP == 0 {
+			curFP = n.masterKey.Fingerprint().Uint64() // establish from the leader's key on begin
+		} else if curFP != n.masterKey.Fingerprint().Uint64() {
+			done(errors.New("this node's -master-key-file is not the cluster's current key; load the current key as master and the next as -new-master-key-file"))
+			return
+		}
+		if newFP == curFP {
+			done(errors.New("the new key is already the cluster's current key; nothing to rotate to"))
+			return
+		}
+		if post.RotatingToKEKFingerprint != 0 && post.RotatingToKEKFingerprint != newFP {
+			done(fmt.Errorf("a rotation to a different key (%016x) is already open", post.RotatingToKEKFingerprint))
+			return
+		}
+		n.raft.Propose(meta.BeginKEKRotation{
+			ProposedAtUnixMS: n.clock.Now().UnixMilli(), FromFingerprint: curFP, ToFingerprint: newFP,
+		}, func(_ any, e error) { done(e) })
+	})
+	if !ok {
+		return coord.RewrapReport{}, errors.New("cluster: rotation begin timed out")
+	}
+	if beginErr != nil {
+		return coord.RewrapReport{}, beginErr
+	}
+
+	// Drive rewrap sweeps until the rotation converges. Each sweep is one full
+	// pass. Two conditions mean "wait and retry", with a back-off so the loop
+	// does not spin: the single-flight guard is held (a transition migration or
+	// the background scrub holds it — both the cluster-level n.sweeping and the
+	// coordinator-level guard), or a concurrent write landed on the old key
+	// (Remaining > 0). A generous deadline bounds the wait; only an unstable
+	// layout that never frees the guard reaches it.
+	deadline := time.Now().Add(30 * time.Minute)
+	for {
+		var r coord.RewrapReport
+		sweepErr, ok := onLoopAsync(n, 0, func(done func(error)) {
+			if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
+				done(raftnode.ErrNotLeader)
+				return
+			}
+			if n.sweeping {
+				done(errSweepBusy)
+				return
+			}
+			n.sweeping = true
+			n.coord.RewrapSweep(func(rr coord.RewrapReport, err error) {
+				n.sweeping = false
+				r = rr
+				done(err)
+			})
+		})
+		if !ok {
+			return r, errors.New("cluster: rewrap sweep timed out")
+		}
+		busy := errors.Is(sweepErr, errSweepBusy) || errors.Is(sweepErr, coord.ErrSweepBusy)
+		switch {
+		case busy:
+			// The guard is held; wait for it to free.
+		case sweepErr != nil:
+			return r, sweepErr
+		default:
+			rep = r
+			if rep.Completed || len(rep.Failed) > 0 {
+				return rep, nil
+			}
+			// Remaining > 0 without failures: a concurrent write landed on the
+			// old key; sweep again to pick it up.
+		}
+		if time.Now().After(deadline) {
+			return rep, fmt.Errorf("cluster: rotation did not converge (%d still on the old key); resolve any in-flight layout change and re-run", rep.Remaining)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (n *Node) handleOptimize(conn *tls.Conn) optimizeResponse {

@@ -127,6 +127,22 @@ func (c *Coordinator) keyFor(fingerprint uint64) (keys.KEK, bool) {
 	return c.cfg.Keyring(fingerprint)
 }
 
+// unwrapKEK resolves the KEK that unwraps a version's DEK (ADR-0032): the
+// keyring entry the version's fingerprint names, so an object reads under
+// whichever key wrapped it even after a rotation. A zero fingerprint (a version
+// wrapped under the founding KEK, before fingerprints existed) or one the
+// keyring does not hold falls back to the node's current write KEK — which is
+// the founding key for the legacy case.
+func (c *Coordinator) unwrapKEK(fingerprint uint64) keys.KEK {
+	if fingerprint != 0 {
+		if k, ok := c.keyFor(fingerprint); ok && k.Loaded() {
+			return k
+		}
+	}
+	kek, _ := c.encryption()
+	return kek
+}
+
 // wrapNonce derives a DEK-wrap nonce from a version ID: its first bytes.
 // The DataID is globally unique and never bumped, so the (KEK, nonce) pair
 // never repeats — see keys.KEK.Wrap. Reusing the public version ID as the

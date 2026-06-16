@@ -109,6 +109,7 @@ const (
 	reqRemove       = 4
 	reqOptimize     = 5
 	reqEncrypt      = 6
+	reqRotateKey    = 7
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -163,6 +164,14 @@ type statusResponse struct {
 	// Encryption is the cluster's encryption-at-rest posture (ADR-0021): the
 	// algorithm name (e.g. "AES256GCM") or "" when the cluster does not encrypt.
 	Encryption string
+	// KEKFingerprint is the cluster's current master-key fingerprint (ADR-0032),
+	// hex, when encrypting. RotatingTo is the target key's fingerprint while a
+	// rotation is open (empty otherwise), and Remaining is how many versions are
+	// still on the old key — the rotation's observable progress, read from the
+	// answering node's local replica.
+	KEKFingerprint string
+	RotatingTo     string
+	Remaining      uint64
 }
 
 // encryptResponse reports enabling encryption at rest (ADR-0021): a
@@ -172,6 +181,19 @@ type encryptResponse struct {
 	Error      string
 	Leader     string
 	Encryption string // the posture in effect after the call
+}
+
+// rotateKeyResponse reports a master-key rotation (ADR-0032): a leader-only
+// rewrap sweep. A non-leader answers with the leader's dial address. Rewrapped
+// is how many versions this rotation moved onto the new key, Remaining how many
+// are still on the old one (zero on success), and Completed whether the rotation
+// closed — at which point the old key may be retired.
+type rotateKeyResponse struct {
+	Error     string
+	Leader    string
+	Rewrapped uint64
+	Remaining uint64
+	Completed bool
 }
 
 type drainRequest struct {
@@ -558,7 +580,10 @@ func encodeStatusResponse(r statusResponse) []byte {
 	for _, m := range r.Members {
 		b = putBytes(b, 3, encodeMemberMsg(m))
 	}
-	return putString(b, 4, r.Encryption)
+	b = putString(b, 4, r.Encryption)
+	b = putString(b, 5, r.KEKFingerprint)
+	b = putString(b, 6, r.RotatingTo)
+	return putUint(b, 7, r.Remaining)
 }
 
 func decodeStatusResponse(buf []byte) (statusResponse, error) {
@@ -575,6 +600,41 @@ func decodeStatusResponse(buf []byte) (statusResponse, error) {
 			r.Members = append(r.Members, m)
 		case 4:
 			r.Encryption = string(f.b)
+		case 5:
+			r.KEKFingerprint = string(f.b)
+		case 6:
+			r.RotatingTo = string(f.b)
+		case 7:
+			r.Remaining = f.u
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeRotateKeyResponse(r rotateKeyResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	b = putString(b, 3, r.Leader)
+	b = putUint(b, 4, r.Rewrapped)
+	b = putUint(b, 5, r.Remaining)
+	return putBool(b, 6, r.Completed)
+}
+
+func decodeRotateKeyResponse(buf []byte) (rotateKeyResponse, error) {
+	var r rotateKeyResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Leader = string(f.b)
+		case 4:
+			r.Rewrapped = f.u
+		case 5:
+			r.Remaining = f.u
+		case 6:
+			r.Completed = f.u != 0
 		}
 		return nil
 	})

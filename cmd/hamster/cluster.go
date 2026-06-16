@@ -41,6 +41,10 @@ commands:
   encrypt  turn on encryption at rest (ADR-0021): new writes are encrypted,
            existing objects stay readable. Permanent (no disable). Every node
            must run with -master-key-file holding the same key
+  rotate-key  rotate the cluster master key (ADR-0032): rewrap every object's
+           key from the old to the new — metadata only, object bytes never move.
+           Every node must run with -new-master-key-file holding the next key;
+           on success the old key can be retired
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -71,6 +75,8 @@ func clusterCmd(args []string) error {
 		return clusterOptimize(args[1:])
 	case "encrypt":
 		return clusterEncrypt(args[1:])
+	case "rotate-key":
+		return clusterRotateKey(args[1:])
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -154,6 +160,7 @@ func clusterRun(args []string) error {
 	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
 	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
 	masterKeyFile := fs.String("master-key-file", "", "path to the cluster master key (KEK) for encryption at rest (ADR-0021): 32 bytes raw, or hex/base64. The same key on every node; held in memory only, never persisted. Mount it off the data disk (e.g. a Kubernetes Secret volume)")
+	newMasterKeyFile := fs.String("new-master-key-file", "", "path to the incoming master key during a key rotation (ADR-0032): the node holds both this and -master-key-file so `cluster rotate-key` can rewrap onto it. Provision it on every node; held in memory only, never sent over the wire")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
@@ -200,6 +207,18 @@ func clusterRun(args []string) error {
 		}
 		runOpts = append(runOpts, cluster.WithMasterKey(kek))
 		log.Printf("hamster cluster node: master key loaded — encryption at rest available")
+	}
+	if *newMasterKeyFile != "" {
+		material, err := os.ReadFile(*newMasterKeyFile)
+		if err != nil {
+			return fmt.Errorf("reading -new-master-key-file: %w", err)
+		}
+		kek, err := keys.LoadKEK(material)
+		if err != nil {
+			return fmt.Errorf("loading new master key: %w", err)
+		}
+		runOpts = append(runOpts, cluster.WithNewMasterKey(kek))
+		log.Printf("hamster cluster node: new master key loaded — `cluster rotate-key` can rewrap onto it")
 	}
 	n, err := cluster.Run(*dataDir, runOpts...)
 	if err != nil {
@@ -344,7 +363,14 @@ func clusterStatus(args []string) error {
 		fmt.Println("  note: one zone — no zone-level failure tolerance")
 	}
 	if report.Encryption != "" {
-		fmt.Printf("encryption at rest: %s\n", report.Encryption)
+		fmt.Printf("encryption at rest: %s", report.Encryption)
+		if report.KEKFingerprint != "" {
+			fmt.Printf(" (key %s)", report.KEKFingerprint)
+		}
+		fmt.Println()
+		if report.RotatingTo != "" {
+			fmt.Printf("  key rotation in progress → %s: %d object(s) still on the old key\n", report.RotatingTo, report.Remaining)
+		}
 	} else {
 		fmt.Println("encryption at rest: off")
 	}
@@ -486,6 +512,26 @@ func clusterEncrypt(args []string) error {
 	}
 	log.Printf("encryption at rest enabled (%s): new writes are now encrypted; existing objects are unchanged and stay readable. This is permanent — encryption cannot be turned off.", label)
 	log.Printf("  every node must hold the same master key (-master-key-file); a node without it cannot serve encrypted reads")
+	return nil
+}
+
+func clusterRotateKey(args []string) error {
+	fs := flag.NewFlagSet("cluster rotate-key", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	fs.Parse(args)
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
+	}
+	log.Printf("rotating the cluster master key: rewrapping every object's key onto the new one (object bytes are not touched). This may take a while on a large cluster.")
+	rep, err := cluster.RotateKey(*dataDir, *addr)
+	if err != nil {
+		return err
+	}
+	if !rep.Completed {
+		return fmt.Errorf("rotation did not converge: %d object(s) still on the old key — re-run `cluster rotate-key`", rep.Remaining)
+	}
+	log.Printf("key rotation complete: rewrapped %d object(s) onto the new key. The old key is no longer in use — retire it and run every node with the new key as -master-key-file.", rep.Rewrapped)
 	return nil
 }
 
