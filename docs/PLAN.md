@@ -75,42 +75,32 @@ simulation harness (invariant 5) the way the EC path did. Passes, data-path-firs
   `parseSSEHeaders`/`setSSEHeader` unit-tested across every branch, plus a single-node
   refusal integration test.
 
-Remaining:
+- **Verification + docs (the rest of the original pass 6).** A cluster e2e over the
+  real binary lands the proof: a three-node cluster with `-master-key-file`, `cluster
+  encrypt`, the posture in `status`, the SSE header on an HTTP read, and a decrypted
+  read from a node that restarted and reloaded its key. ADR-0021 is Accepted.
 
-1. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
-   scan (rewrap every DEK under a new KEK — object bytes untouched). Verification:
-   the `aws` CLI SSE round-trip under `compat`, and a cluster e2e (an encrypted
-   cluster, the posture in `status`, the SSE header, a read after a node restart
-   that must reload its KEK). Docs: ADR-0021 moves Proposed → Accepted, with a
-   KEK-rotation ADR if the flow makes a real decision.
+**Encryption at rest is functionally complete and verified end to end.** What
+remains under v0.7's "encryption at rest **and key/CA rotation**" headline is the
+*rotation* work — see below.
 
-**Open design questions — settled 2026-06-16:**
+**Remaining: the rotation track (recommend splitting to v0.8).**
 
-- **Single-node `serve` scope → cluster-only.** `hamster serve` (the single-node
-  dev preview) does *not* encrypt in v0.7; encryption is a cluster feature. The
-  stream/key machinery is shared, so `serve` support can be added later cheaply if
-  wanted, but the compliance story lives on the cluster and that is where v0.7 puts
-  it.
-- **Replicated posture → meta singleton.** The is-encrypted/algorithm posture lives
-  in a stored meta singleton, mirroring the stored cluster layout
-  ([ADR-0028](adr/0028-stored-cluster-layout.md)): replicated through Raft so every
-  node converges, kept orthogonal to placement (a layout change never touches
-  encryption state). The KEK is never part of it — only the posture.
-- **Cluster KEK distribution → operator-provisioned, never in `join`.** The
-  operator configures the *same* key source on every node (same file, passphrase,
-  or command); each node loads the KEK independently at startup; a joining node that
-  cannot produce the cluster's KEK cannot serve encrypted reads. The KEK is never
-  stored on disk by Hamster and never transits the cluster — `join` does **not**
-  carry it. Provisioning the key source is an out-of-band operator responsibility,
-  like any other secret.
+- **KEK rotation.** A metadata-only rewrap scan: load the old and new KEK, walk the
+  keyspace, unwrap each object's DEK under the old KEK and rewrap under the new one,
+  commit the new wrapped DEK — object bytes and shards untouched (only the small
+  wrapped key changes). A leader-only sweep like optimize, plus the two-key load and
+  a CLI command, proven under the simulator. Self-contained and additive.
+- **CA custody and rotation** ([ADR-0029](adr/0029-ca-custody-and-issuance.md),
+  [ADR-0022](adr/0022-cluster-mtls.md)): pluggable issuance (operator/external PKI)
+  and lost-CA-key recovery via a multi-CA trust bundle. [ADR-0022](adr/0022-cluster-mtls.md)
+  pairs CA rotation with KEK rotation, so the two are one track.
 
-**The other half of v0.7's "keys" — CA custody and rotation**
-([ADR-0029](adr/0029-ca-custody-and-issuance.md),
-[ADR-0022](adr/0022-cluster-mtls.md)): making issuance pluggable (operator/external
-PKI), and lost-CA-key recovery via a multi-CA trust bundle.
-[ADR-0022](adr/0022-cluster-mtls.md) pairs CA rotation with KEK rotation, so it
-belongs here as a keys problem. This is a second track that may split into v0.8 if
-encryption at rest alone fills v0.7 — decide once the encryption passes are scoped.
+Both were flagged from the start as candidates to split once the encryption passes
+were scoped. They are substantial, security-sensitive, and independent of the
+now-complete at-rest feature — a clean v0.8 ("key and CA rotation"). Decision is the
+operator's; until then v0.7 ships encryption at rest (SSE-S3) without in-place key
+rotation (the honest migrate-to-a-new-cluster path still exists).
 
 ## Later versions
 

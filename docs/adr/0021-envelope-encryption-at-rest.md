@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (design only; implementation scheduled with the [roadmap](../ROADMAP.md), after the framed stream of [DATA-STREAM.md](../DATA-STREAM.md) exists)
+Accepted
 
 ## Context
 
