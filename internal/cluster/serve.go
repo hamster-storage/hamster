@@ -211,6 +211,11 @@ func (c *clusterMetadata) ApplyDeleteVersion(p meta.DeleteVersion) (meta.DeleteV
 	return res.(meta.DeleteVersionResult), nil
 }
 
+func (c *clusterMetadata) ApplyUpdateRetention(p meta.UpdateRetention) error {
+	_, err := c.n.propose(p)
+	return err
+}
+
 func (c *clusterMetadata) ApplyCreateMultipartUpload(p meta.CreateMultipartUpload) error {
 	_, err := c.n.propose(p)
 	return err

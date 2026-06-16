@@ -225,6 +225,54 @@ func TestObjectLockConfig(t *testing.T) {
 	}
 }
 
+func TestObjectRetention(t *testing.T) {
+	e := newEnv(t)
+	e.expect(e.do("PUT", "/vault", nil, map[string]string{"x-amz-bucket-object-lock-enabled": "true"}), 200)
+
+	// PUT with explicit COMPLIANCE retention.
+	put := e.do("PUT", "/vault/locked", []byte("data"), map[string]string{
+		"x-amz-object-lock-mode":              "COMPLIANCE",
+		"x-amz-object-lock-retain-until-date": "2099-01-01T00:00:00Z",
+	})
+	e.expect(put, 200)
+	vid := put.Header.Get("x-amz-version-id")
+
+	// GET surfaces the lock headers.
+	get := e.do("GET", "/vault/locked", nil, nil)
+	e.expect(get, 200)
+	if get.Header.Get("x-amz-object-lock-mode") != "COMPLIANCE" || get.Header.Get("x-amz-object-lock-retain-until-date") == "" {
+		t.Fatalf("lock headers: mode=%q until=%q", get.Header.Get("x-amz-object-lock-mode"), get.Header.Get("x-amz-object-lock-retain-until-date"))
+	}
+
+	// GetObjectRetention returns the rule.
+	if body := e.expect(e.do("GET", "/vault/locked?retention", nil, nil), 200); !strings.Contains(string(body), "<Mode>COMPLIANCE</Mode>") {
+		t.Fatalf("get retention:\n%s", body)
+	}
+
+	// Invariant 4: a COMPLIANCE-locked version cannot be deleted.
+	if code := e.errorCode(e.do("DELETE", "/vault/locked?versionId="+vid, nil, nil), 403); code != "AccessDenied" {
+		t.Fatalf("delete locked version: %s", code)
+	}
+
+	// Retention may be extended (later date), never shortened under COMPLIANCE.
+	ext := []byte(`<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2099-06-01T00:00:00Z</RetainUntilDate></Retention>`)
+	e.expect(e.do("PUT", "/vault/locked?retention", ext, nil), 200)
+	earlier := []byte(`<Retention><Mode>COMPLIANCE</Mode><RetainUntilDate>2099-02-01T00:00:00Z</RetainUntilDate></Retention>`)
+	if code := e.errorCode(e.do("PUT", "/vault/locked?retention", earlier, nil), 403); code != "AccessDenied" {
+		t.Fatalf("shorten compliance: %s", code)
+	}
+
+	// A bucket default retention applies to a plain PUT.
+	rule := []byte(`<ObjectLockConfiguration><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>7</Days></DefaultRetention></Rule></ObjectLockConfiguration>`)
+	e.expect(e.do("PUT", "/vault?object-lock", rule, nil), 200)
+	e.expect(e.do("PUT", "/vault/auto", []byte("x"), nil), 200)
+	auto := e.do("GET", "/vault/auto", nil, nil)
+	e.expect(auto, 200)
+	if auto.Header.Get("x-amz-object-lock-mode") != "GOVERNANCE" {
+		t.Fatalf("default retention not applied: %q", auto.Header.Get("x-amz-object-lock-mode"))
+	}
+}
+
 func TestObjectVersioning(t *testing.T) {
 	e := newEnv(t)
 	e.expect(e.do("PUT", "/vault", nil, nil), 200)

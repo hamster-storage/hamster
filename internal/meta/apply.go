@@ -127,6 +127,16 @@ func (s *Store) ApplyPutObject(p PutObject) (res PutResult, err error) {
 		return PutResult{}, ErrInvalidRetention
 	}
 
+	// Apply the bucket's default retention when the write carries none of its own
+	// (ADR-0006): the absolute retain-until is computed here, from the stored
+	// days/years and the proposal time, so every replica derives the identical
+	// date. A write that sets its own retention overrides the default.
+	mode, retainUntil := p.RetentionMode, p.RetainUntilUnixMS
+	if mode == RetentionNone && cfg.ObjectLockEnabled && cfg.DefaultRetentionMode != RetentionNone {
+		mode = cfg.DefaultRetentionMode
+		retainUntil = retainUntilFromDefault(p.ProposedAtUnixMS, cfg.DefaultRetentionDays, cfg.DefaultRetentionYears)
+	}
+
 	// Commit order beats clock order (METADATA.md): if the minted ID does
 	// not sort after the key's newest version, bump it just past — every
 	// replica computes the identical bump, so version lists stay
@@ -152,8 +162,8 @@ func (s *Store) ApplyPutObject(p PutObject) (res PutResult, err error) {
 		ECParityShards:    p.ECParityShards,
 		ObjectChecksum:    p.ObjectChecksum,
 		ShardChecksums:    p.ShardChecksums,
-		RetentionMode:     p.RetentionMode,
-		RetainUntilUnixMS: p.RetainUntilUnixMS,
+		RetentionMode:     mode,
+		RetainUntilUnixMS: retainUntil,
 		LegalHold:         p.LegalHold,
 		NullVersion:       cfg.Versioning != VersioningEnabled,
 	}.clone() // own every reference field; the proposer may reuse its buffers

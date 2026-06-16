@@ -28,6 +28,12 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		return
 	}
 
+	mode, retainUntil, legalHold, lerr := parseLockHeaders(r.Header)
+	if lerr != nil {
+		writeError(w, r, lerr)
+		return
+	}
+
 	// Mint first — the blob needs its address before the body can stream
 	// to disk.
 	vid, now := g.cfg.Meta.MintVersionID()
@@ -48,15 +54,18 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 	// The result's possibly-bumped VersionID becomes the
 	// x-amz-version-id header when versioning is exposed (v0.5).
 	res, applyErr := g.cfg.Meta.ApplyPutObject(meta.PutObject{
-		ProposedAtUnixMS: atMS,
-		Bucket:           bucket,
-		Key:              key,
-		VersionID:        vid,
-		Size:             size,
-		ETag:             etag,
-		ContentType:      r.Header.Get("Content-Type"),
-		UserMetadata:     userMetadata(r.Header),
-		ObjectChecksum:   checksum,
+		ProposedAtUnixMS:  atMS,
+		Bucket:            bucket,
+		Key:               key,
+		VersionID:         vid,
+		Size:              size,
+		ETag:              etag,
+		ContentType:       r.Header.Get("Content-Type"),
+		UserMetadata:      userMetadata(r.Header),
+		ObjectChecksum:    checksum,
+		RetentionMode:     mode,
+		RetainUntilUnixMS: retainUntil,
+		LegalHold:         legalHold,
 	})
 	if applyErr != nil {
 		_ = g.cfg.Blobs.Remove(vid) // best effort; otherwise an orphan for GC
@@ -78,6 +87,14 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 // buffered whole (the v0.3 preview shape, like the single-node GET; the
 // streaming pump arrives with the operational hardening).
 func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string) {
+	// Explicit per-object lock headers need the lock fields threaded through
+	// coord.Put (v0.6 pass 4); refuse them honestly for now. A bucket default
+	// retention still applies — it is set in the apply layer, which both paths
+	// share — and retention can be set after the PUT via PutObjectRetention.
+	if hasLockHeaders(r.Header) {
+		writeError(w, r, errNotImplemented)
+		return
+	}
 	body, err := readBody(r, id)
 	if err != nil {
 		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
@@ -227,6 +244,7 @@ func (g *Gateway) serveEntry(w http.ResponseWriter, r *http.Request, entry meta.
 	for k, v := range entry.UserMetadata {
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
+	setLockHeaders(w, entry)
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, "", time.UnixMilli(entry.CreatedUnixMS).UTC(), bytes.NewReader(data))
 }

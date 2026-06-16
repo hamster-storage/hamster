@@ -4,14 +4,16 @@ import (
 	"encoding/xml"
 	"errors"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/sigv4"
 )
 
-// Object lock (ADR-0006): the bucket-level configuration surface. Per-object
-// retention and legal holds (the ?retention and ?legal-hold subresources) follow
-// in later v0.6 passes; the retention-mode helpers here are shared with them.
+// Object lock (ADR-0006): the bucket-level configuration (?object-lock) and
+// per-object retention (?retention, the x-amz-object-lock-* PUT/response headers).
+// Legal holds (the ?legal-hold subresource) follow in a later v0.6 pass.
 
 // retentionModeString renders an object-lock mode for the wire. RetentionNone has
 // no S3 spelling — it means "no lock".
@@ -133,6 +135,130 @@ func (g *Gateway) putObjectLockConfiguration(w http.ResponseWriter, r *http.Requ
 		DefaultRetentionMode:  mode,
 		DefaultRetentionDays:  days,
 		DefaultRetentionYears: years,
+	}); applyErr != nil {
+		writeError(w, r, applyErr)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// parseLockHeaders reads the x-amz-object-lock-* request headers on a PUT. Mode
+// and retain-until come as a pair (both or neither); legal hold is ON/OFF. An
+// empty set is the zero values. A malformed pair is an error.
+func parseLockHeaders(h http.Header) (mode meta.RetentionMode, retainUntil int64, legalHold bool, err error) {
+	modeStr := h.Get("x-amz-object-lock-mode")
+	dateStr := h.Get("x-amz-object-lock-retain-until-date")
+	if modeStr != "" || dateStr != "" {
+		m, ok := parseRetentionMode(modeStr)
+		if !ok || dateStr == "" {
+			return 0, 0, false, errInvalidArgument
+		}
+		t, perr := time.Parse(time.RFC3339, dateStr)
+		if perr != nil {
+			return 0, 0, false, errInvalidArgument
+		}
+		mode, retainUntil = m, t.UnixMilli()
+	}
+	legalHold = strings.EqualFold(h.Get("x-amz-object-lock-legal-hold"), "ON")
+	return mode, retainUntil, legalHold, nil
+}
+
+// hasLockHeaders reports whether a request carries any x-amz-object-lock-* PUT
+// header — used to refuse them on the cluster path until pass 4 plumbs the lock
+// fields through coord.Put.
+func hasLockHeaders(h http.Header) bool {
+	return h.Get("x-amz-object-lock-mode") != "" ||
+		h.Get("x-amz-object-lock-retain-until-date") != "" ||
+		h.Get("x-amz-object-lock-legal-hold") != ""
+}
+
+// setLockHeaders writes the x-amz-object-lock-* response headers for a version's
+// retention and legal-hold state on GET/HEAD.
+func setLockHeaders(w http.ResponseWriter, e meta.VersionEntry) {
+	if e.RetentionMode != meta.RetentionNone {
+		w.Header().Set("x-amz-object-lock-mode", retentionModeString(e.RetentionMode))
+		w.Header().Set("x-amz-object-lock-retain-until-date", iso8601(e.RetainUntilUnixMS))
+	}
+	if e.LegalHold {
+		w.Header().Set("x-amz-object-lock-legal-hold", "ON")
+	} else {
+		w.Header().Set("x-amz-object-lock-legal-hold", "OFF")
+	}
+}
+
+// resolveTarget resolves the version an object-level lock operation addresses:
+// a specific ?versionId, or the current version.
+func (g *Gateway) resolveTarget(bucket, key, versionID string) (meta.VersionEntry, error) {
+	if versionID != "" {
+		return g.resolveVersion(bucket, key, versionID)
+	}
+	return g.lookupCurrent(bucket, key)
+}
+
+// retentionXML is the ?retention subresource body, for both PutObjectRetention
+// and GetObjectRetention.
+type retentionXML struct {
+	XMLName         xml.Name `xml:"Retention"`
+	Xmlns           string   `xml:"xmlns,attr,omitempty"`
+	Mode            string   `xml:"Mode,omitempty"`
+	RetainUntilDate string   `xml:"RetainUntilDate,omitempty"`
+}
+
+func (g *Gateway) getObjectRetention(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	entry, err := g.resolveTarget(bucket, key, r.URL.Query().Get("versionId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if entry.RetentionMode == meta.RetentionNone {
+		writeError(w, r, errNoRetention)
+		return
+	}
+	writeXML(w, http.StatusOK, retentionXML{
+		Xmlns:           s3Xmlns,
+		Mode:            retentionModeString(entry.RetentionMode),
+		RetainUntilDate: iso8601(entry.RetainUntilUnixMS),
+	})
+}
+
+func (g *Gateway) putObjectRetention(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string) {
+	entry, err := g.resolveTarget(bucket, key, r.URL.Query().Get("versionId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	body, err := readBody(r, id)
+	if err != nil {
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
+		return
+	}
+	var req retentionXML
+	if xml.Unmarshal(body, &req) != nil {
+		writeError(w, r, errMalformedXML)
+		return
+	}
+	mode, ok := parseRetentionMode(req.Mode)
+	if !ok {
+		writeError(w, r, errMalformedXML)
+		return
+	}
+	t, perr := time.Parse(time.RFC3339, req.RetainUntilDate)
+	if perr != nil {
+		writeError(w, r, errMalformedXML)
+		return
+	}
+	if applyErr := g.cfg.Meta.ApplyUpdateRetention(meta.UpdateRetention{
+		ProposedAtUnixMS:  g.cfg.Clock.Now().UnixMilli(),
+		Bucket:            bucket,
+		Key:               key,
+		VersionID:         entry.VersionID,
+		Mode:              mode,
+		RetainUntilUnixMS: t.UnixMilli(),
+		BypassGovernance:  strings.EqualFold(r.Header.Get("x-amz-bypass-governance-retention"), "true"),
 	}); applyErr != nil {
 		writeError(w, r, applyErr)
 		return

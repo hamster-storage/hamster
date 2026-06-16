@@ -51,6 +51,8 @@ var (
 		"Object Lock configuration does not exist for this bucket."}
 	errObjectLockNotEnabled = &s3Error{"InvalidRequest", http.StatusBadRequest,
 		"Object Lock configuration cannot be set on a bucket where it is not enabled; enable object lock when creating the bucket."}
+	errNoRetention = &s3Error{"NoSuchObjectLockConfiguration", http.StatusNotFound,
+		"The specified object does not have a retention configuration."}
 )
 
 // ErrNoSuchKey is the missing-key miss, exported for object backends.
