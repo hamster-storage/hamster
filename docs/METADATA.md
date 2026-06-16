@@ -109,6 +109,11 @@ message VersionEntry {
   // scrub, and re-encode never need the key.
   EncAlgorithm enc_algorithm = 20;  // NONE, AES256GCM
   bytes        wrapped_dek   = 21;
+  // kek_fingerprint names the KEK that wrapped wrapped_dek (ADR-0032): the
+  // keys-package content fingerprint as a big-endian integer. Master-key
+  // rotation rewraps wrapped_dek under a new KEK and restamps this; zero means
+  // the founding KEK (a version written before fingerprints existed).
+  uint64       kek_fingerprint = 22;
 }
 
 // One slice of a multipart object's data: where it lives and how a read

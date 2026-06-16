@@ -74,20 +74,22 @@ func (c *Coordinator) GetEntry(entry meta.VersionEntry, off, length int64, done 
 		return
 	}
 
-	// Decrypt key resolution (ADR-0021). An encrypted version records its own
-	// algorithm, so reads are posture-free: unwrap its DEK under the node's
-	// KEK, regardless of whether the cluster still writes encrypted. A loaded
-	// KEK is required — a node that cannot produce it refuses the read loudly
-	// rather than serving ciphertext.
+	// Decrypt key resolution (ADR-0021, ADR-0032). An encrypted version records
+	// its own algorithm and the fingerprint of the KEK that wrapped its DEK, so
+	// reads are posture-free: unwrap under the key that fingerprint names,
+	// regardless of whether the cluster still writes encrypted or has since
+	// rotated. A node holding both keys mid-rotation reads objects on either; a
+	// loaded key is required — a node that cannot produce it refuses the read
+	// loudly rather than serving ciphertext.
 	var dekBytes []byte
 	if entry.EncAlgorithm != meta.EncNone {
 		if entry.EncAlgorithm != meta.EncAES256GCM {
 			done(nil, fmt.Errorf("coord: object uses unknown encryption algorithm %d", entry.EncAlgorithm))
 			return
 		}
-		kek, _ := c.encryption()
+		kek := c.unwrapKEK(entry.KEKFingerprint)
 		if !kek.Loaded() {
-			done(nil, fmt.Errorf("coord: object is encrypted but no KEK is loaded: %w", ErrUnreadable))
+			done(nil, fmt.Errorf("coord: object is encrypted but its KEK %016x is not loaded: %w", entry.KEKFingerprint, ErrUnreadable))
 			return
 		}
 		dek, err := kek.Unwrap(entry.WrappedDEK)

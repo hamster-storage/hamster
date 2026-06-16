@@ -115,9 +115,11 @@ func TestEncryptedReadWithoutKEKRefused(t *testing.T) {
 		t.Fatalf("with key: equal=%v err=%v", bytes.Equal(got, body), err)
 	}
 
-	// The node loses its KEK (the key source became unavailable). The object
-	// stays encrypted; the read must refuse.
+	// The node loses its KEK (the key source became unavailable) — both the
+	// write key and the keyring the read would resolve a fingerprint through.
+	// The object stays encrypted; the read must refuse.
 	c.kek = keys.KEK{}
+	c.keyring = nil
 	if _, err := c.get("locked", 0, -1); err == nil {
 		t.Fatal("read of an encrypted object with no KEK succeeded")
 	}

@@ -263,6 +263,12 @@ func CanIssue(dataDir string) bool {
 type StatusReport struct {
 	Members    []Member
 	Encryption string // the algorithm name, or "" when the cluster does not encrypt
+	// Master-key rotation (ADR-0032): the current key fingerprint when
+	// encrypting, and — while a rotation is open — the target fingerprint and how
+	// many versions are still on the old key.
+	KEKFingerprint string
+	RotatingTo     string
+	Remaining      uint64
 }
 
 func Status(dataDir, addr string) (StatusReport, error) {
@@ -289,7 +295,10 @@ func Status(dataDir, addr string) (StatusReport, error) {
 	if resp.Error != "" {
 		return StatusReport{}, fmt.Errorf("cluster: status refused: %s", resp.Error)
 	}
-	return StatusReport{Members: resp.Members, Encryption: resp.Encryption}, nil
+	return StatusReport{
+		Members: resp.Members, Encryption: resp.Encryption,
+		KEKFingerprint: resp.KEKFingerprint, RotatingTo: resp.RotatingTo, Remaining: resp.Remaining,
+	}, nil
 }
 
 // Drain marks a member draining (or clears it) — an operator command that
@@ -432,6 +441,48 @@ func Encrypt(dataDir, addr string) (string, error) {
 	return label, nil
 }
 
+// RotateKeyReport is what `cluster rotate-key` reports (ADR-0032).
+type RotateKeyReport struct {
+	Rewrapped uint64 // versions moved onto the new key by this rotation
+	Remaining uint64 // versions still on the old key (zero on success)
+	Completed bool   // the rotation closed — the old key may be retired
+}
+
+// RotateKey rotates the cluster's master key (ADR-0032): a leader-only rewrap
+// sweep over the control port, authenticated by this node's own certificate
+// (like Encrypt). Every encrypted version's DEK is rewrapped from the old key to
+// the new one — metadata only, the object bytes never move. The new key is never
+// sent over the wire: every node must already hold it (-new-master-key-file).
+// On success the rotation is closed and the old key may be retired.
+func RotateKey(dataDir, addr string) (RotateKeyReport, error) {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return RotateKeyReport{}, err
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return RotateKeyReport{}, err
+	}
+	target := addr
+	if target == "" {
+		target = cfg.ClusterAddr
+	}
+	var report RotateKeyReport
+	err = leaderRedirect("rotate-key", target, 0, func(addr string) (controlOutcome, error) {
+		resp, err := requestRotateKey(addr, cert, pool)
+		if err != nil {
+			return controlOutcome{}, err
+		}
+		report = RotateKeyReport{Rewrapped: resp.Rewrapped, Remaining: resp.Remaining, Completed: resp.Completed}
+		return controlOutcome{errStr: resp.Error, leader: resp.Leader}, nil
+	})
+	if err != nil {
+		return RotateKeyReport{}, err
+	}
+	return report, nil
+}
+
 // optimizeSettleWait bounds how long Optimize waits for a recent membership
 // change to reconcile before giving up — generous, since a join's transition
 // migrates data before the layout settles.
@@ -559,6 +610,14 @@ func requestEncrypt(addr string, cert tls.Certificate, pool *x509.CertPool) (enc
 		return encryptResponse{}, err
 	}
 	return decodeEncryptResponse(buf)
+}
+
+func requestRotateKey(addr string, cert tls.Certificate, pool *x509.CertPool) (rotateKeyResponse, error) {
+	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqRotateKey, nil))
+	if err != nil {
+		return rotateKeyResponse{}, err
+	}
+	return decodeRotateKeyResponse(buf)
 }
 
 func requestRemove(addr string, cert tls.Certificate, pool *x509.CertPool, req removeRequest) (removeResponse, error) {
