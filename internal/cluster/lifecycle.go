@@ -258,31 +258,38 @@ func CanIssue(dataDir string) bool {
 
 // Status queries a running node's join/status listener with this node's
 // own certificate. An empty addr asks the local node.
-func Status(dataDir, addr string) ([]Member, error) {
+// StatusReport is what `cluster status` shows: the members and the cluster's
+// encryption-at-rest posture (ADR-0021).
+type StatusReport struct {
+	Members    []Member
+	Encryption string // the algorithm name, or "" when the cluster does not encrypt
+}
+
+func Status(dataDir, addr string) (StatusReport, error) {
 	dir := Dir(dataDir)
 	cfg, err := loadConfig(dir)
 	if err != nil {
-		return nil, err
+		return StatusReport{}, err
 	}
 	if addr == "" {
 		addr = cfg.JoinAddr
 	}
 	cert, pool, _, err := loadNodeTLS(dir)
 	if err != nil {
-		return nil, err
+		return StatusReport{}, err
 	}
 	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqStatus, nil))
 	if err != nil {
-		return nil, err
+		return StatusReport{}, err
 	}
 	resp, err := decodeStatusResponse(buf)
 	if err != nil {
-		return nil, err
+		return StatusReport{}, err
 	}
 	if resp.Error != "" {
-		return nil, fmt.Errorf("cluster: status refused: %s", resp.Error)
+		return StatusReport{}, fmt.Errorf("cluster: status refused: %s", resp.Error)
 	}
-	return resp.Members, nil
+	return StatusReport{Members: resp.Members, Encryption: resp.Encryption}, nil
 }
 
 // Drain marks a member draining (or clears it) — an operator command that
@@ -388,6 +395,41 @@ func Optimize(dataDir, addr string) (OptimizeReport, error) {
 		return OptimizeReport{}, err
 	}
 	return report, nil
+}
+
+// Encrypt turns on the cluster's encryption-at-rest posture (ADR-0021): a
+// leader-only proposal over the control port, authenticated by this node's own
+// certificate (like Status and Optimize). New writes encrypt from then on;
+// existing objects are unchanged and stay readable. It is enable-only — there
+// is no disable. The key itself is never sent: every node must already hold it
+// (-master-key-file). Returns the posture in effect after the call.
+func Encrypt(dataDir, addr string) (string, error) {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return "", err
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return "", err
+	}
+	target := addr
+	if target == "" {
+		target = cfg.ClusterAddr
+	}
+	var label string
+	err = leaderRedirect("encrypt", target, 0, func(addr string) (controlOutcome, error) {
+		resp, err := requestEncrypt(addr, cert, pool)
+		if err != nil {
+			return controlOutcome{}, err
+		}
+		label = resp.Encryption
+		return controlOutcome{errStr: resp.Error, leader: resp.Leader}, nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return label, nil
 }
 
 // optimizeSettleWait bounds how long Optimize waits for a recent membership
@@ -509,6 +551,14 @@ func requestOptimize(addr string, cert tls.Certificate, pool *x509.CertPool) (op
 		return optimizeResponse{}, err
 	}
 	return decodeOptimizeResponse(buf)
+}
+
+func requestEncrypt(addr string, cert tls.Certificate, pool *x509.CertPool) (encryptResponse, error) {
+	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqEncrypt, nil))
+	if err != nil {
+		return encryptResponse{}, err
+	}
+	return decodeEncryptResponse(buf)
 }
 
 func requestRemove(addr string, cert tls.Certificate, pool *x509.CertPool, req removeRequest) (removeResponse, error) {

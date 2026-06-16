@@ -39,7 +39,8 @@ func waitStatus(t *testing.T, dataDir, addr, what string, pred func([]Member) bo
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		ms, err := Status(dataDir, addr)
+		report, err := Status(dataDir, addr)
+		ms := report.Members
 		if err == nil && pred(ms) {
 			return ms
 		}

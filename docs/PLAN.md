@@ -57,20 +57,23 @@ simulation harness (invariant 5) the way the EC path did. Passes, data-path-firs
   (A/B-checked against a plaintext write), no-KEK read refusal, encrypted
   determinism, repair healing an encrypted object's lost shard key-free, and a
   coordinator crash mid-encrypted-PUT committing nothing.
+- **Pass 4 — cluster posture and key availability.** The posture is a replicated
+  meta singleton (4a, enable-only: `cluster encrypt` turns it on, disabling is
+  refused). Each node loads its KEK at boot from `cluster run -master-key-file`
+  (held in memory only, never persisted) and wires it into the coordinator's
+  `Encryption`/`Entropy` (crypto/rand); a node whose posture is on but whose KEK
+  never loaded refuses encrypted work loudly. `cluster status` reports the posture;
+  enabling on a leader with no key is refused (the footgun guard). Proven by an
+  in-process cluster test: enable via a non-leader redirect, the posture replicated
+  to every node and surviving a node restart (KEK reloaded), and the no-key refusal.
 
 Remaining:
 
-1. **Cluster posture and key availability.** `cluster init` key-source flags; a
-   replicated encryption posture (on/off + algorithm) so every node agrees;
-   enable-only (disabling refused, ADR-0021); `cluster status` reports it; a node
-   that cannot load its KEK at startup refuses encrypted reads *loudly* rather than
-   serving ciphertext or failing quietly. The KEK is never stored or transmitted.
-
-2. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
+1. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
    when the cluster encrypts; the request header accepted; SSE-KMS and SSE-C
    refused honestly (the DEK machinery leaves room for SSE-C later).
 
-3. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
+2. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
    scan (rewrap every DEK under a new KEK — object bytes untouched). Verification:
    stream golden/tamper, key-source units, the coord sim schedules above, a cluster
    e2e (an encrypted cluster, the posture in `status`, the SSE header, a read after

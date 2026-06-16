@@ -13,6 +13,7 @@ import (
 
 	"github.com/hamster-storage/hamster/internal/cluster"
 	"github.com/hamster-storage/hamster/internal/ec"
+	"github.com/hamster-storage/hamster/internal/keys"
 )
 
 const clusterUsage = `usage: hamster cluster <command> [flags]
@@ -37,6 +38,9 @@ commands:
   optimize re-encode existing data up to the current cluster's storage profile,
            spreading objects written when it was smaller across the nodes added
            since (run after growing the cluster — never automatic)
+  encrypt  turn on encryption at rest (ADR-0021): new writes are encrypted,
+           existing objects stay readable. Permanent (no disable). Every node
+           must run with -master-key-file holding the same key
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -65,6 +69,8 @@ func clusterCmd(args []string) error {
 		return clusterRemove(args[1:])
 	case "optimize":
 		return clusterOptimize(args[1:])
+	case "encrypt":
+		return clusterEncrypt(args[1:])
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -147,6 +153,7 @@ func clusterRun(args []string) error {
 	s3 := fs.String("s3", "", "serve the S3 API on this address (host:port); empty disables")
 	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
 	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
+	masterKeyFile := fs.String("master-key-file", "", "path to the cluster master key (KEK) for encryption at rest (ADR-0021): 32 bytes raw, or hex/base64. The same key on every node; held in memory only, never persisted. Mount it off the data disk (e.g. a Kubernetes Secret volume)")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
@@ -181,7 +188,20 @@ func clusterRun(args []string) error {
 			log.Printf("listen address set to %s", *listen)
 		}
 	}
-	n, err := cluster.Run(*dataDir)
+	var runOpts []cluster.Option
+	if *masterKeyFile != "" {
+		material, err := os.ReadFile(*masterKeyFile)
+		if err != nil {
+			return fmt.Errorf("reading -master-key-file: %w", err)
+		}
+		kek, err := keys.LoadKEK(material)
+		if err != nil {
+			return fmt.Errorf("loading master key: %w", err)
+		}
+		runOpts = append(runOpts, cluster.WithMasterKey(kek))
+		log.Printf("hamster cluster node: master key loaded — encryption at rest available")
+	}
+	n, err := cluster.Run(*dataDir, runOpts...)
 	if err != nil {
 		return err
 	}
@@ -267,10 +287,11 @@ func clusterStatus(args []string) error {
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
 	}
-	members, err := cluster.Status(*dataDir, *addr)
+	report, err := cluster.Status(*dataDir, *addr)
 	if err != nil {
 		return err
 	}
+	members := report.Members
 	// tabwriter sizes each column to its widest cell, so labels like a full
 	// hostname never overrun the next column (stdlib, no dependency).
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -322,6 +343,11 @@ func clusterStatus(args []string) error {
 	if len(zones) <= 1 {
 		fmt.Println("  note: one zone — no zone-level failure tolerance")
 	}
+	if report.Encryption != "" {
+		fmt.Printf("encryption at rest: %s\n", report.Encryption)
+	} else {
+		fmt.Println("encryption at rest: off")
+	}
 	return nil
 }
 
@@ -344,9 +370,9 @@ func clusterDrain(args []string, draining bool) error {
 	// every object to the smaller profile (ADR-0004, ADR-0015) — a consequential,
 	// possibly durability-reducing change. Warn and confirm before committing it.
 	if draining {
-		if members, err := cluster.Status(*dataDir, *addr); err == nil {
+		if report, err := cluster.Status(*dataDir, *addr); err == nil {
 			active, isMember := 0, false
-			for _, m := range members {
+			for _, m := range report.Members {
 				if m.NodeID == *node {
 					isMember = true
 				}
@@ -443,6 +469,23 @@ func clusterOptimize(args []string) error {
 	} else {
 		log.Printf("optimize complete: re-encoded %d of %d objects up to the current profile", rep.ReEncoded, rep.Objects)
 	}
+	return nil
+}
+
+func clusterEncrypt(args []string) error {
+	fs := flag.NewFlagSet("cluster encrypt", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	fs.Parse(args)
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
+	}
+	label, err := cluster.Encrypt(*dataDir, *addr)
+	if err != nil {
+		return err
+	}
+	log.Printf("encryption at rest enabled (%s): new writes are now encrypted; existing objects are unchanged and stay readable. This is permanent — encryption cannot be turned off.", label)
+	log.Printf("  every node must hold the same master key (-master-key-file); a node without it cannot serve encrypted reads")
 	return nil
 }
 

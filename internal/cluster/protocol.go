@@ -108,6 +108,7 @@ const (
 	reqDrain        = 3
 	reqRemove       = 4
 	reqOptimize     = 5
+	reqEncrypt      = 6
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -159,6 +160,18 @@ type joinResponse struct {
 type statusResponse struct {
 	Error   string
 	Members []Member
+	// Encryption is the cluster's encryption-at-rest posture (ADR-0021): the
+	// algorithm name (e.g. "AES256GCM") or "" when the cluster does not encrypt.
+	Encryption string
+}
+
+// encryptResponse reports enabling encryption at rest (ADR-0021): a
+// leader-only posture proposal. A non-leader answers with the leader's dial
+// address so the client retries there, like the other control commands.
+type encryptResponse struct {
+	Error      string
+	Leader     string
+	Encryption string // the posture in effect after the call
 }
 
 type drainRequest struct {
@@ -545,7 +558,7 @@ func encodeStatusResponse(r statusResponse) []byte {
 	for _, m := range r.Members {
 		b = putBytes(b, 3, encodeMemberMsg(m))
 	}
-	return b
+	return putString(b, 4, r.Encryption)
 }
 
 func decodeStatusResponse(buf []byte) (statusResponse, error) {
@@ -560,6 +573,31 @@ func decodeStatusResponse(buf []byte) (statusResponse, error) {
 				return err
 			}
 			r.Members = append(r.Members, m)
+		case 4:
+			r.Encryption = string(f.b)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeEncryptResponse(r encryptResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	b = putString(b, 3, r.Leader)
+	return putString(b, 4, r.Encryption)
+}
+
+func decodeEncryptResponse(buf []byte) (encryptResponse, error) {
+	var r encryptResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Leader = string(f.b)
+		case 4:
+			r.Encryption = string(f.b)
 		}
 		return nil
 	})
