@@ -117,6 +117,7 @@ Drain is reversible (undrain) and pairs with remove to decommission — the same
 
 - [Glossary](docs/GLOSSARY.md) — the vocabulary (object, version, shard, stripe, partition, node, cluster, layout, …), grouped by layer. Start here if a term is unfamiliar.
 - [Architecture](docs/ARCHITECTURE.md) — the system design narrative: request paths, metadata/data separation, erasure coding, placement, upgrades.
+- [How Hamster compares](docs/COMPARISON.md) — an honest map next to Ceph, the MinIO origin story, the breadth-first Apache rewrites, and simpler single-node stores — including where Hamster is behind.
 - [Architecture Decision Records](docs/adr/README.md) — one decision per file, with the reasoning and the rejected alternatives.
 - [Roadmap](docs/ROADMAP.md) — the v0.x and v1.0 milestones.
 
