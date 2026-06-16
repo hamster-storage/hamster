@@ -15,7 +15,7 @@ import (
 func frame(t *testing.T, payload []byte, chunkSize int, cuts ...int) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	w, err := NewWriter(&buf, int64(len(payload)), chunkSize)
+	w, err := NewWriter(&buf, int64(len(payload)), chunkSize, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func frame(t *testing.T, payload []byte, chunkSize int, cuts ...int) []byte {
 
 // readAll reads the whole plaintext back out of a frame.
 func readAll(f []byte) ([]byte, error) {
-	r, err := NewReader(bytes.NewReader(f), int64(len(f)))
+	r, err := NewReader(bytes.NewReader(f), int64(len(f)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func TestRoundTrip(t *testing.T) {
 				cuts = append(cuts, c)
 			}
 			f := frame(t, payload, chunk, cuts...)
-			if want := FrameSize(int64(size), chunk); want != int64(len(f)) {
+			if want := FrameSize(int64(size), chunk, false); want != int64(len(f)) {
 				t.Fatalf("size %d chunk %d: FrameSize predicts %d, frame is %d bytes", size, chunk, want, len(f))
 			}
 			got, err := readAll(f)
@@ -103,7 +103,7 @@ func TestRangeReads(t *testing.T) {
 		payload[i] = byte(rng.Uint32())
 	}
 	f := frame(t, payload, 1000)
-	r, err := NewReader(bytes.NewReader(f), int64(len(f)))
+	r, err := NewReader(bytes.NewReader(f), int64(len(f)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,14 +164,14 @@ func TestTruncationDetected(t *testing.T) {
 // TestWriterContract: the writer refuses every way a frame could lie
 // about its size.
 func TestWriterContract(t *testing.T) {
-	if _, err := NewWriter(io.Discard, -1, 4); err == nil {
+	if _, err := NewWriter(io.Discard, -1, 4, nil); err == nil {
 		t.Error("negative plaintext size accepted")
 	}
-	if _, err := NewWriter(io.Discard, 10, 0); err == nil {
+	if _, err := NewWriter(io.Discard, 10, 0, nil); err == nil {
 		t.Error("zero chunk size accepted")
 	}
 
-	w, err := NewWriter(io.Discard, 4, 16)
+	w, err := NewWriter(io.Discard, 4, 16, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestWriterContract(t *testing.T) {
 // frame — header, empty index, trailer length.
 func TestZeroLengthObject(t *testing.T) {
 	f := frame(t, nil, DefaultChunkSize)
-	r, err := NewReader(bytes.NewReader(f), int64(len(f)))
+	r, err := NewReader(bytes.NewReader(f), int64(len(f)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,12 +223,21 @@ func TestForeignFramesRefused(t *testing.T) {
 		t.Errorf("newer format version: err %v, want a 'newer' explanation", err)
 	}
 
-	for _, flag := range []byte{flagCompressed, flagEncrypted} {
-		flagged := bytes.Clone(base)
-		flagged[5] = flag
-		if _, err := readAll(flagged); err == nil || !strings.Contains(err.Error(), "transform") {
-			t.Errorf("flag %#x: err %v, want a 'transform' explanation", flag, err)
-		}
+	// flagCompressed is reserved but unimplemented: refused as an
+	// unsupported transform.
+	compressed := bytes.Clone(base)
+	compressed[5] = flagCompressed
+	if _, err := readAll(compressed); err == nil || !strings.Contains(err.Error(), "transform") {
+		t.Errorf("flag %#x: err %v, want a 'transform' explanation", flagCompressed, err)
+	}
+
+	// flagEncrypted is a supported transform, so the header parses — but
+	// readAll supplies no key, so the frame is refused for the missing key
+	// rather than misread as plaintext.
+	encrypted := bytes.Clone(base)
+	encrypted[5] = flagEncrypted
+	if _, err := readAll(encrypted); err == nil || !strings.Contains(err.Error(), "key") {
+		t.Errorf("flag %#x with no key: err %v, want a 'key' explanation", flagEncrypted, err)
 	}
 
 	if _, err := readAll([]byte("not a frame at all, sorry")); err == nil {
@@ -249,11 +258,11 @@ func TestSmallObjectFrameOverhead(t *testing.T) {
 
 func ExampleWriter() {
 	var buf bytes.Buffer
-	w, _ := NewWriter(&buf, 11, DefaultChunkSize)
+	w, _ := NewWriter(&buf, 11, DefaultChunkSize, nil)
 	io.Copy(w, strings.NewReader("hello world"))
 	w.Close()
 
-	r, _ := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	r, _ := NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()), nil)
 	p := make([]byte, 5)
 	r.ReadAt(p, 6)
 	fmt.Printf("%s\n", p)
@@ -298,8 +307,8 @@ func TestCover(t *testing.T) {
 		}
 		for _, rd := range reads {
 			off, n := rd[0], rd[1]
-			cov := Cover(int64(size), chunk, off, n)
-			r, err := NewReader(&gappedReaderAt{t: t, frame: f, ranges: cov}, int64(len(f)))
+			cov := Cover(int64(size), chunk, off, n, false)
+			r, err := NewReader(&gappedReaderAt{t: t, frame: f, ranges: cov}, int64(len(f)), nil)
 			if err != nil {
 				t.Fatalf("size %d read [%d,%d): NewReader: %v", size, off, off+n, err)
 			}

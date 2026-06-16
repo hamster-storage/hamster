@@ -5,11 +5,13 @@
 // trailer index, so a read can seek to any byte range and touch only the
 // chunks the range covers.
 //
-// This version ships identity frames: chunking, framing, and per-chunk
-// CRC-32C integrity, with the compression and encryption transforms
-// reserved as header flags but not yet wired — a frame with either flag
-// set is refused. The frame is always present even with no transforms:
-// one read path, no special cases.
+// Two frame shapes ship today: the identity frame (chunking, framing, and
+// per-chunk CRC-32C integrity) and the encrypted frame (each chunk sealed
+// with AES-256-GCM under a caller-supplied per-object DEK, the GCM tag
+// joining the CRC, ADR-0021). The compression transform is still reserved
+// as a header flag but not wired — a frame using it is refused. The frame
+// is always present even with no transforms: one read path, no special
+// cases.
 //
 // Framing is pure computation — no clocks, no randomness, no I/O of its
 // own — so it runs under the simulation harness with no seam.
@@ -34,12 +36,16 @@ const DefaultChunkSize = 1 << 20
 // rather than misread.
 const formatVersion = 1
 
-// Header flags. Both transforms are designed (docs/DATA-STREAM.md) but
-// not yet implemented; the bits are reserved so the frames written today
-// stay readable forever alongside transformed ones.
+// Header flags. flagEncrypted is wired (AES-256-GCM per chunk);
+// flagCompressed is designed (docs/DATA-STREAM.md) but not yet
+// implemented, so a frame setting it is refused. supportedFlags is the
+// set this binary can read — any bit outside it means a frame from a
+// newer hamster, refused rather than misread.
 const (
 	flagCompressed = 1 << 0
 	flagEncrypted  = 1 << 1
+
+	supportedFlags = flagEncrypted
 )
 
 var magic = [4]byte{'H', 'M', 'F', '1'}
@@ -58,11 +64,12 @@ type header struct {
 	len           int64 // encoded bytes the header occupied
 }
 
-// appendHeader encodes a version-1 header.
-func appendHeader(b []byte, chunkSize, plaintextSize int64) []byte {
+// appendHeader encodes a version-1 header. flags is 0 for an identity
+// frame or flagEncrypted for an AES-256-GCM frame.
+func appendHeader(b []byte, flags uint64, chunkSize, plaintextSize int64) []byte {
 	b = append(b, magic[:]...)
 	b = binary.AppendUvarint(b, formatVersion)
-	b = binary.AppendUvarint(b, 0) // flags: identity frame
+	b = binary.AppendUvarint(b, flags)
 	b = binary.AppendUvarint(b, uint64(chunkSize))
 	b = binary.AppendUvarint(b, uint64(plaintextSize))
 	return b
@@ -93,7 +100,7 @@ func parseHeader(b []byte) (header, error) {
 	if h.flags, err = next("flags"); err != nil {
 		return h, err
 	}
-	if h.flags != 0 {
+	if h.flags&^supportedFlags != 0 {
 		return h, fmt.Errorf("stream: frame uses transforms this binary does not support (flags %#x)", h.flags)
 	}
 	chunkSize, err := next("chunk size")
@@ -116,21 +123,33 @@ func parseHeader(b []byte) (header, error) {
 }
 
 // FrameSize is the exact framed size of a plaintextSize-byte object at
-// chunkSize, computable before any byte streams: identity frames are
-// fully determined by their dimensions. The erasure-coded write path
-// needs it up front, because every shard's header states the frame size.
-// (A compressed frame's size is not knowable in advance; that is the
-// compression transform's problem to solve when it arrives.)
-func FrameSize(plaintextSize int64, chunkSize int) int64 {
-	size := int64(len(appendHeader(make([]byte, 0, maxHeaderLen), int64(chunkSize), plaintextSize)))
-	size += plaintextSize
+// chunkSize, computable before any byte streams: an identity or encrypted
+// frame is fully determined by its dimensions. The erasure-coded write
+// path needs it up front, because every shard's header states the frame
+// size. An encrypted frame adds one GCM tag (gcmTagLen) of stored bytes
+// per chunk; pass encrypted=true for it. (A compressed frame's size is not
+// knowable in advance; that is the compression transform's problem when it
+// arrives.)
+func FrameSize(plaintextSize int64, chunkSize int, encrypted bool) int64 {
+	tag, flags := transformOverhead(encrypted)
+	size := int64(len(appendHeader(make([]byte, 0, maxHeaderLen), flags, int64(chunkSize), plaintextSize)))
 	n := chunkCount(plaintextSize, int64(chunkSize))
+	size += plaintextSize + tag*n
 	if n > 0 {
 		last := plaintextSize - (n-1)*int64(chunkSize)
-		size += (n - 1) * int64(uvarintLen(uint64(chunkSize)))
-		size += int64(uvarintLen(uint64(last)))
+		size += (n - 1) * int64(uvarintLen(uint64(int64(chunkSize)+tag)))
+		size += int64(uvarintLen(uint64(last + tag)))
 	}
 	return size + 4*n + 4
+}
+
+// transformOverhead reports a frame's per-chunk stored overhead and its
+// header flags: zero and identity, or one GCM tag and flagEncrypted.
+func transformOverhead(encrypted bool) (tag int64, flags uint64) {
+	if encrypted {
+		return gcmTagLen, flagEncrypted
+	}
+	return 0, 0
 }
 
 // A Range is a byte range within a frame: [Off, Off+Len).
@@ -140,15 +159,20 @@ type Range struct {
 
 // Cover reports which frame byte ranges a Reader touches to serve the
 // plaintext range [off, off+length): the header, the covering chunks, and
-// the trailer. Like FrameSize, it is identity-frame arithmetic — a
-// network read coordinator prefetches exactly these ranges and the Reader
-// finds every byte it asks for. Ranges are sorted, non-overlapping, and
-// merged when adjacent; an empty or out-of-bounds request still returns
-// the header and trailer, which the Reader always reads.
-func Cover(plaintextSize int64, chunkSize int, off, length int64) []Range {
-	headerLen := int64(len(appendHeader(make([]byte, 0, maxHeaderLen), int64(chunkSize), plaintextSize)))
-	frameSize := FrameSize(plaintextSize, chunkSize)
-	trailerStart := headerLen + plaintextSize // identity: stored == plaintext
+// the trailer. Like FrameSize, it is exact arithmetic over the frame's
+// dimensions — a network read coordinator prefetches exactly these ranges
+// and the Reader finds every byte it asks for. Pass encrypted=true to
+// match an AES-256-GCM frame, whose stored chunks each carry a GCM tag.
+// Ranges are sorted, non-overlapping, and merged when adjacent; an empty
+// or out-of-bounds request still returns the header and trailer, which the
+// Reader always reads.
+func Cover(plaintextSize int64, chunkSize int, off, length int64, encrypted bool) []Range {
+	tag, flags := transformOverhead(encrypted)
+	stride := int64(chunkSize) + tag // stored bytes per full chunk
+	n := chunkCount(plaintextSize, int64(chunkSize))
+	headerLen := int64(len(appendHeader(make([]byte, 0, maxHeaderLen), flags, int64(chunkSize), plaintextSize)))
+	frameSize := FrameSize(plaintextSize, chunkSize, encrypted)
+	trailerStart := headerLen + plaintextSize + tag*n
 	// The reader's header read is up to maxHeaderLen, not the exact
 	// header; cover what it reads, not what is strictly there.
 	headRead := min(int64(maxHeaderLen), frameSize)
@@ -163,8 +187,8 @@ func Cover(plaintextSize int64, chunkSize int, off, length int64) []Range {
 	if off < end {
 		first := off / int64(chunkSize)
 		last := (end - 1) / int64(chunkSize)
-		bodyStart := headerLen + first*int64(chunkSize)
-		bodyEnd := min(headerLen+(last+1)*int64(chunkSize), trailerStart)
+		bodyStart := headerLen + first*stride
+		bodyEnd := min(headerLen+(last+1)*stride, trailerStart)
 		out = appendRange(out, Range{Off: bodyStart, Len: bodyEnd - bodyStart})
 	}
 	return appendRange(out, Range{Off: trailerStart, Len: frameSize - trailerStart})

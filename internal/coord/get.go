@@ -208,7 +208,7 @@ func (op *getOp) planSlices() {
 	}
 
 	// Frame ranges the stream reader will touch, mapped to stripes.
-	cover := stream.Cover(op.entry.Size, stream.DefaultChunkSize, op.off, op.length)
+	cover := stream.Cover(op.entry.Size, stream.DefaultChunkSize, op.off, op.length, false)
 	stripeBytes := int64(op.k) * geo.SliceSize
 	type span struct{ first, last int64 }
 	var spans []span
@@ -301,7 +301,7 @@ func (op *getOp) assemble() {
 		op.fail(fmt.Errorf("coord: opening shards: %w", err))
 		return
 	}
-	sr, err := stream.NewReader(er, er.FrameSize())
+	sr, err := stream.NewReader(er, er.FrameSize(), nil)
 	if err != nil {
 		op.fail(fmt.Errorf("coord: opening frame: %w", err))
 		return

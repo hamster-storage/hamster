@@ -37,15 +37,12 @@ survey of the tree found:
 
 Because it touches the read/write path, v0.7 must clear the deterministic
 simulation harness (invariant 5) the way the EC path did. Passes, data-path-first
-(the S3 surface is last, not first):
+(the S3 surface is last, not first). Pass 1 (the `internal/stream` AES-256-GCM
+transform) has landed — encrypted frames round-trip, are golden-pinned, and reject
+every single-byte tamper and the wrong key; the size/cover arithmetic accounts for
+the per-chunk tag. Remaining:
 
-1. **The chunk encryption transform (`internal/stream`).** Wire `flagEncrypted`:
-   AES-256-GCM per chunk, the chunk index as nonce (safe — the DEK is never reused),
-   under a caller-supplied 256-bit DEK; fix the framed-size arithmetic for the
-   per-chunk tag. Pure computation, no seam — golden-pinned, every round-trip and
-   single-byte tamper proven detected (the GCM tag joins the existing CRC).
-
-2. **DEK lifecycle and the pluggable KEK (a new `internal/keys`-ish package).** DEK
+1. **DEK lifecycle and the pluggable KEK (a new `internal/keys`-ish package).** DEK
    generation from injected entropy (the seam `*rand.Rand` — `crypto/rand` in
    production, seeded under the simulator, the determinism rule). DEK wrap/unwrap
    under the KEK. The KEK from a source chosen at init: `--master-key-file`, a
@@ -55,7 +52,7 @@ simulation harness (invariant 5) the way the EC path did. Passes, data-path-firs
    integration point, behind the seam). Pure given inputs; the command hook is the
    one seam touch.
 
-3. **Encryption in the coordinator (write/read path).** `coord` PUT mints a DEK,
+2. **Encryption in the coordinator (write/read path).** `coord` PUT mints a DEK,
    encrypts through the stream transform, wraps the DEK under the node's loaded
    KEK, and stores the wrapped DEK + algorithm in the `PutObject` proposal → an
    additive `VersionEntry` field. GET reads the wrapped DEK, unwraps, decrypts.
@@ -65,17 +62,17 @@ simulation harness (invariant 5) the way the EC path did. Passes, data-path-firs
    and metadata commit for an encrypted object, GCM tag corruption caught on read
    and on scrub.
 
-4. **Cluster posture and key availability.** `cluster init` key-source flags; a
+3. **Cluster posture and key availability.** `cluster init` key-source flags; a
    replicated encryption posture (on/off + algorithm) so every node agrees;
    enable-only (disabling refused, ADR-0021); `cluster status` reports it; a node
    that cannot load its KEK at startup refuses encrypted reads *loudly* rather than
    serving ciphertext or failing quietly. The KEK is never stored or transmitted.
 
-5. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
+4. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
    when the cluster encrypts; the request header accepted; SSE-KMS and SSE-C
    refused honestly (the DEK machinery leaves room for SSE-C later).
 
-6. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
+5. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
    scan (rewrap every DEK under a new KEK — object bytes untouched). Verification:
    stream golden/tamper, key-source units, the coord sim schedules above, a cluster
    e2e (an encrypted cluster, the posture in `status`, the SSE header, a read after
@@ -84,24 +81,25 @@ simulation harness (invariant 5) the way the EC path did. Passes, data-path-firs
    ADR-0021 moves Proposed → Accepted, with a KEK-rotation ADR if the flow makes a
    real decision.
 
-**Open design questions — settle before pass 1:**
+**Open design questions — settled 2026-06-16:**
 
-- **Single-node `serve` scope.** ADR-0021 is cluster-framed ("cluster init", "the
-  cluster KEK"). Decide whether `hamster serve` (the single-node dev preview) also
-  encrypts or v0.7 is cluster-only. Leaning cluster-only — that is where the
-  compliance story lives and `serve` is a preview — but the stream/key machinery is
-  shared, so adding `serve` support is cheap.
-- **Where the replicated posture lives.** The is-encrypted/algorithm posture must
-  be agreed cluster-wide. A meta singleton (like the stored cluster layout,
-  [ADR-0028](adr/0028-stored-cluster-layout.md)) vs. a layout field vs. node
-  config. The KEK is never part of this — only the posture.
-- **Cluster KEK distribution — the load-bearing one.** Every node needs the same
-  KEK to unwrap DEKs for the reads it serves locally, but the KEK must not transit
-  the cluster (that would undermine the model). The intended model: the operator
-  configures the *same* key source on every node (same file, passphrase, or
-  command), each node loads the KEK independently at startup, and a joining node
-  that cannot produce the cluster's KEK cannot serve encrypted reads. Confirm this
-  is the model and that join does **not** carry the KEK.
+- **Single-node `serve` scope → cluster-only.** `hamster serve` (the single-node
+  dev preview) does *not* encrypt in v0.7; encryption is a cluster feature. The
+  stream/key machinery is shared, so `serve` support can be added later cheaply if
+  wanted, but the compliance story lives on the cluster and that is where v0.7 puts
+  it.
+- **Replicated posture → meta singleton.** The is-encrypted/algorithm posture lives
+  in a stored meta singleton, mirroring the stored cluster layout
+  ([ADR-0028](adr/0028-stored-cluster-layout.md)): replicated through Raft so every
+  node converges, kept orthogonal to placement (a layout change never touches
+  encryption state). The KEK is never part of it — only the posture.
+- **Cluster KEK distribution → operator-provisioned, never in `join`.** The
+  operator configures the *same* key source on every node (same file, passphrase,
+  or command); each node loads the KEK independently at startup; a joining node that
+  cannot produce the cluster's KEK cannot serve encrypted reads. The KEK is never
+  stored on disk by Hamster and never transits the cluster — `join` does **not**
+  carry it. Provisioning the key source is an out-of-band operator responsibility,
+  like any other secret.
 
 **The other half of v0.7's "keys" — CA custody and rotation**
 ([ADR-0029](adr/0029-ca-custody-and-issuance.md),

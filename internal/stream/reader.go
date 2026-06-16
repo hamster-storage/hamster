@@ -13,8 +13,10 @@ import (
 // file or are reassembled from erasure-coded shards.
 type Reader struct {
 	r       io.ReaderAt
-	size    int64   // plaintext bytes
-	chunk   int64   // plaintext bytes per chunk (last may be short)
+	size    int64 // plaintext bytes
+	chunk   int64 // plaintext bytes per chunk (last may be short)
+	tagLen  int64 // per-chunk stored overhead: 0 identity, gcmTagLen encrypted
+	crypter *chunkCrypter
 	offsets []int64 // offsets[i] is chunk i's frame offset; offsets[n] the end
 	crcs    []uint32
 }
@@ -22,8 +24,12 @@ type Reader struct {
 // NewReader parses and cross-checks a frame's header and trailer. Every
 // structural lie a corrupt frame can tell — wrong magic, impossible
 // sizes, an index that does not match the bytes — fails here; chunk
-// content corruption fails at read time via the per-chunk CRC.
-func NewReader(r io.ReaderAt, frameSize int64) (*Reader, error) {
+// content corruption fails at read time via the per-chunk CRC and, for an
+// encrypted frame, the GCM tag. dek is the per-object key: it must be
+// supplied (32 bytes, [DEKLen]) when the frame's header marks it encrypted
+// and is ignored for an identity frame. A frame that needs a key but has
+// none is refused rather than served as ciphertext.
+func NewReader(r io.ReaderAt, frameSize int64, dek []byte) (*Reader, error) {
 	hdrLen := int64(maxHeaderLen)
 	if frameSize < hdrLen {
 		hdrLen = frameSize
@@ -35,6 +41,18 @@ func NewReader(r io.ReaderAt, frameSize int64) (*Reader, error) {
 	h, err := parseHeader(front)
 	if err != nil {
 		return nil, err
+	}
+
+	var crypter *chunkCrypter
+	tagLen := int64(0)
+	if h.flags&flagEncrypted != 0 {
+		if dek == nil {
+			return nil, fmt.Errorf("stream: frame is encrypted but no key was provided")
+		}
+		if crypter, err = newChunkCrypter(dek); err != nil {
+			return nil, err
+		}
+		tagLen = gcmTagLen
 	}
 
 	// The trailer: found from the end, sized to the chunk count the
@@ -64,6 +82,8 @@ func NewReader(r io.ReaderAt, frameSize int64) (*Reader, error) {
 		r:       r,
 		size:    h.plaintextSize,
 		chunk:   h.chunkSize,
+		tagLen:  tagLen,
+		crypter: crypter,
 		offsets: make([]int64, n+1),
 		crcs:    make([]uint32, n),
 	}
@@ -74,10 +94,10 @@ func NewReader(r io.ReaderAt, frameSize int64) (*Reader, error) {
 			return nil, fmt.Errorf("stream: corrupt trailer: bad length for chunk %d", i)
 		}
 		trailer = trailer[used:]
-		// Identity frames only (flags are zero, enforced by parseHeader):
-		// every stored chunk is exactly its plaintext length.
-		if int64(stored) != fr.plainLen(i) {
-			return nil, fmt.Errorf("stream: corrupt frame: chunk %d stores %d bytes, want %d", i, stored, fr.plainLen(i))
+		// A chunk stores its plaintext plus the transform overhead: zero
+		// for an identity frame, one GCM tag for an encrypted one.
+		if int64(stored) != fr.plainLen(i)+fr.tagLen {
+			return nil, fmt.Errorf("stream: corrupt frame: chunk %d stores %d bytes, want %d", i, stored, fr.plainLen(i)+fr.tagLen)
 		}
 		fr.offsets[i+1] = fr.offsets[i] + int64(stored)
 	}
@@ -129,8 +149,11 @@ func (fr *Reader) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-// readChunk reads stored chunk i and verifies its CRC. With no transforms
-// the stored bytes are the plaintext.
+// readChunk reads stored chunk i and verifies it. The CRC-32C guards the
+// stored bytes against bitrot; for an encrypted frame the GCM tag then
+// authenticates and decrypts them, so a chunk that passes the CRC but was
+// tampered with still fails. For an identity frame the stored bytes are
+// the plaintext.
 func (fr *Reader) readChunk(i int64) ([]byte, error) {
 	stored := make([]byte, fr.offsets[i+1]-fr.offsets[i])
 	if err := readAtFull(fr.r, stored, fr.offsets[i], fmt.Sprintf("chunk %d", i)); err != nil {
@@ -139,5 +162,12 @@ func (fr *Reader) readChunk(i int64) ([]byte, error) {
 	if crc32.Checksum(stored, crcTable) != fr.crcs[i] {
 		return nil, fmt.Errorf("stream: chunk %d failed its CRC: frame corrupted", i)
 	}
-	return stored, nil
+	if fr.crypter == nil {
+		return stored, nil
+	}
+	plain, err := fr.crypter.open(stored[:0], stored, i)
+	if err != nil {
+		return nil, fmt.Errorf("stream: chunk %d failed authentication: frame corrupted or wrong key: %w", i, err)
+	}
+	return plain, nil
 }
