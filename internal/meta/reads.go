@@ -144,6 +144,61 @@ func (s *Store) ListObjects(bucket, prefix, startAfter string, max int) []Object
 	return out
 }
 
+// VersionListing is one ListObjectVersions result row: a version (or delete
+// marker) and whether it is its key's current version.
+type VersionListing struct {
+	Key      string
+	Entry    VersionEntry
+	IsLatest bool
+}
+
+// ListObjectVersions returns a page of versions and delete markers across keys,
+// in S3 ListObjectVersions order — key ascending, newest version first within a
+// key. It resumes strictly after (keyMarker, versionIDMarker): a zero
+// versionIDMarker means "after the whole keyMarker key", a set one means "after
+// that version of keyMarker". prefix filters keys; delimiter grouping is the API
+// layer's job. Up to max rows are returned; truncated reports whether more
+// remain. IsLatest marks each key's newest version — false for a page that
+// resumes into the middle of keyMarker's versions, since that key's newest was
+// on the prior page.
+func (s *Store) ListObjectVersions(bucket, prefix, keyMarker string, versionIDMarker VersionID, max int) (out []VersionListing, truncated bool) {
+	if max <= 0 {
+		return nil, false
+	}
+	bucketPrefix := bucketVersionsScanPrefix(bucket)
+	from := bucketPrefix + prefix
+	resumedMidKey := keyMarker != "" && versionIDMarker != (VersionID{})
+	if keyMarker != "" {
+		// versionRowKey with a zero ID complements to all-0xff — the largest
+		// (oldest) tail — so +nul lands just past every version of keyMarker; a
+		// set ID lands just past that one version.
+		if cur := versionRowKey(bucket, keyMarker, versionIDMarker) + nul; cur > from {
+			from = cur
+		}
+	}
+	prevKey := ""
+	havePrev := false
+	s.kv.scan(from, func(k string, v any) bool {
+		if !hasPrefix(k, bucketPrefix) {
+			return false // left this bucket's version rows
+		}
+		key, _ := keyAndVersionFromVersionRow(k, bucket)
+		if !hasPrefix(key, prefix) {
+			return false // past the prefix range (keys sharing it are contiguous)
+		}
+		if len(out) == max {
+			truncated = true
+			return false
+		}
+		isFirstOfKey := !havePrev || key != prevKey
+		isLatest := isFirstOfKey && !(resumedMidKey && key == keyMarker)
+		out = append(out, VersionListing{Key: key, Entry: v.(VersionEntry).clone(), IsLatest: isLatest})
+		prevKey, havePrev = key, true
+		return true
+	})
+	return out, truncated
+}
+
 // newestVersion returns a key's newest version entry: the first row under
 // its v/ prefix, by the complement encoding. Internal — the returned entry
 // shares reference fields with the stored row and must not be mutated.

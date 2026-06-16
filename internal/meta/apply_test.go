@@ -63,6 +63,75 @@ func TestUnversionedPutReplaces(t *testing.T) {
 	}
 }
 
+func TestListObjectVersions(t *testing.T) {
+	e := newEnv(t)
+	e.mustCreateBucket("docs", false)
+	if err := e.s.ApplySetBucketVersioning(SetBucketVersioning{ProposedAtUnixMS: e.tick(), Bucket: "docs", State: VersioningEnabled}); err != nil {
+		t.Fatal(err)
+	}
+	a1 := e.put("docs", "a")
+	a2 := e.put("docs", "a")
+	b1 := e.put("docs", "b")
+	at := e.tick()
+	del, err := e.s.ApplyDeleteObject(DeleteObject{ProposedAtUnixMS: at, Bucket: "docs", Key: "b", VersionID: mintAt(at, e.rng)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1 := e.put("docs", "c")
+
+	type want struct {
+		key    string
+		vid    VersionID
+		latest bool
+		marker bool
+	}
+	exp := []want{
+		{"a", a2.VersionID, true, false},
+		{"a", a1.VersionID, false, false},
+		{"b", del.MarkerID, true, true},
+		{"b", b1.VersionID, false, false},
+		{"c", c1.VersionID, true, false},
+	}
+	all, trunc := e.s.ListObjectVersions("docs", "", "", VersionID{}, 100)
+	if trunc || len(all) != len(exp) {
+		t.Fatalf("got %d entries (trunc=%v), want %d", len(all), trunc, len(exp))
+	}
+	for i, w := range exp {
+		g := all[i]
+		if g.Key != w.key || g.Entry.VersionID != w.vid || g.IsLatest != w.latest || (g.Entry.Kind == KindDeleteMarker) != w.marker {
+			t.Fatalf("entry %d = {%s latest=%v marker=%v}, want {%s latest=%v marker=%v}",
+				i, g.Key, g.IsLatest, g.Entry.Kind == KindDeleteMarker, w.key, w.latest, w.marker)
+		}
+	}
+
+	// Pagination two at a time, resuming after the last consumed entry.
+	p1, t1 := e.s.ListObjectVersions("docs", "", "", VersionID{}, 2)
+	if !t1 || len(p1) != 2 {
+		t.Fatalf("page1 len=%d trunc=%v", len(p1), t1)
+	}
+	last1 := p1[1]
+	p2, t2 := e.s.ListObjectVersions("docs", "", last1.Key, last1.Entry.VersionID, 2)
+	if !t2 || len(p2) != 2 || !p2[0].IsLatest || p2[0].Entry.Kind != KindDeleteMarker {
+		t.Fatalf("page2 len=%d trunc=%v latest=%v", len(p2), t2, p2[0].IsLatest)
+	}
+	last2 := p2[1]
+	p3, t3 := e.s.ListObjectVersions("docs", "", last2.Key, last2.Entry.VersionID, 2)
+	if t3 || len(p3) != 1 || p3[0].Key != "c" {
+		t.Fatalf("page3 len=%d trunc=%v", len(p3), t3)
+	}
+
+	// Resuming into the middle of a key marks nothing latest there.
+	pa, _ := e.s.ListObjectVersions("docs", "", "a", a2.VersionID, 1)
+	if len(pa) != 1 || pa[0].Entry.VersionID != a1.VersionID || pa[0].IsLatest {
+		t.Fatalf("mid-key resume = %+v", pa)
+	}
+
+	// Prefix filter.
+	if pf, _ := e.s.ListObjectVersions("docs", "a", "", VersionID{}, 100); len(pf) != 2 {
+		t.Fatalf("prefix a: %d entries, want 2", len(pf))
+	}
+}
+
 func TestEnablingVersioningPreservesNullVersion(t *testing.T) {
 	e := newEnv(t)
 	e.mustCreateBucket("docs", false)

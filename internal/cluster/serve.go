@@ -140,6 +140,13 @@ func (c *clusterMetadata) ListVersions(bucket, key string) (out []meta.VersionEn
 	return
 }
 
+func (c *clusterMetadata) ListObjectVersions(bucket, prefix, keyMarker string, versionIDMarker meta.VersionID, max int) (out []meta.VersionListing, truncated bool) {
+	c.n.on(func() {
+		out, truncated = c.n.raft.Store().ListObjectVersions(bucket, prefix, keyMarker, versionIDMarker, max)
+	})
+	return
+}
+
 func (c *clusterMetadata) ListObjects(bucket, prefix, startAfter string, max int) (out []meta.ObjectListing) {
 	c.n.on(func() { out = c.n.raft.Store().ListObjects(bucket, prefix, startAfter, max) })
 	return

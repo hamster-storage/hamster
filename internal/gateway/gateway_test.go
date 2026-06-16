@@ -264,6 +264,90 @@ func TestObjectVersioning(t *testing.T) {
 	}
 }
 
+func TestListObjectVersionsAPI(t *testing.T) {
+	e := newEnv(t)
+	e.expect(e.do("PUT", "/vault", nil, nil), 200)
+	enable := []byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`)
+	e.expect(e.do("PUT", "/vault?versioning", enable, nil), 200)
+
+	e.expect(e.do("PUT", "/vault/dir/a", []byte("a1"), nil), 200)
+	e.expect(e.do("PUT", "/vault/dir/a", []byte("a2"), nil), 200)
+	e.expect(e.do("PUT", "/vault/dir/b", []byte("b1"), nil), 200)
+	e.expect(e.do("PUT", "/vault/top", []byte("t1"), nil), 200)
+	e.expect(e.do("DELETE", "/vault/top", nil, nil), 204) // a delete marker on top
+
+	type vEntry struct {
+		Key       string `xml:"Key"`
+		VersionID string `xml:"VersionId"`
+		IsLatest  bool   `xml:"IsLatest"`
+	}
+	type vResult struct {
+		XMLName             xml.Name `xml:"ListVersionsResult"`
+		IsTruncated         bool     `xml:"IsTruncated"`
+		NextKeyMarker       string   `xml:"NextKeyMarker"`
+		NextVersionIdMarker string   `xml:"NextVersionIdMarker"`
+		Versions            []vEntry `xml:"Version"`
+		DeleteMarkers       []vEntry `xml:"DeleteMarker"`
+		CommonPrefixes      []struct {
+			Prefix string `xml:"Prefix"`
+		} `xml:"CommonPrefixes"`
+	}
+	parse := func(path string) vResult {
+		var res vResult
+		body := e.expect(e.do("GET", path, nil, nil), 200)
+		if err := xml.Unmarshal(body, &res); err != nil {
+			t.Fatalf("unmarshal %s: %v\n%s", path, err, body)
+		}
+		return res
+	}
+
+	// Full listing: four object versions and one delete marker.
+	all := parse("/vault?versions")
+	if len(all.Versions) != 4 || len(all.DeleteMarkers) != 1 {
+		t.Fatalf("listing: %d versions, %d markers", len(all.Versions), len(all.DeleteMarkers))
+	}
+	// dir/a's two versions: the first is latest, the second is not.
+	var dirA []vEntry
+	for _, v := range all.Versions {
+		if v.Key == "dir/a" {
+			dirA = append(dirA, v)
+		}
+	}
+	if len(dirA) != 2 || !dirA[0].IsLatest || dirA[1].IsLatest || dirA[0].VersionID == dirA[1].VersionID {
+		t.Fatalf("dir/a versions: %+v", dirA)
+	}
+	if !all.DeleteMarkers[0].IsLatest || all.DeleteMarkers[0].Key != "top" {
+		t.Fatalf("top marker: %+v", all.DeleteMarkers[0])
+	}
+
+	// Delimiter rolls dir/* into one common prefix; top stays itemized.
+	grouped := parse("/vault?versions&delimiter=/")
+	if len(grouped.CommonPrefixes) != 1 || grouped.CommonPrefixes[0].Prefix != "dir/" {
+		t.Fatalf("common prefixes: %+v", grouped.CommonPrefixes)
+	}
+	if len(grouped.Versions) != 1 || grouped.Versions[0].Key != "top" {
+		t.Fatalf("grouped versions: %+v", grouped.Versions)
+	}
+
+	// Pagination: walk the whole listing two entries at a time.
+	seen := 0
+	path := "/vault?versions&max-keys=2"
+	for {
+		page := parse(path)
+		seen += len(page.Versions) + len(page.DeleteMarkers)
+		if !page.IsTruncated {
+			break
+		}
+		path = "/vault?versions&max-keys=2&key-marker=" + url.QueryEscape(page.NextKeyMarker)
+		if page.NextVersionIdMarker != "" {
+			path += "&version-id-marker=" + page.NextVersionIdMarker
+		}
+	}
+	if seen != 5 {
+		t.Fatalf("paginated total = %d, want 5", seen)
+	}
+}
+
 func TestObjectRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	e.expect(e.do("PUT", "/bkt", nil, nil), 200)
