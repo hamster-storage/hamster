@@ -79,6 +79,9 @@ func mapError(err error) *s3Error {
 		return errInvalidObjectName
 	case errors.Is(err, meta.ErrNoSuchVersion):
 		return &s3Error{"NoSuchVersion", http.StatusNotFound, "The specified version does not exist."}
+	case errors.Is(err, meta.ErrInvalidVersioningState):
+		return &s3Error{"InvalidBucketState", http.StatusConflict,
+			"The versioning state cannot be changed: an object lock configuration is present, or the requested state is invalid."}
 	case errors.Is(err, meta.ErrObjectLocked):
 		return &s3Error{"AccessDenied", http.StatusForbidden, "The object is protected by object lock."}
 	case errors.Is(err, meta.ErrNoSuchUpload):

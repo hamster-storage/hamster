@@ -3,12 +3,14 @@ package gateway
 import (
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/meta"
+	"github.com/hamster-storage/hamster/internal/sigv4"
 )
 
 const s3Xmlns = "http://s3.amazonaws.com/doc/2006-03-01/"
@@ -97,6 +99,80 @@ func (g *Gateway) getBucketLocation(w http.ResponseWriter, r *http.Request, buck
 		region = ""
 	}
 	writeXML(w, http.StatusOK, locationConstraint{Xmlns: s3Xmlns, Value: region})
+}
+
+// versioningConfiguration is the ?versioning subresource body — the request for
+// PutBucketVersioning and the response for GetBucketVersioning. MFA Delete is a
+// non-goal (object lock is the WORM mechanism, ADR-0006): the field is parsed so
+// a request that tries to enable it is refused honestly rather than silently
+// dropped, never honored.
+type versioningConfiguration struct {
+	XMLName   xml.Name `xml:"VersioningConfiguration"`
+	Xmlns     string   `xml:"xmlns,attr,omitempty"`
+	Status    string   `xml:"Status,omitempty"`
+	MFADelete string   `xml:"MfaDelete,omitempty"`
+}
+
+func (g *Gateway) getBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
+	cfg, ok := g.cfg.Meta.GetBucket(bucket)
+	if !ok {
+		writeError(w, r, meta.ErrNoSuchBucket)
+		return
+	}
+	out := versioningConfiguration{Xmlns: s3Xmlns}
+	switch cfg.Versioning {
+	case meta.VersioningEnabled:
+		out.Status = "Enabled"
+	case meta.VersioningSuspended:
+		out.Status = "Suspended"
+	}
+	// An Unversioned bucket returns an empty <VersioningConfiguration/> — no
+	// Status element — exactly as S3 does for a bucket never configured.
+	writeXML(w, http.StatusOK, out)
+}
+
+func (g *Gateway) putBucketVersioning(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket string) {
+	body, err := readBody(r, id)
+	if err != nil {
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
+		return
+	}
+	var req versioningConfiguration
+	if xml.Unmarshal(body, &req) != nil {
+		writeError(w, r, errMalformedXML)
+		return
+	}
+	// MFA Delete is a non-goal: accept its absence or an explicit Disabled,
+	// refuse any attempt to enable it — silently dropping a delete-protection
+	// request would be a correctness lie.
+	if !strings.EqualFold(req.MFADelete, "") && !strings.EqualFold(req.MFADelete, "Disabled") {
+		writeError(w, r, errNotImplemented)
+		return
+	}
+	var state meta.VersioningState
+	switch req.Status {
+	case "Enabled":
+		state = meta.VersioningEnabled
+	case "Suspended":
+		state = meta.VersioningSuspended
+	default:
+		// S3 rejects any Status other than Enabled or Suspended, empty included.
+		writeError(w, r, errMalformedXML)
+		return
+	}
+	if applyErr := g.cfg.Meta.ApplySetBucketVersioning(meta.SetBucketVersioning{
+		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
+		Bucket:           bucket,
+		State:            state,
+	}); applyErr != nil {
+		writeError(w, r, applyErr)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // listing is the delimiter-grouped result both ListObjects versions share.

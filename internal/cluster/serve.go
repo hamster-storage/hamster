@@ -165,6 +165,11 @@ func (c *clusterMetadata) ApplyDeleteBucket(p meta.DeleteBucket) error {
 	return err
 }
 
+func (c *clusterMetadata) ApplySetBucketVersioning(p meta.SetBucketVersioning) error {
+	_, err := c.n.propose(p)
+	return err
+}
+
 func (c *clusterMetadata) ApplyPutObject(p meta.PutObject) (meta.PutResult, error) {
 	res, err := c.n.propose(p)
 	if err != nil {
