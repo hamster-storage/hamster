@@ -107,6 +107,58 @@ func TestObjectLockConfiguration(t *testing.T) {
 	}
 }
 
+// TestComplianceLockIsAbsolute is invariant 4 made executable: no path may
+// destroy or weaken a COMPLIANCE-locked version, with or without a governance
+// bypass, until its retention expires.
+func TestComplianceLockIsAbsolute(t *testing.T) {
+	e := newEnv(t)
+	e.mustCreateBucket("vault", true) // object lock enabled
+	at := e.tick()
+	until := at + 100*365*24*3600*1000 // ~100 years out, far past every tick below
+	res, err := e.s.ApplyPutObject(PutObject{
+		ProposedAtUnixMS: at, Bucket: "vault", Key: "k", VersionID: mintAt(at, e.rng),
+		Size: 3, ETag: []byte{1}, RetentionMode: RetentionCompliance, RetainUntilUnixMS: until,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vid := res.VersionID
+
+	mustLock := func(name string, err error) {
+		if !errors.Is(err, ErrObjectLocked) {
+			t.Fatalf("%s: got %v, want ErrObjectLocked", name, err)
+		}
+	}
+	_, dv := e.s.ApplyDeleteVersion(DeleteVersion{ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid})
+	mustLock("delete version", dv)
+	_, dvb := e.s.ApplyDeleteVersion(DeleteVersion{ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid, BypassGovernance: true})
+	mustLock("delete version with bypass", dvb)
+	mustLock("shorten", e.s.ApplyUpdateRetention(UpdateRetention{
+		ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid, Mode: RetentionCompliance, RetainUntilUnixMS: until - 1000}))
+	mustLock("remove with bypass", e.s.ApplyUpdateRetention(UpdateRetention{
+		ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid, Mode: RetentionNone, BypassGovernance: true}))
+	mustLock("downgrade to governance", e.s.ApplyUpdateRetention(UpdateRetention{
+		ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid, Mode: RetentionGovernance, RetainUntilUnixMS: until, BypassGovernance: true}))
+
+	// The bucket cannot be deleted out from under the locked version either.
+	if err := e.s.ApplyDeleteBucket(DeleteBucket{ProposedAtUnixMS: e.tick(), Bucket: "vault"}); !errors.Is(err, ErrBucketNotEmpty) {
+		t.Fatalf("delete bucket: got %v, want ErrBucketNotEmpty", err)
+	}
+
+	// After every assault, the version and its retention are untouched.
+	got, ok := e.s.GetVersion("vault", "k", vid)
+	if !ok || got.RetentionMode != RetentionCompliance || got.RetainUntilUnixMS != until {
+		t.Fatalf("locked version changed: %+v ok=%v", got, ok)
+	}
+
+	// Strengthening (a later date) is the one mutation allowed — the lock forbids
+	// only weakening.
+	if err := e.s.ApplyUpdateRetention(UpdateRetention{
+		ProposedAtUnixMS: e.tick(), Bucket: "vault", Key: "k", VersionID: vid, Mode: RetentionCompliance, RetainUntilUnixMS: until + 1000}); err != nil {
+		t.Fatalf("strengthen compliance: %v", err)
+	}
+}
+
 func TestListObjectVersions(t *testing.T) {
 	e := newEnv(t)
 	e.mustCreateBucket("docs", false)
