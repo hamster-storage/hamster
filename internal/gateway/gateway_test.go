@@ -225,6 +225,41 @@ func TestObjectLockConfig(t *testing.T) {
 	}
 }
 
+func TestObjectLegalHold(t *testing.T) {
+	e := newEnv(t)
+	e.expect(e.do("PUT", "/vault", nil, map[string]string{"x-amz-bucket-object-lock-enabled": "true"}), 200)
+	put := e.do("PUT", "/vault/doc", []byte("data"), nil)
+	e.expect(put, 200)
+	vid := put.Header.Get("x-amz-version-id")
+
+	// No hold to start.
+	if body := e.expect(e.do("GET", "/vault/doc?legal-hold", nil, nil), 200); !strings.Contains(string(body), "<Status>OFF</Status>") {
+		t.Fatalf("initial legal hold:\n%s", body)
+	}
+
+	// Place a hold; it shows in the subresource and the object response header.
+	on := []byte(`<LegalHold><Status>ON</Status></LegalHold>`)
+	e.expect(e.do("PUT", "/vault/doc?legal-hold", on, nil), 200)
+	if body := e.expect(e.do("GET", "/vault/doc?legal-hold", nil, nil), 200); !strings.Contains(string(body), "<Status>ON</Status>") {
+		t.Fatalf("hold not set:\n%s", body)
+	}
+	get := e.do("GET", "/vault/doc", nil, nil)
+	e.expect(get, 200)
+	if get.Header.Get("x-amz-object-lock-legal-hold") != "ON" {
+		t.Fatalf("legal-hold header = %q", get.Header.Get("x-amz-object-lock-legal-hold"))
+	}
+
+	// A legal hold blocks deletion of the version.
+	if code := e.errorCode(e.do("DELETE", "/vault/doc?versionId="+vid, nil, nil), 403); code != "AccessDenied" {
+		t.Fatalf("delete under legal hold: %s", code)
+	}
+
+	// Release the hold; the version can then be deleted.
+	off := []byte(`<LegalHold><Status>OFF</Status></LegalHold>`)
+	e.expect(e.do("PUT", "/vault/doc?legal-hold", off, nil), 200)
+	e.expect(e.do("DELETE", "/vault/doc?versionId="+vid, nil, nil), 204)
+}
+
 func TestObjectRetention(t *testing.T) {
 	e := newEnv(t)
 	e.expect(e.do("PUT", "/vault", nil, map[string]string{"x-amz-bucket-object-lock-enabled": "true"}), 200)

@@ -216,6 +216,11 @@ func (c *clusterMetadata) ApplyUpdateRetention(p meta.UpdateRetention) error {
 	return err
 }
 
+func (c *clusterMetadata) ApplyUpdateLegalHold(p meta.UpdateLegalHold) error {
+	_, err := c.n.propose(p)
+	return err
+}
+
 func (c *clusterMetadata) ApplyCreateMultipartUpload(p meta.CreateMultipartUpload) error {
 	_, err := c.n.propose(p)
 	return err
