@@ -44,6 +44,7 @@ const (
 	propSetNodeReplacedBy = 18 // member replacement pairing (ADR-0004)
 	propReEncodeObject    = 19 // version EC re-encode (ADR-0004, ADR-0015)
 	propSetObjectLock     = 20 // bucket object-lock default retention (ADR-0006)
+	propSetEncryption     = 21 // cluster encryption-at-rest posture (ADR-0021)
 )
 
 // EncodeProposal encodes one proposal for the Raft log. p must be one of
@@ -154,6 +155,9 @@ func EncodeProposal(p any) []byte {
 		cmd = putString(cmd, 1, c.Bucket)
 		cmd = putString(cmd, 2, c.Key)
 		cmd = putID(cmd, 3, c.UploadID)
+	case SetEncryptionPosture:
+		atMS, num = c.ProposedAtUnixMS, propSetEncryption
+		cmd = putUvarint(cmd, 1, uint64(c.Algorithm))
 	case SetClusterLayout:
 		atMS, num = c.ProposedAtUnixMS, propSetLayout
 		cmd = putUvarint(cmd, 1, c.Version)
@@ -225,7 +229,7 @@ func DecodeProposal(b []byte) (any, error) {
 			d.uint32() // format_version: additive, no branching yet
 		case d.num == propAt:
 			atMS = d.int64()
-		case d.num >= propCreateBucket && d.num <= propSetObjectLock:
+		case d.num >= propCreateBucket && d.num <= propSetEncryption:
 			if seen {
 				d.fail("proposal carries more than one command")
 				break
@@ -497,6 +501,17 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.Key = d.str()
 			case 3:
 				c.UploadID = d.id()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propSetEncryption:
+		c := SetEncryptionPosture{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.Algorithm = EncAlgorithm(d.enum8())
 			default:
 				d.skipUnknown(nil)
 			}

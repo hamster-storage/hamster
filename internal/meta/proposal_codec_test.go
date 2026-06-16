@@ -54,6 +54,7 @@ func fullProposals() []any {
 		ReEncodeObject{ProposedAtUnixMS: 1700000000017, Bucket: "docs", Key: "dir/report.pdf",
 			VersionID: vid, DataID: did, ECDataShards: 3, ECParityShards: 2,
 			ShardChecksums: [][]byte{{0x51}, {0x52}, {0x53}, {0x54}, {0x55}}},
+		SetEncryptionPosture{ProposedAtUnixMS: 1700000000018, Algorithm: EncAES256GCM},
 	}
 }
 
@@ -134,9 +135,9 @@ func TestProposalDecodeErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":      {},
 		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		// Field 21 is the next unassigned command slot — a newer node's
+		// Field 22 is the next unassigned command slot — a newer node's
 		// command this build does not know, which must refuse, not half-apply.
-		"unknown_command": encode(envelope(21)),
+		"unknown_command": encode(envelope(22)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -148,7 +149,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(21)))
+	_, err := DecodeProposal(encode(envelope(22)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

@@ -37,6 +37,8 @@ func (s *Store) Apply(p any) (any, error) {
 		return s.ApplyAbortMultipartUpload(c)
 	case SetClusterLayout:
 		return nil, s.ApplySetClusterLayout(c)
+	case SetEncryptionPosture:
+		return nil, s.ApplySetEncryptionPosture(c)
 	case RegisterNode:
 		return nil, s.ApplyRegisterNode(c)
 	case SetNodeDraining:
