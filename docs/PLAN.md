@@ -20,9 +20,10 @@ wraps every object's DEK and the cluster CA that anchors inter-node trust. That 
 v0.8, and [ADR-0022](adr/0022-cluster-mtls.md) pairs the two: they are the same
 keys problem, so they travel as one release.
 
-Two largely independent tracks under one headline.
+Two largely independent tracks under one headline. **Track A is the front line**
+(self-contained, rides existing sweep machinery); Track B follows.
 
-### Track A — KEK rotation (master-key rewrap)
+### Track A — KEK rotation (master-key rewrap) — designed, [ADR-0032](adr/0032-master-key-rotation.md)
 
 A **metadata-only** rewrap sweep: object bytes and shards are never touched —
 only the small wrapped DEK alongside each version changes. Load the old and the
@@ -34,18 +35,27 @@ simulator: rotate, every object still decrypts; crash mid-rotation resumes and
 converges; COMPLIANCE-safe by construction (the lock and the bytes are untouched,
 only the wrapped key is rewritten).
 
-**Open design question to settle first (new ADR).** During a rotation the cluster
-holds a *mix* — some DEKs wrapped under the old KEK, some under the new — so a
-reader must know which KEK unwraps a given version. Two candidates:
-- **Try-both:** each node holds old+new KEK during the rotation window and tries
-  the new KEK, falling back to the old. Simplest; no record change; the window is
-  the only place two keys are loaded.
-- **Per-version KEK id:** record a small KEK-generation marker on each version
-  (additive field) so unwrap is unambiguous and a stalled rotation is self-
-  describing. More metadata, but no ordering assumptions.
+**Design settled in [ADR-0032](adr/0032-master-key-rotation.md):** the rotation is
+made observable by a **per-version KEK fingerprint** (an additive `VersionEntry`
+field — a 64-bit content hash of the wrapping key) plus a *current fingerprint* on
+the `EncryptionPosture` singleton. The count of versions still on the old
+fingerprint is the exact, cheap progress signal — completion is *provable* (zero
+stragglers) so retiring the old key is safe, not hoped. A node whose loaded KEK
+fingerprint ≠ the posture's current fingerprint refuses encrypted writes (a
+split-key misconfig guard v0.7 lacks). One rotation at a time; never more than two
+KEKs loaded. CLI: `cluster rotate-key -new-master-key-file`.
 
-This is the load-bearing decision for the track and wants the user's call before
-code (the same way the v0.7 KEK *source* was decided up front).
+Passes (data-path/metadata-first, CLI last), to be detailed as each starts:
+1. `internal/keys` — KEK fingerprint at load (domain-separated hash prefix, cached
+   on the loaded KEK).
+2. `internal/meta` — additive `VersionEntry` KEK-fingerprint field + posture
+   current/rotating-to fingerprints; the rewrap proposal; back-compat (absent
+   fingerprint = founding KEK).
+3. `internal/coord` — the leader-only rewrap sweep (single-flight guard, resumable
+   by straggler scan, yields to a layout transition); write-time fingerprint guard;
+   sim schedules.
+4. `internal/cluster` + `cmd/hamster` — two-key load, `cluster rotate-key`, the
+   straggler count + rotation state in `cluster status`; cluster/e2e proof.
 
 ### Track B — CA custody, issuance, and rotation
 
@@ -71,20 +81,17 @@ private key is **never** replicated through Raft. v0.8 builds the rotation on to
 The rotation flow and its lost-key case get **their own ADR** when the work starts
 ([ROADMAP.md](ROADMAP.md) records this).
 
-### Sequencing / open questions for the user
+### Settled
 
-- **Which track first?** Track A (KEK) is self-contained and rides machinery that
-  already exists (the sweep shape, the meta proposal pattern); Track B is the
-  larger, more security-sensitive design (a new seam + a new ADR). KEK-first gives
-  an early, shippable win and a working sweep template.
-- **The KEK-mix resolution** (try-both vs per-version id) above — settle before
-  Track A code.
-- **Where the *new* key/CA material is supplied** (a second `-master-key-file`-
-  shaped flag, a `cluster rotate-key` command reading it) — a CLI-surface call.
+- **KEK-first** (Track A before Track B): self-contained, rides existing sweep
+  machinery, ships an early win and a working rewrap template.
+- **KEK-mix resolution: per-version KEK fingerprint** (not try-both), for the
+  observability and audit it buys — [ADR-0032](adr/0032-master-key-rotation.md).
+- **New key reaches the cluster via** `cluster rotate-key -new-master-key-file`,
+  reusing the `--master-key-file` source shape.
 
-v0.8 is design-first: unlike v0.5–v0.7 (which mostly exposed pre-built metadata),
-the rotation tracks have genuine open decisions, so the first step is the ADR, not
-the code.
+Track B (CA) still owes its own ADR (the multi-CA trust bundle, pluggable issuance,
+lost-key recovery) when it becomes the front line.
 
 ## Later versions
 
