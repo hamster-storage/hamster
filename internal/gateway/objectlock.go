@@ -164,15 +164,6 @@ func parseLockHeaders(h http.Header) (mode meta.RetentionMode, retainUntil int64
 	return mode, retainUntil, legalHold, nil
 }
 
-// hasLockHeaders reports whether a request carries any x-amz-object-lock-* PUT
-// header — used to refuse them on the cluster path until pass 4 plumbs the lock
-// fields through coord.Put.
-func hasLockHeaders(h http.Header) bool {
-	return h.Get("x-amz-object-lock-mode") != "" ||
-		h.Get("x-amz-object-lock-retain-until-date") != "" ||
-		h.Get("x-amz-object-lock-legal-hold") != ""
-}
-
 // setLockHeaders writes the x-amz-object-lock-* response headers for a version's
 // retention and legal-hold state on GET/HEAD.
 func setLockHeaders(w http.ResponseWriter, e meta.VersionEntry) {

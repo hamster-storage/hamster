@@ -253,15 +253,20 @@ func (c *clusterMetadata) ApplyAbortMultipartUpload(p meta.AbortMultipartUpload)
 // clusterObjects is gateway.ObjectBackend over the coordinator.
 type clusterObjects struct{ n *Node }
 
-func (c *clusterObjects) Put(bucket, key string, body []byte, contentType string, userMeta map[string]string) ([]byte, meta.VersionID, error) {
+func (c *clusterObjects) Put(bucket, key string, body []byte, opts gateway.PutObjectOptions) ([]byte, meta.VersionID, error) {
 	type outcome struct {
 		res coord.PutResult
 		err error
 	}
 	ch := make(chan outcome, 1)
 	c.n.loop.Post(func() {
-		c.n.coord.Put(bucket, key, body, coord.PutOptions{ContentType: contentType, UserMetadata: userMeta},
-			func(res coord.PutResult, err error) { ch <- outcome{res, err} })
+		c.n.coord.Put(bucket, key, body, coord.PutOptions{
+			ContentType:       opts.ContentType,
+			UserMetadata:      opts.UserMetadata,
+			RetentionMode:     opts.RetentionMode,
+			RetainUntilUnixMS: opts.RetainUntilUnixMS,
+			LegalHold:         opts.LegalHold,
+		}, func(res coord.PutResult, err error) { ch <- outcome{res, err} })
 	})
 	out := <-ch
 	if out.err != nil {

@@ -34,6 +34,12 @@ var ErrRefused = fmt.Errorf("coord: too few nodes reachable to write durably (Sl
 type PutOptions struct {
 	ContentType  string
 	UserMetadata map[string]string
+	// Object-lock fields (ADR-0006), set from the x-amz-object-lock-* headers.
+	// Zero values mean no per-object lock; a bucket default retention is applied
+	// in the metadata layer, so it needs nothing here.
+	RetentionMode     meta.RetentionMode
+	RetainUntilUnixMS int64
+	LegalHold         bool
 }
 
 // Put stores one object: erasure-code the body onto the partition's
@@ -281,19 +287,22 @@ func (op *putOp) evaluate(lastErr error) {
 	}
 	op.finished = true
 	op.c.cfg.Raft.Propose(meta.PutObject{
-		ProposedAtUnixMS: op.atMS,
-		Bucket:           op.bucket,
-		Key:              op.key,
-		VersionID:        op.vid,
-		Size:             int64(len(op.body)),
-		ETag:             op.etag,
-		ContentType:      op.opts.ContentType,
-		UserMetadata:     op.opts.UserMetadata,
-		Partition:        op.partition,
-		ECDataShards:     uint32(op.k),
-		ECParityShards:   uint32(op.m),
-		ObjectChecksum:   op.objSum,
-		ShardChecksums:   op.ecw.Checksums(),
+		ProposedAtUnixMS:  op.atMS,
+		Bucket:            op.bucket,
+		Key:               op.key,
+		VersionID:         op.vid,
+		Size:              int64(len(op.body)),
+		ETag:              op.etag,
+		ContentType:       op.opts.ContentType,
+		UserMetadata:      op.opts.UserMetadata,
+		Partition:         op.partition,
+		ECDataShards:      uint32(op.k),
+		ECParityShards:    uint32(op.m),
+		ObjectChecksum:    op.objSum,
+		ShardChecksums:    op.ecw.Checksums(),
+		RetentionMode:     op.opts.RetentionMode,
+		RetainUntilUnixMS: op.opts.RetainUntilUnixMS,
+		LegalHold:         op.opts.LegalHold,
 	}, func(res any, err error) {
 		if err != nil {
 			// Durable shards without metadata are orphans; reclaim what

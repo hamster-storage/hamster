@@ -87,12 +87,9 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 // buffered whole (the v0.3 preview shape, like the single-node GET; the
 // streaming pump arrives with the operational hardening).
 func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string) {
-	// Explicit per-object lock headers need the lock fields threaded through
-	// coord.Put (v0.6 pass 4); refuse them honestly for now. A bucket default
-	// retention still applies — it is set in the apply layer, which both paths
-	// share — and retention can be set after the PUT via PutObjectRetention.
-	if hasLockHeaders(r.Header) {
-		writeError(w, r, errNotImplemented)
+	mode, retainUntil, legalHold, lerr := parseLockHeaders(r.Header)
+	if lerr != nil {
+		writeError(w, r, lerr)
 		return
 	}
 	body, err := readBody(r, id)
@@ -104,7 +101,13 @@ func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *s
 		}
 		return
 	}
-	etag, vid, err := g.cfg.Objects.Put(bucket, key, body, r.Header.Get("Content-Type"), userMetadata(r.Header))
+	etag, vid, err := g.cfg.Objects.Put(bucket, key, body, PutObjectOptions{
+		ContentType:       r.Header.Get("Content-Type"),
+		UserMetadata:      userMetadata(r.Header),
+		RetentionMode:     mode,
+		RetainUntilUnixMS: retainUntil,
+		LegalHold:         legalHold,
+	})
 	if err != nil {
 		writeError(w, r, err)
 		return
