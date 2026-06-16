@@ -39,7 +39,7 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.4](https://github.com/hamster-storage/hamster/releases/tag/v0.4.0) | Partitioned placement (failure-domain spread, capacity weighting) and online rebalancing — drain, replace, remove, grow, downsize — plus a continuous background scrubber that self-heals bitrot and lost shards | ✅ |
 | [v0.5](https://github.com/hamster-storage/hamster/releases/tag/v0.5.0) | Object versioning — per-bucket versioning config, version IDs, delete markers, `ListObjectVersions`, by-version GET/DELETE — on the single node and the cluster | ✅ |
 | [v0.6](https://github.com/hamster-storage/hamster/releases/tag/v0.6.0) | Object lock and WORM retention — GOVERNANCE and COMPLIANCE modes, legal holds, bucket default retention — on the single node and the cluster | ✅ |
-| v0.7 | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | 🚧 in progress |
+| [v0.7](https://github.com/hamster-storage/hamster/releases/tag/v0.7.0) | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | ✅ |
 | v0.8 | Key and CA rotation: master-key rewrap and CA custody/rotation | planned |
 | v0.9 | Upgrade machinery: feature gates, health interlock, the upgrade test suite | planned |
 | v0.10 | Zero-downtime rolling upgrades | planned |
