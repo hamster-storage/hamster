@@ -42,7 +42,15 @@ func (c *Coordinator) Get(bucket, key string, off, length int64, done func([]byt
 		done(nil, fmt.Errorf("coord: no such key %s/%s", bucket, key))
 		return
 	}
+	c.GetEntry(entry, off, length, done)
+}
 
+// GetEntry serves the plaintext range [off, off+length) of a specific version
+// entry over the network — the by-version read path. Get resolves a key's
+// current version and delegates here; a versioned GET resolves the chosen
+// version and calls this directly. The entry must be a stored object (a delete
+// marker holds no shards). done fires exactly once on the loop.
+func (c *Coordinator) GetEntry(entry meta.VersionEntry, off, length int64, done func([]byte, error)) {
 	if off < 0 {
 		off = 0
 	}
