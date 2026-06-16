@@ -284,6 +284,8 @@ func marshalVersionEntry(e VersionEntry) []byte {
 		b = protowire.AppendTag(b, 19, protowire.BytesType)
 		b = protowire.AppendBytes(b, marshalPartRef(p))
 	}
+	b = putUvarint(b, 20, uint64(e.EncAlgorithm))
+	b = putBytes(b, 21, e.WrappedDEK)
 	return append(b, e.unknown...)
 }
 
@@ -335,6 +337,10 @@ func unmarshalVersionEntry(b []byte) (VersionEntry, error) {
 				break
 			}
 			e.Parts = append(e.Parts, p)
+		case 20:
+			e.EncAlgorithm = EncAlgorithm(d.enum8())
+		case 21:
+			e.WrappedDEK = d.bytes()
 		default:
 			d.skipUnknown(&e.unknown)
 		}

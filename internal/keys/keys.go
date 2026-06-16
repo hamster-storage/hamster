@@ -36,12 +36,15 @@ const (
 	KEKLen = 32
 	DEKLen = 32
 
-	wrapNonceLen = 12 // GCM nonce prefixed to a wrapped DEK
+	// WrapNonceLen is the GCM nonce prefixed to a wrapped DEK. The caller
+	// supplies a unique nonce of this length to Wrap (derived from the
+	// object's version ID, not random).
+	WrapNonceLen = 12
 	wrapTagLen   = 16 // GCM tag
 
 	// WrappedLen is the exact size of a wrapped DEK: nonce, ciphertext (a
 	// DEK is DEKLen bytes), and the GCM tag.
-	WrappedLen = wrapNonceLen + DEKLen + wrapTagLen
+	WrappedLen = WrapNonceLen + DEKLen + wrapTagLen
 )
 
 // A DEK is a per-object data-encryption key.
@@ -91,7 +94,7 @@ func LoadKEK(material []byte) (KEK, error) {
 	if err != nil {
 		return KEK{}, fmt.Errorf("keys: KEK GCM: %w", err)
 	}
-	if aead.NonceSize() != wrapNonceLen || aead.Overhead() != wrapTagLen {
+	if aead.NonceSize() != WrapNonceLen || aead.Overhead() != wrapTagLen {
 		return KEK{}, fmt.Errorf("keys: unexpected GCM geometry (nonce %d, tag %d)", aead.NonceSize(), aead.Overhead())
 	}
 	return KEK{aead: aead}, nil
@@ -123,7 +126,7 @@ func decodeKeyMaterial(material []byte) ([]byte, error) {
 // Wrap encrypts dek under the KEK, returning the self-contained wrapped
 // blob: the nonce followed by the AES-256-GCM ciphertext and tag.
 //
-// nonce must be wrapNonceLen bytes and unique per wrap under a given KEK.
+// nonce must be WrapNonceLen bytes and unique per wrap under a given KEK.
 // The caller derives it from the object's globally-unique version ID
 // rather than at random, so the (KEK, nonce) pair never repeats no matter
 // how many objects are stored — sidestepping the ~2^32-message bound that
@@ -133,10 +136,10 @@ func (k KEK) Wrap(dek DEK, nonce []byte) ([]byte, error) {
 	if !k.Loaded() {
 		return nil, fmt.Errorf("keys: cannot wrap: no KEK loaded")
 	}
-	if len(nonce) != wrapNonceLen {
-		return nil, fmt.Errorf("keys: wrap nonce must be %d bytes, got %d", wrapNonceLen, len(nonce))
+	if len(nonce) != WrapNonceLen {
+		return nil, fmt.Errorf("keys: wrap nonce must be %d bytes, got %d", WrapNonceLen, len(nonce))
 	}
-	out := make([]byte, wrapNonceLen, WrappedLen)
+	out := make([]byte, WrapNonceLen, WrappedLen)
 	copy(out, nonce)
 	return k.aead.Seal(out, nonce, dek[:], nil), nil
 }
@@ -152,8 +155,8 @@ func (k KEK) Unwrap(wrapped []byte) (DEK, error) {
 	if len(wrapped) != WrappedLen {
 		return DEK{}, fmt.Errorf("keys: wrapped DEK must be %d bytes, got %d", WrappedLen, len(wrapped))
 	}
-	nonce := wrapped[:wrapNonceLen]
-	plain, err := k.aead.Open(nil, nonce, wrapped[wrapNonceLen:], nil)
+	nonce := wrapped[:WrapNonceLen]
+	plain, err := k.aead.Open(nil, nonce, wrapped[WrapNonceLen:], nil)
 	if err != nil {
 		return DEK{}, fmt.Errorf("keys: unwrap failed: wrong KEK or corrupt wrapped DEK: %w", err)
 	}

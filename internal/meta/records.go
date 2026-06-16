@@ -32,6 +32,20 @@ const (
 	RetentionCompliance
 )
 
+// EncAlgorithm names how a version's bytes are encrypted at rest
+// (ADR-0021). It is recorded per version, so a cluster holds a mix of
+// encrypted and plaintext objects and a read always knows which it has —
+// the active cluster posture governs only new writes, never what an
+// existing object is.
+type EncAlgorithm uint8
+
+// Encryption algorithms. EncNone is an unencrypted object (the value of
+// every object written before encryption was enabled).
+const (
+	EncNone EncAlgorithm = iota
+	EncAES256GCM
+)
+
 // VersioningState is a bucket's versioning configuration. Unversioned is
 // the pre-first-enable state; once enabled, a bucket only moves between
 // Enabled and Suspended.
@@ -77,6 +91,14 @@ type VersionEntry struct {
 	RetentionMode     RetentionMode
 	RetainUntilUnixMS int64
 	LegalHold         bool
+
+	// Encryption at rest (ADR-0021). When EncAlgorithm is not EncNone, the
+	// object's bytes are encrypted and WrappedDEK holds the per-object data
+	// key wrapped under the cluster KEK — one metadata read yields the
+	// wrapped key a GET needs. The shards and ShardChecksums are ciphertext,
+	// so repair, scrub, rebalance, and re-encode never see WrappedDEK.
+	EncAlgorithm EncAlgorithm
+	WrappedDEK   []byte
 
 	// NullVersion marks the entry the API renders as version "null":
 	// writes to unversioned and suspended-versioning buckets. At most one
@@ -130,6 +152,7 @@ func (e VersionEntry) DataIDs() []VersionID {
 func (e VersionEntry) clone() VersionEntry {
 	e.ETag = slices.Clone(e.ETag)
 	e.ObjectChecksum = slices.Clone(e.ObjectChecksum)
+	e.WrappedDEK = slices.Clone(e.WrappedDEK)
 	e.UserMetadata = maps.Clone(e.UserMetadata)
 	e.unknown = slices.Clone(e.unknown)
 	if e.ShardChecksums != nil {

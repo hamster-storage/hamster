@@ -30,6 +30,7 @@ func fullProposals() []any {
 			Partition:    77, ECDataShards: 4, ECParityShards: 2,
 			ObjectChecksum: []byte{0xC1}, ShardChecksums: [][]byte{{0x51}, {0x52}},
 			RetentionMode: RetentionCompliance, RetainUntilUnixMS: 1800000000000, LegalHold: true,
+			EncAlgorithm: EncAES256GCM, WrappedDEK: []byte{0x60, 0x61, 0x62},
 		},
 		DeleteObject{ProposedAtUnixMS: 1700000000005, Bucket: "docs", Key: "k", VersionID: vid},
 		DeleteVersion{ProposedAtUnixMS: 1700000000006, Bucket: "docs", Key: "k", VersionID: vid, BypassGovernance: true},
