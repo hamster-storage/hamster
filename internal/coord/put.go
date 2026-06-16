@@ -8,6 +8,7 @@ import (
 
 	"github.com/hamster-storage/hamster/internal/datapath"
 	"github.com/hamster-storage/hamster/internal/ec"
+	"github.com/hamster-storage/hamster/internal/keys"
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/seam"
@@ -92,6 +93,34 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		}
 	}
 
+	// Resolve the encryption posture for this write (ADR-0021). When on, mint
+	// a per-object DEK and wrap it under the node's KEK now: the wrapped DEK
+	// rides the metadata commit, while the raw DEK drives the stream transform
+	// and is dropped when the frame writer has it. The wrap nonce is the
+	// version ID — unique and never reused, so no nonce collision ever.
+	kek, encOn := c.encryption()
+	var (
+		encAlg     meta.EncAlgorithm
+		wrappedDEK []byte
+		dekBytes   []byte
+	)
+	if encOn {
+		if !kek.Loaded() {
+			done(PutResult{}, fmt.Errorf("coord: encryption enabled but no KEK loaded: %w", ErrRefused))
+			return
+		}
+		dek, err := keys.NewDEK(c.cfg.Entropy)
+		if err != nil {
+			done(PutResult{}, fmt.Errorf("coord: minting DEK: %w", err))
+			return
+		}
+		if wrappedDEK, err = kek.Wrap(dek, wrapNonce(vid)); err != nil {
+			done(PutResult{}, fmt.Errorf("coord: wrapping DEK: %w", err))
+			return
+		}
+		encAlg, dekBytes = meta.EncAES256GCM, dek.Bytes()
+	}
+
 	etag := md5.Sum(body)
 	objSum := sha256.Sum256(body)
 	op := &putOp{
@@ -102,6 +131,7 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		partition: partition,
 		nodes:     nodes,
 		etag:      etag[:], objSum: objSum[:],
+		encAlg: encAlg, wrappedDEK: wrappedDEK,
 		failed: make([]bool, k+m),
 	}
 
@@ -129,13 +159,13 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 	for i, s := range op.sinks {
 		sinks[i] = s
 	}
-	frameSize := stream.FrameSize(size, stream.DefaultChunkSize, false)
+	frameSize := stream.FrameSize(size, stream.DefaultChunkSize, encOn)
 	ecw, err := ec.NewWriter(vid, k, m, frameSize, sinks)
 	if err != nil {
 		op.abort(fmt.Errorf("coord: encoder: %w", err))
 		return
 	}
-	sw, err := stream.NewWriter(ecw, size, stream.DefaultChunkSize, nil)
+	sw, err := stream.NewWriter(ecw, size, stream.DefaultChunkSize, dekBytes)
 	if err != nil {
 		op.abort(fmt.Errorf("coord: framing: %w", err))
 		return
@@ -178,6 +208,8 @@ type putOp struct {
 	nodes       []seam.NodeID
 	etag        []byte
 	objSum      []byte
+	encAlg      meta.EncAlgorithm
+	wrappedDEK  []byte
 
 	streams []*datapath.WriteStream
 	sinks   []*sink
@@ -303,6 +335,8 @@ func (op *putOp) evaluate(lastErr error) {
 		RetentionMode:     op.opts.RetentionMode,
 		RetainUntilUnixMS: op.opts.RetainUntilUnixMS,
 		LegalHold:         op.opts.LegalHold,
+		EncAlgorithm:      op.encAlg,
+		WrappedDEK:        op.wrappedDEK,
 	}, func(res any, err error) {
 		if err != nil {
 			// Durable shards without metadata are orphans; reclaim what

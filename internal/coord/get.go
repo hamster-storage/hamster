@@ -74,11 +74,36 @@ func (c *Coordinator) GetEntry(entry meta.VersionEntry, off, length int64, done 
 		return
 	}
 
+	// Decrypt key resolution (ADR-0021). An encrypted version records its own
+	// algorithm, so reads are posture-free: unwrap its DEK under the node's
+	// KEK, regardless of whether the cluster still writes encrypted. A loaded
+	// KEK is required — a node that cannot produce it refuses the read loudly
+	// rather than serving ciphertext.
+	var dekBytes []byte
+	if entry.EncAlgorithm != meta.EncNone {
+		if entry.EncAlgorithm != meta.EncAES256GCM {
+			done(nil, fmt.Errorf("coord: object uses unknown encryption algorithm %d", entry.EncAlgorithm))
+			return
+		}
+		kek, _ := c.encryption()
+		if !kek.Loaded() {
+			done(nil, fmt.Errorf("coord: object is encrypted but no KEK is loaded: %w", ErrUnreadable))
+			return
+		}
+		dek, err := kek.Unwrap(entry.WrappedDEK)
+		if err != nil {
+			done(nil, fmt.Errorf("coord: unwrapping object key: %w", err))
+			return
+		}
+		dekBytes = dek.Bytes()
+	}
+
 	op := &getOp{
 		c: c, done: done,
 		entry: entry, nodes: nodes, oldNodes: oldNodes,
 		k: int(entry.ECDataShards), width: width,
 		off: off, length: end - off,
+		dek:      dekBytes,
 		prefixes: make([][]byte, width),
 		extents:  make([][]extent, width),
 		source:   make([]seam.NodeID, width),
@@ -100,6 +125,7 @@ type getOp struct {
 	entry    meta.VersionEntry
 	nodes    []seam.NodeID // new (target) placement, per shard index
 	oldNodes []seam.NodeID // prior placement during a transition, else nil
+	dek      []byte        // unwrapped DEK for an encrypted object, else nil
 	k        int
 	width    int
 
@@ -208,7 +234,7 @@ func (op *getOp) planSlices() {
 	}
 
 	// Frame ranges the stream reader will touch, mapped to stripes.
-	cover := stream.Cover(op.entry.Size, stream.DefaultChunkSize, op.off, op.length, false)
+	cover := stream.Cover(op.entry.Size, stream.DefaultChunkSize, op.off, op.length, op.dek != nil)
 	stripeBytes := int64(op.k) * geo.SliceSize
 	type span struct{ first, last int64 }
 	var spans []span
@@ -301,7 +327,7 @@ func (op *getOp) assemble() {
 		op.fail(fmt.Errorf("coord: opening shards: %w", err))
 		return
 	}
-	sr, err := stream.NewReader(er, er.FrameSize(), nil)
+	sr, err := stream.NewReader(er, er.FrameSize(), op.dek)
 	if err != nil {
 		op.fail(fmt.Errorf("coord: opening frame: %w", err))
 		return

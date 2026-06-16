@@ -91,6 +91,8 @@ func EncodeProposal(p any) []byte {
 		cmd = putUvarint(cmd, 13, uint64(c.RetentionMode))
 		cmd = putUvarint(cmd, 14, uint64(c.RetainUntilUnixMS))
 		cmd = putBool(cmd, 15, c.LegalHold)
+		cmd = putUvarint(cmd, 16, uint64(c.EncAlgorithm))
+		cmd = putBytes(cmd, 17, c.WrappedDEK)
 	case DeleteObject:
 		atMS, num = c.ProposedAtUnixMS, propDeleteObject
 		cmd = putString(cmd, 1, c.Bucket)
@@ -336,6 +338,10 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.RetainUntilUnixMS = d.int64()
 			case 15:
 				c.LegalHold = d.bool()
+			case 16:
+				c.EncAlgorithm = EncAlgorithm(d.enum8())
+			case 17:
+				c.WrappedDEK = d.bytes()
 			default:
 				d.skipUnknown(nil)
 			}

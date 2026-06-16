@@ -20,9 +20,11 @@
 package coord
 
 import (
+	"io"
 	"math/rand/v2"
 
 	"github.com/hamster-storage/hamster/internal/datapath"
+	"github.com/hamster-storage/hamster/internal/keys"
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/raftnode"
@@ -53,6 +55,21 @@ type Config struct {
 	// profile follows the layout's member count (the auto ladder). Loop-safe
 	// — called on the loop.
 	Layout func() (place.Layout, bool)
+
+	// Encryption resolves the cluster's encryption posture (ADR-0021): the
+	// node's loaded KEK and whether new writes should be encrypted. A PUT
+	// uses both — encrypt when the bool is set, wrapping the DEK under the
+	// KEK. A GET uses only the KEK, and only for an object whose own record
+	// says it is encrypted: reads are posture-free, since each version
+	// records what it is. nil (or a zero KEK with the bool false) is an
+	// unencrypted cluster — the common case. Loop-safe — called on the loop.
+	Encryption func() (keys.KEK, bool)
+
+	// Entropy is the source a PUT draws a new DEK from when encrypting
+	// (ADR-0021): crypto/rand in production, a seeded deterministic reader
+	// under the simulator, so the encrypted write path stays deterministic —
+	// the DEK is its only random input. Read only when Encryption reports on.
+	Entropy io.Reader
 }
 
 // Coordinator runs data-path operations for one node.
@@ -82,6 +99,21 @@ func (c *Coordinator) beginSweep() bool {
 }
 
 func (c *Coordinator) endSweep() { c.sweeping = false }
+
+// encryption resolves the node's KEK and write-time posture, tolerating an
+// unset accessor — an unencrypted cluster, and the default in tests.
+func (c *Coordinator) encryption() (keys.KEK, bool) {
+	if c.cfg.Encryption == nil {
+		return keys.KEK{}, false
+	}
+	return c.cfg.Encryption()
+}
+
+// wrapNonce derives a DEK-wrap nonce from a version ID: its first bytes.
+// The DataID is globally unique and never bumped, so the (KEK, nonce) pair
+// never repeats — see keys.KEK.Wrap. Reusing the public version ID as the
+// (non-secret) GCM nonce is safe; GCM needs uniqueness, not secrecy.
+func wrapNonce(vid meta.VersionID) []byte { return vid[:keys.WrapNonceLen] }
 
 // DownNodes returns the nodes this coordinator currently considers down — its
 // passive view from data-plane operation outcomes (a PUT skips these to avoid

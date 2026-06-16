@@ -165,6 +165,8 @@ func (s *Store) ApplyPutObject(p PutObject) (res PutResult, err error) {
 		RetentionMode:     mode,
 		RetainUntilUnixMS: retainUntil,
 		LegalHold:         p.LegalHold,
+		EncAlgorithm:      p.EncAlgorithm,
+		WrappedDEK:        p.WrappedDEK,
 		NullVersion:       cfg.Versioning != VersioningEnabled,
 	}.clone() // own every reference field; the proposer may reuse its buffers
 

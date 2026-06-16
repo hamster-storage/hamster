@@ -100,6 +100,15 @@ message VersionEntry {
   // composite MD5 (rendered hex + "-N", ADR-0019), and object_checksum
   // is empty — integrity is carried per part.
   repeated PartRef parts = 19;
+
+  // Encryption at rest (ADR-0021). enc_algorithm is NONE for an unencrypted
+  // object (everything written before encryption was enabled) or AES256GCM;
+  // wrapped_dek is the per-object data key wrapped under the cluster KEK.
+  // Recorded per version, so a cluster holds a mix and a read always knows
+  // which it has; shards and shard_checksums are ciphertext, so repair,
+  // scrub, and re-encode never need the key.
+  EncAlgorithm enc_algorithm = 20;  // NONE, AES256GCM
+  bytes        wrapped_dek   = 21;
 }
 
 // One slice of a multipart object's data: where it lives and how a read

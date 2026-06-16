@@ -14,6 +14,7 @@ import (
 	"github.com/hamster-storage/hamster/internal/coord"
 	"github.com/hamster-storage/hamster/internal/datapath"
 	"github.com/hamster-storage/hamster/internal/ec"
+	"github.com/hamster-storage/hamster/internal/keys"
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/raftnode"
@@ -85,6 +86,39 @@ type cluster struct {
 	// draining marks members the layout reports as draining out, lowering the
 	// active count the profile and downsize re-encode follow.
 	draining map[seam.NodeID]bool
+
+	// encrypt and kek drive the encryption posture every node's coordinator
+	// reads (ADR-0021). Off by default; encryptCluster turns it on with a
+	// fixed KEK so the encrypted write/read path is exercised deterministically.
+	encrypt bool
+	kek     keys.KEK
+}
+
+// encReader is a deterministic per-node entropy source for DEK generation
+// under the simulator — isolated from the world PRNG so minting a DEK never
+// perturbs Raft or anything else that draws from it.
+type encReader struct{ r *rand.Rand }
+
+func (e encReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(e.r.Uint32())
+	}
+	return len(p), nil
+}
+
+// encryptCluster turns on the encryption posture with a fixed KEK. Call
+// before writing the objects under test.
+func (c *cluster) encryptCluster() {
+	c.t.Helper()
+	material := make([]byte, keys.KEKLen)
+	for i := range material {
+		material[i] = byte(0x10 + i)
+	}
+	k, err := keys.LoadKEK(material)
+	if err != nil {
+		c.t.Fatalf("LoadKEK: %v", err)
+	}
+	c.kek, c.encrypt = k, true
 }
 
 // newCluster builds n nodes; the first min(n, 3) are Raft voters.
@@ -129,8 +163,11 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 				c.t.Fatalf("boot %s: %v", id, err)
 			}
 			n.raft = rn
+			entropy := encReader{rand.New(rand.NewPCG(0xE0C, raftID))}
 			n.co = coord.New(coord.Config{
 				Clock: w.Clock, Rand: w.Rand, Data: n.data, Raft: rn,
+				Entropy:    entropy,
+				Encryption: func() (keys.KEK, bool) { return c.kek, c.encrypt },
 				Layout: func() (place.Layout, bool) {
 					// Distinct host/zone per node: spread collapses to the
 					// bare rendezvous ranking readObject verifies against. The
@@ -349,11 +386,21 @@ func (c *cluster) readObject(key string) ([]byte, error) {
 		}
 		shards[i] = bytes.NewReader(data)
 	}
+	// An encrypted object's shards are ciphertext: unwrap its DEK from the
+	// committed record to decode the plaintext, exactly as a GET does.
+	var dek []byte
+	if e.EncAlgorithm != meta.EncNone {
+		d, err := c.kek.Unwrap(e.WrappedDEK)
+		if err != nil {
+			return nil, err
+		}
+		dek = d.Bytes()
+	}
 	er, err := ec.NewReader(shards)
 	if err != nil {
 		return nil, err
 	}
-	sr, err := stream.NewReader(er, er.FrameSize(), nil)
+	sr, err := stream.NewReader(er, er.FrameSize(), dek)
 	if err != nil {
 		return nil, err
 	}
@@ -364,6 +411,27 @@ func (c *cluster) readObject(key string) ([]byte, error) {
 		}
 	}
 	return got, nil
+}
+
+// rawShardBytes returns the on-disk bytes of one committed shard, for the
+// confidentiality check that an encrypted object's shards are ciphertext.
+func (c *cluster) rawShardBytes(key string, shard int) []byte {
+	c.t.Helper()
+	e, ok := c.entry(key)
+	if !ok {
+		c.t.Fatalf("no entry for %q", key)
+	}
+	width := int(e.ECDataShards + e.ECParityShards)
+	nodes, err := place.Nodes(e.Partition, c.members, width)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	disk := c.worlds[nodes[shard]].Disk
+	data, err := disk.ReadFile(datapath.ShardFileName(e.DataID, uint32(shard)))
+	if err != nil {
+		c.t.Fatalf("reading shard %d: %v", shard, err)
+	}
+	return data
 }
 
 func (c *cluster) crash(id seam.NodeID) {

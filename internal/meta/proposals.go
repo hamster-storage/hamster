@@ -75,6 +75,12 @@ type PutObject struct {
 	RetentionMode     RetentionMode
 	RetainUntilUnixMS int64
 	LegalHold         bool
+
+	// Encryption at rest (ADR-0021): set when the coordinator encrypted the
+	// object, carrying the algorithm and the DEK wrapped under the cluster
+	// KEK. Zero/empty for a plaintext write.
+	EncAlgorithm EncAlgorithm
+	WrappedDEK   []byte
 }
 
 // PutResult reports the committed version ID, after any monotonicity bump,

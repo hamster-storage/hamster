@@ -44,7 +44,7 @@ func mustKEK(t *testing.T, material []byte) KEK {
 // testNonce builds a 12-byte wrap nonce from a counter, standing in for
 // the version-ID-derived nonce the coordinator will supply.
 func testNonce(i byte) []byte {
-	n := make([]byte, wrapNonceLen)
+	n := make([]byte, WrapNonceLen)
 	n[0] = i
 	return n
 }
@@ -201,7 +201,7 @@ func TestTamperedWrapRejected(t *testing.T) {
 // at unwrap are refused.
 func TestWrapInputValidation(t *testing.T) {
 	k := mustKEK(t, testKEKMaterial())
-	for _, n := range [][]byte{nil, make([]byte, wrapNonceLen-1), make([]byte, wrapNonceLen+1)} {
+	for _, n := range [][]byte{nil, make([]byte, WrapNonceLen-1), make([]byte, WrapNonceLen+1)} {
 		if _, err := k.Wrap(DEK{}, n); err == nil {
 			t.Errorf("wrap accepted a %d-byte nonce", len(n))
 		}
