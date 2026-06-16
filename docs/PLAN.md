@@ -11,99 +11,84 @@ completed item's record survives in git history, in its now-green test, and in
 the shipped ADR/doc. This file is not an archive and not a TODO graveyard: if a
 line here is done, delete it.
 
-## Now / next — v0.7 encryption at rest
+## Now / next — v0.8 key and CA rotation
 
-v0.6 object lock shipped (v0.6.0). The front line is now **encryption at rest** —
-envelope encryption, encrypt-then-EC, over the framed object stream, fully
-designed in [ADR-0021](adr/0021-envelope-encryption-at-rest.md) (per-object DEKs,
-the DEK wrapped by a cluster KEK from a pluggable source, opt-in/enable-only, an
-SSE-S3 surface). The design is decided; v0.7 is execution.
+v0.7 encryption at rest shipped (v0.7.0): envelope encryption, encrypt-then-EC,
+the `--master-key-file` KEK source, the enable-only posture singleton, the SSE-S3
+surface. What it deliberately left out is **rotation** — both the master key that
+wraps every object's DEK and the cluster CA that anchors inter-node trust. That is
+v0.8, and [ADR-0022](adr/0022-cluster-mtls.md) pairs the two: they are the same
+keys problem, so they travel as one release.
 
-**This one is genuinely different from v0.5/v0.6.** Versioning and object lock were
-mostly "expose what the metadata already models." Encryption is not pre-built — a
-survey of the tree found:
+Two largely independent tracks under one headline.
 
-- `internal/stream` already reserves `flagEncrypted` in the frame header, but a
-  frame with it set is *refused* today, and the size arithmetic assumes identity
-  frames (`stored == plaintext`). The framing slot is ready; the transform and the
-  encrypted-size math (a per-chunk GCM tag) are not.
-- No crypto/key machinery exists at all (`internal/certs` is mTLS only): no
-  AES-GCM transform, no DEK or KEK, no key source, no SSE surface, and no
-  `VersionEntry` encryption field.
-- The pipeline order is fixed (ADR-0021, [DATA-STREAM.md](DATA-STREAM.md)): chunk →
-  compress → encrypt → frame → EC. So encryption is a per-chunk transform *inside*
-  the stream layer; EC, repair, scrub, and rebalance see ciphertext and never need
-  a key — the property that keeps storage nodes key-free.
+### Track A — KEK rotation (master-key rewrap)
 
-Because it touches the read/write path, v0.7 must clear the deterministic
-simulation harness (invariant 5) the way the EC path did. Passes, data-path-first
-(the S3 surface is last, not first). Three passes have landed:
+A **metadata-only** rewrap sweep: object bytes and shards are never touched —
+only the small wrapped DEK alongside each version changes. Load the old and the
+new KEK, walk the keyspace, unwrap each version's DEK under the old KEK and rewrap
+it under the new one (the wrap nonce stays the version ID), and commit the new
+`WrappedDEK` through a meta proposal. A leader-only sweep in the shape of
+`Optimize`/the scrubber (under the shared single-flight guard), proven under the
+simulator: rotate, every object still decrypts; crash mid-rotation resumes and
+converges; COMPLIANCE-safe by construction (the lock and the bytes are untouched,
+only the wrapped key is rewritten).
 
-- **Pass 1 — the `internal/stream` AES-256-GCM transform.** Encrypted frames
-  round-trip, are golden-pinned, and reject every single-byte tamper and the wrong
-  key; the size/cover arithmetic accounts for the per-chunk tag.
-- **Pass 2 — `internal/keys`: DEK lifecycle and the KEK source.** DEK generation
-  from an injected entropy `io.Reader`; DEK wrap/unwrap under the KEK (stdlib
-  AES-256-GCM, the wrap nonce derived from the object's unique version ID); one KEK
-  source, `--master-key-file` (raw/hex/base64), behind a "source returns a 32-byte
-  KEK" abstraction. No new dependency.
-- **Pass 3 — encryption in the coordinator + the metadata field.** `coord` PUT mints
-  a DEK, encrypts through the stream transform, wraps the DEK under the node's KEK,
-  and commits the wrapped DEK + algorithm in additive `VersionEntry` fields (20/21)
-  carried by the `PutObject` proposal (16/17). GET unwraps and decrypts; a missing
-  KEK refuses loudly. Repair/scrub/re-encode are untouched — they re-shard
-  ciphertext and never see a key (`ApplyReEncodeObject` preserves the encryption
-  fields). Proven under the sim: encrypted round-trip with on-disk ciphertext
-  (A/B-checked against a plaintext write), no-KEK read refusal, encrypted
-  determinism, repair healing an encrypted object's lost shard key-free, and a
-  coordinator crash mid-encrypted-PUT committing nothing.
-- **Pass 4 — cluster posture and key availability.** The posture is a replicated
-  meta singleton (4a, enable-only: `cluster encrypt` turns it on, disabling is
-  refused). Each node loads its KEK at boot from `cluster run -master-key-file`
-  (held in memory only, never persisted) and wires it into the coordinator's
-  `Encryption`/`Entropy` (crypto/rand); a node whose posture is on but whose KEK
-  never loaded refuses encrypted work loudly. `cluster status` reports the posture;
-  enabling on a leader with no key is refused (the footgun guard). Proven by an
-  in-process cluster test: enable via a non-leader redirect, the posture replicated
-  to every node and surviving a node restart (KEK reloaded), and the no-key refusal.
-- **Pass 5 — the SSE-S3 surface (`internal/gateway`).** `x-amz-server-side-encryption:
-  AES256` echoed on PUT/GET/HEAD when the served version is encrypted (read from the
-  per-object record); the request header validated against the cluster posture — an
-  AES256 request the server cannot honor (single node, or posture off) is refused
-  rather than silently storing plaintext; SSE-KMS and SSE-C refused honestly. The
-  gateway gains an `EncryptionEnabled` posture callback (nil = single-node). Pure
-  `parseSSEHeaders`/`setSSEHeader` unit-tested across every branch, plus a single-node
-  refusal integration test.
+**Open design question to settle first (new ADR).** During a rotation the cluster
+holds a *mix* — some DEKs wrapped under the old KEK, some under the new — so a
+reader must know which KEK unwraps a given version. Two candidates:
+- **Try-both:** each node holds old+new KEK during the rotation window and tries
+  the new KEK, falling back to the old. Simplest; no record change; the window is
+  the only place two keys are loaded.
+- **Per-version KEK id:** record a small KEK-generation marker on each version
+  (additive field) so unwrap is unambiguous and a stalled rotation is self-
+  describing. More metadata, but no ordering assumptions.
 
-- **Verification + docs (the rest of the original pass 6).** A cluster e2e over the
-  real binary lands the proof: a three-node cluster with `-master-key-file`, `cluster
-  encrypt`, the posture in `status`, the SSE header on an HTTP read, and a decrypted
-  read from a node that restarted and reloaded its key. ADR-0021 is Accepted.
+This is the load-bearing decision for the track and wants the user's call before
+code (the same way the v0.7 KEK *source* was decided up front).
 
-**Encryption at rest is functionally complete and verified end to end.** What
-remains under v0.7's "encryption at rest **and key/CA rotation**" headline is the
-*rotation* work — see below.
+### Track B — CA custody, issuance, and rotation
 
-**Remaining: the rotation track (recommend splitting to v0.8).**
+[ADR-0029](adr/0029-ca-custody-and-issuance.md) settled custody: self-managed CA
+is the default, external/operator PKI is a first-class supported path, and the CA
+private key is **never** replicated through Raft. v0.8 builds the rotation on top:
 
-- **KEK rotation.** A metadata-only rewrap scan: load the old and new KEK, walk the
-  keyspace, unwrap each object's DEK under the old KEK and rewrap under the new one,
-  commit the new wrapped DEK — object bytes and shards untouched (only the small
-  wrapped key changes). A leader-only sweep like optimize, plus the two-key load and
-  a CLI command, proven under the simulator. Self-contained and additive.
-- **CA custody and rotation** ([ADR-0029](adr/0029-ca-custody-and-issuance.md),
-  [ADR-0022](adr/0022-cluster-mtls.md)): pluggable issuance (operator/external PKI)
-  and lost-CA-key recovery via a multi-CA trust bundle. [ADR-0022](adr/0022-cluster-mtls.md)
-  pairs CA rotation with KEK rotation, so the two are one track.
+- **The design enabler: a multi-CA trust bundle.** Validate against the old and
+  the new CA at once (the dual-trust rollover etcd/CockroachDB/Vault use) so there
+  is no moment where nothing is trusted. This is the concrete thing to build first.
+- **Pluggable issuer interface** — the self-managed default and an external PKI
+  (Vault, an offline/HSM root, a corporate CA) behind one seam, so issuance source
+  is a configuration choice ([ADR-0029](adr/0029-ca-custody-and-issuance.md)
+  decision 2).
+- **Narrowed renewal vs issuance** ([ADR-0029](adr/0029-ca-custody-and-issuance.md)
+  consequences): renewing an already-admitted node's cert (prove possession, get a
+  new cert for the *same* identity) is self-service and need not carry the power to
+  mint *new* identities; joins stay rare and root-gated.
+- **Lost-CA-key recovery:** regenerate a new CA, migrate trust through the bundle
+  (trust old+new, reissue every node cert from new, drop old) — issuance restored
+  with no data at risk, since validation only ever needed the CA *certificate*.
 
-Both were flagged from the start as candidates to split once the encryption passes
-were scoped. They are substantial, security-sensitive, and independent of the
-now-complete at-rest feature — a clean v0.8 ("key and CA rotation"). Decision is the
-operator's; until then v0.7 ships encryption at rest (SSE-S3) without in-place key
-rotation (the honest migrate-to-a-new-cluster path still exists).
+The rotation flow and its lost-key case get **their own ADR** when the work starts
+([ROADMAP.md](ROADMAP.md) records this).
+
+### Sequencing / open questions for the user
+
+- **Which track first?** Track A (KEK) is self-contained and rides machinery that
+  already exists (the sweep shape, the meta proposal pattern); Track B is the
+  larger, more security-sensitive design (a new seam + a new ADR). KEK-first gives
+  an early, shippable win and a working sweep template.
+- **The KEK-mix resolution** (try-both vs per-version id) above — settle before
+  Track A code.
+- **Where the *new* key/CA material is supplied** (a second `-master-key-file`-
+  shaped flag, a `cluster rotate-key` command reading it) — a CLI-surface call.
+
+v0.8 is design-first: unlike v0.5–v0.7 (which mostly exposed pre-built metadata),
+the rotation tracks have genuine open decisions, so the first step is the ADR, not
+the code.
 
 ## Later versions
 
-The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.8
-upgrade machinery, v0.9 zero-downtime rolling upgrades. They are pulled into the
+The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.9
+upgrade machinery (feature gates, health interlock, the upgrade test suite), v0.10
+zero-downtime rolling upgrades, v0.11 observability. They are pulled into the
 section above as they become the front line.
