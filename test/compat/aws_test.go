@@ -5,12 +5,25 @@ package compat
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// jsonField pulls a string field out of an aws CLI JSON response (s3api emits
+// JSON by default).
+func jsonField(t *testing.T, out, field string) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("parsing aws JSON output: %v\n%s", err, out)
+	}
+	s, _ := m[field].(string)
+	return s
+}
 
 // awsEnv configures the aws CLI against s with nothing inherited: explicit
 // credentials, no config files, no instance metadata, no retries (everything
@@ -108,4 +121,56 @@ func TestAWS(t *testing.T) {
 			t.Fatalf("buckets remain after rb:\n%s", out)
 		}
 	})
+}
+
+// TestAWSVersioning drives the v0.5 versioning surface through the real aws CLI:
+// put/get bucket versioning, version IDs on put-object, list-object-versions,
+// get-object --version-id, and delete-object with and without a version id.
+func TestAWSVersioning(t *testing.T) {
+	bin := needTool(t, "aws")
+	s := startServer(t)
+	env := s.awsEnv(t)
+	run := func(t *testing.T, args ...string) string {
+		return runTool(t, env, bin, append([]string{"--endpoint-url", s.URL}, args...)...)
+	}
+	dir := t.TempDir()
+	body1 := writeRandomFile(t, filepath.Join(dir, "v1.bin"), 11, 32<<10)
+	body2 := writeRandomFile(t, filepath.Join(dir, "v2.bin"), 12, 48<<10)
+
+	run(t, "s3", "mb", "s3://vbucket")
+	run(t, "s3api", "put-bucket-versioning", "--bucket", "vbucket",
+		"--versioning-configuration", "Status=Enabled")
+	if got := run(t, "s3api", "get-bucket-versioning", "--bucket", "vbucket"); !strings.Contains(got, "Enabled") {
+		t.Fatalf("get-bucket-versioning did not report Enabled:\n%s", got)
+	}
+
+	// Two versions of one key; the CLI surfaces each VersionId from the
+	// x-amz-version-id response header.
+	vid1 := jsonField(t, run(t, "s3api", "put-object", "--bucket", "vbucket", "--key", "obj", "--body", filepath.Join(dir, "v1.bin")), "VersionId")
+	vid2 := jsonField(t, run(t, "s3api", "put-object", "--bucket", "vbucket", "--key", "obj", "--body", filepath.Join(dir, "v2.bin")), "VersionId")
+	if vid1 == "" || vid2 == "" || vid1 == vid2 {
+		t.Fatalf("put-object version ids: %q, %q", vid1, vid2)
+	}
+
+	if lov := run(t, "s3api", "list-object-versions", "--bucket", "vbucket"); !strings.Contains(lov, vid1) || !strings.Contains(lov, vid2) {
+		t.Fatalf("list-object-versions missing a version:\n%s", lov)
+	}
+
+	// Each version is fetchable by id.
+	run(t, "s3api", "get-object", "--bucket", "vbucket", "--key", "obj", "--version-id", vid1, filepath.Join(dir, "v1.out"))
+	mustEqualFile(t, filepath.Join(dir, "v1.out"), body1)
+	run(t, "s3api", "get-object", "--bucket", "vbucket", "--key", "obj", "--version-id", vid2, filepath.Join(dir, "v2.out"))
+	mustEqualFile(t, filepath.Join(dir, "v2.out"), body2)
+
+	// Delete with no version id drops a marker.
+	markerVID := jsonField(t, run(t, "s3api", "delete-object", "--bucket", "vbucket", "--key", "obj"), "VersionId")
+	if markerVID == "" {
+		t.Fatal("delete-object did not report a delete-marker version id")
+	}
+
+	// Permanently delete every version and the marker, leaving the bucket empty.
+	for _, vid := range []string{vid1, vid2, markerVID} {
+		run(t, "s3api", "delete-object", "--bucket", "vbucket", "--key", "obj", "--version-id", vid)
+	}
+	run(t, "s3", "rb", "s3://vbucket")
 }
