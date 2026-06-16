@@ -11,9 +11,10 @@ import (
 	"github.com/hamster-storage/hamster/internal/sigv4"
 )
 
-// Object lock (ADR-0006): the bucket-level configuration (?object-lock) and
-// per-object retention (?retention, the x-amz-object-lock-* PUT/response headers).
-// Legal holds (the ?legal-hold subresource) follow in a later v0.6 pass.
+// Object lock (ADR-0006): the bucket-level configuration (?object-lock),
+// per-object retention (?retention, the x-amz-object-lock-* PUT/response
+// headers), and legal holds (?legal-hold). The single-node surface; the cluster
+// PUT lock headers are threaded through coord in a later v0.6 pass.
 
 // retentionModeString renders an object-lock mode for the wire. RetentionNone has
 // no S3 spelling — it means "no lock".
@@ -259,6 +260,70 @@ func (g *Gateway) putObjectRetention(w http.ResponseWriter, r *http.Request, id 
 		Mode:              mode,
 		RetainUntilUnixMS: t.UnixMilli(),
 		BypassGovernance:  strings.EqualFold(r.Header.Get("x-amz-bypass-governance-retention"), "true"),
+	}); applyErr != nil {
+		writeError(w, r, applyErr)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// legalHoldXML is the ?legal-hold subresource body, for both PutObjectLegalHold
+// and GetObjectLegalHold. Status is ON or OFF.
+type legalHoldXML struct {
+	XMLName xml.Name `xml:"LegalHold"`
+	Xmlns   string   `xml:"xmlns,attr,omitempty"`
+	Status  string   `xml:"Status,omitempty"`
+}
+
+func (g *Gateway) getObjectLegalHold(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	entry, err := g.resolveTarget(bucket, key, r.URL.Query().Get("versionId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	status := "OFF"
+	if entry.LegalHold {
+		status = "ON"
+	}
+	writeXML(w, http.StatusOK, legalHoldXML{Xmlns: s3Xmlns, Status: status})
+}
+
+func (g *Gateway) putObjectLegalHold(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string) {
+	entry, err := g.resolveTarget(bucket, key, r.URL.Query().Get("versionId"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	body, err := readBody(r, id)
+	if err != nil {
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
+		return
+	}
+	var req legalHoldXML
+	if xml.Unmarshal(body, &req) != nil {
+		writeError(w, r, errMalformedXML)
+		return
+	}
+	var hold bool
+	switch req.Status {
+	case "ON":
+		hold = true
+	case "OFF":
+		hold = false
+	default:
+		writeError(w, r, errMalformedXML)
+		return
+	}
+	if applyErr := g.cfg.Meta.ApplyUpdateLegalHold(meta.UpdateLegalHold{
+		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
+		Bucket:           bucket,
+		Key:              key,
+		VersionID:        entry.VersionID,
+		Hold:             hold,
 	}); applyErr != nil {
 		writeError(w, r, applyErr)
 		return
