@@ -393,6 +393,22 @@ func (n *Node) members() []Member {
 	return ms
 }
 
+// notLeaderMsg is what a non-leader returns for a leader-only control request
+// (drain, remove, optimize); the response also carries leaderDial so the client
+// can retry there — there is no proposal forwarding yet (ADR-0027).
+const notLeaderMsg = "this node is not the metadata leader"
+
+// leaderDial returns the current leader's dial address, or "" if none is known —
+// the redirect target a non-leader hands back on a leader-only request.
+func (n *Node) leaderDial() string {
+	for _, m := range n.members() {
+		if m.Leader {
+			return m.Dial
+		}
+	}
+	return ""
+}
+
 func (n *Node) syncPeers() {
 	t := time.NewTicker(peerSyncEvery)
 	defer t.Stop()
@@ -775,14 +791,7 @@ func (n *Node) handleDrain(conn *tls.Conn, payload []byte) drainResponse {
 	}
 	switch err := n.proposeSetDraining(req.NodeID, req.Draining); {
 	case errors.Is(err, raftnode.ErrNotLeader):
-		resp := drainResponse{Error: "this node is not the metadata leader"}
-		for _, m := range n.members() {
-			if m.Leader {
-				resp.Leader = m.Dial
-				break
-			}
-		}
-		return resp
+		return drainResponse{Error: notLeaderMsg, Leader: n.leaderDial()}
 	case err != nil:
 		return drainResponse{Error: err.Error()}
 	}
@@ -901,14 +910,7 @@ func (n *Node) handleRemove(conn *tls.Conn, payload []byte) removeResponse {
 	}
 	switch err := n.proposeRemove(req.NodeID); {
 	case errors.Is(err, raftnode.ErrNotLeader):
-		resp := removeResponse{Error: "this node is not the metadata leader"}
-		for _, m := range n.members() {
-			if m.Leader {
-				resp.Leader = m.Dial
-				break
-			}
-		}
-		return resp
+		return removeResponse{Error: notLeaderMsg, Leader: n.leaderDial()}
 	case err != nil:
 		return removeResponse{Error: err.Error()}
 	}
@@ -997,14 +999,7 @@ func (n *Node) handleOptimize(conn *tls.Conn) optimizeResponse {
 	conn.SetDeadline(time.Now().Add(30 * time.Minute))
 	switch rep, retry, err := n.runOptimize(); {
 	case errors.Is(err, raftnode.ErrNotLeader):
-		resp := optimizeResponse{Error: "this node is not the metadata leader"}
-		for _, m := range n.members() {
-			if m.Leader {
-				resp.Leader = m.Dial
-				break
-			}
-		}
-		return resp
+		return optimizeResponse{Error: notLeaderMsg, Leader: n.leaderDial()}
 	case err != nil:
 		return optimizeResponse{Error: err.Error(), Retry: retry}
 	default:
