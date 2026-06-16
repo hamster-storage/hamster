@@ -43,6 +43,8 @@ var (
 	ErrInvalidLayout          = errors.New("invalid cluster layout")
 	ErrInvalidNode            = errors.New("invalid node record")
 	ErrInvalidReEncode        = errors.New("version cannot be re-encoded")
+	ErrInvalidEncryption      = errors.New("invalid encryption algorithm")
+	ErrEncryptionDowngrade    = errors.New("encryption is enable-only: cannot disable it once enabled")
 )
 
 // Multipart limits, S3 parity (docs/S3-API.md). Apply enforces both: the

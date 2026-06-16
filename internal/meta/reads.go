@@ -46,6 +46,19 @@ func (s *Store) ClusterLayout() (ClusterLayout, bool) {
 	return l, true
 }
 
+// EncryptionAlgorithm returns the cluster's encryption-at-rest posture
+// (ADR-0021): the algorithm new writes use, or EncNone when the cluster does
+// not encrypt (including before any posture is committed). Reads never
+// consult this — each version records its own algorithm — so it governs only
+// what new writes do.
+func (s *Store) EncryptionAlgorithm() EncAlgorithm {
+	v, ok := s.kv.get(encryptionPostureKey)
+	if !ok {
+		return EncNone
+	}
+	return v.(EncryptionPosture).Algorithm
+}
+
 // Node returns a member's registration row (ADR-0016, ADR-0004), present
 // once the issuer has committed it through RegisterNode.
 func (s *Store) Node(id string) (NodeRecord, bool) {

@@ -371,6 +371,21 @@ type ClusterLayout struct {
 	unknown []byte
 }
 
+// EncryptionPosture is the singleton row under s/enc — the cluster's
+// replicated encryption-at-rest posture (ADR-0021). Algorithm is EncNone
+// when the cluster does not encrypt (the default, and the absence of the
+// row) or EncAES256GCM when it does. The posture governs only new writes;
+// each version records its own algorithm, so existing objects are
+// unaffected by a change. It is enable-only: ApplySetEncryptionPosture
+// refuses a move back to EncNone (a downgrade), so a cluster never silently
+// stops encrypting. The KEK is never part of this row — only the posture.
+type EncryptionPosture struct {
+	FormatVersion uint32
+	Algorithm     EncAlgorithm
+
+	unknown []byte
+}
+
 // EffectiveNodes returns the layout's labeled member set: Nodes when present
 // (current writers), else the legacy Members IDs with host and zone
 // defaulted to the ID — so a pass-1 layout (or any unlabeled one) reads as a

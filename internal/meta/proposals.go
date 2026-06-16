@@ -228,3 +228,14 @@ type SetClusterLayout struct {
 	// set when opening a transition, empty when closing it or in steady state.
 	Previous []LayoutNode
 }
+
+// SetEncryptionPosture sets the cluster's encryption-at-rest posture
+// (ADR-0021): the algorithm new writes use. It is enable-only — apply
+// refuses a move from an encrypting algorithm back to EncNone, so a cluster
+// that has started encrypting never silently stops. Setting the same
+// algorithm again is idempotent. Only the posture is replicated; the KEK is
+// never part of this.
+type SetEncryptionPosture struct {
+	ProposedAtUnixMS int64
+	Algorithm        EncAlgorithm
+}

@@ -28,6 +28,12 @@ const nul = "\x00"
 // (ADR-0028), under the reserved s/ system prefix. There is exactly one.
 const clusterLayoutKey = "s/layout"
 
+// encryptionPostureKey is the singleton row holding the cluster's
+// encryption-at-rest posture (ADR-0021). Under the reserved s/ system
+// prefix; "s/enc" sorts before both s/layout and s/node/, so the node scan
+// never crosses it and the layout get never hits it.
+const encryptionPostureKey = "s/enc"
+
 // nodeScanPrefix groups the per-member registration rows (NodeRecord) under
 // the reserved s/ system prefix, one per node ID. It sorts after s/layout
 // ("s/n" > "s/l"), so a scan from the prefix never crosses the singleton.

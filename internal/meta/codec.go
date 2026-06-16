@@ -534,6 +534,29 @@ func unmarshalClusterLayout(b []byte) (ClusterLayout, error) {
 	return l, d.err
 }
 
+func marshalEncryptionPosture(p EncryptionPosture) []byte {
+	var b []byte
+	b = putUvarint(b, 1, uint64(p.FormatVersion))
+	b = putUvarint(b, 2, uint64(p.Algorithm))
+	return append(b, p.unknown...)
+}
+
+func unmarshalEncryptionPosture(b []byte) (EncryptionPosture, error) {
+	var p EncryptionPosture
+	d := &dec{b: b}
+	for d.next() {
+		switch d.num {
+		case 1:
+			p.FormatVersion = d.uint32()
+		case 2:
+			p.Algorithm = EncAlgorithm(d.enum8())
+		default:
+			d.skipUnknown(&p.unknown)
+		}
+	}
+	return p, d.err
+}
+
 // marshalLayoutNode encodes one labeled member (ADR-0016). A nested message,
 // like marshalPartRef; the layout is rewritten wholesale each generation, so
 // it carries no unknown-field preservation.
@@ -639,6 +662,8 @@ func marshalRecord(v any) []byte {
 		return marshalPartRecord(r)
 	case ClusterLayout:
 		return marshalClusterLayout(r)
+	case EncryptionPosture:
+		return marshalEncryptionPosture(r)
 	case NodeRecord:
 		return marshalNodeRecord(r)
 	default:
@@ -653,6 +678,8 @@ func decodeRow(key string, value []byte) (any, error) {
 	switch {
 	case key == clusterLayoutKey:
 		return unmarshalClusterLayout(value)
+	case key == encryptionPostureKey:
+		return unmarshalEncryptionPosture(value)
 	case strings.HasPrefix(key, nodeScanPrefix):
 		return unmarshalNodeRecord(value)
 	case strings.HasPrefix(key, bucketScanPrefix):

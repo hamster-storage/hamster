@@ -419,6 +419,29 @@ func (s *Store) ApplySetClusterLayout(p SetClusterLayout) (err error) {
 	return nil
 }
 
+// ApplySetEncryptionPosture sets the cluster's encryption-at-rest posture
+// (ADR-0021). It is enable-only: a move from an encrypting algorithm back to
+// EncNone is refused (ErrEncryptionDowngrade), so a cluster that has started
+// encrypting can never silently stop — there is no in-place "turn it off".
+// Setting the same algorithm again is idempotent. The algorithm must be one
+// this binary knows.
+func (s *Store) ApplySetEncryptionPosture(p SetEncryptionPosture) (err error) {
+	defer s.txn(&err)()
+	if p.Algorithm != EncNone && p.Algorithm != EncAES256GCM {
+		return ErrInvalidEncryption
+	}
+	if cur, ok := s.kv.get(encryptionPostureKey); ok {
+		if prev := cur.(EncryptionPosture).Algorithm; prev != EncNone && p.Algorithm == EncNone {
+			return ErrEncryptionDowngrade
+		}
+	}
+	s.kv.set(encryptionPostureKey, EncryptionPosture{
+		FormatVersion: currentFormatVersion,
+		Algorithm:     p.Algorithm,
+	})
+	return nil
+}
+
 // ApplyRegisterNode upserts a member's registration row (ADR-0016, ADR-0004):
 // the replicated registry the layout reconcile composes a labeled layout
 // from. Idempotent by node ID — a re-registration replaces the row — so a

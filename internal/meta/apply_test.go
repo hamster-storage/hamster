@@ -107,6 +107,40 @@ func TestObjectLockConfiguration(t *testing.T) {
 	}
 }
 
+// TestEncryptionPostureEnableOnly: the cluster encryption posture turns on
+// and stays on. EncNone is the default; enabling commits AES256GCM; setting
+// it again is idempotent; a move back to EncNone is refused (ADR-0021), so a
+// cluster never silently stops encrypting.
+func TestEncryptionPostureEnableOnly(t *testing.T) {
+	e := newEnv(t)
+
+	if alg := e.s.EncryptionAlgorithm(); alg != EncNone {
+		t.Fatalf("default posture %d, want EncNone", alg)
+	}
+	// An unknown algorithm is rejected.
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: 99}); !errors.Is(err, ErrInvalidEncryption) {
+		t.Fatalf("unknown algorithm: %v", err)
+	}
+	// Enable.
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncAES256GCM}); err != nil {
+		t.Fatal(err)
+	}
+	if alg := e.s.EncryptionAlgorithm(); alg != EncAES256GCM {
+		t.Fatalf("after enable: %d", alg)
+	}
+	// Idempotent re-enable.
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncAES256GCM}); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	// Disable is refused — the one-way ratchet.
+	if err := e.s.ApplySetEncryptionPosture(SetEncryptionPosture{ProposedAtUnixMS: e.tick(), Algorithm: EncNone}); !errors.Is(err, ErrEncryptionDowngrade) {
+		t.Fatalf("disable should be refused: %v", err)
+	}
+	if alg := e.s.EncryptionAlgorithm(); alg != EncAES256GCM {
+		t.Fatal("posture changed after a refused disable")
+	}
+}
+
 // TestComplianceLockIsAbsolute is invariant 4 made executable: no path may
 // destroy or weaken a COMPLIANCE-locked version, with or without a governance
 // bypass, until its retention expires.
