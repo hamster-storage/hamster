@@ -186,6 +186,84 @@ func TestBucketVersioningConfig(t *testing.T) {
 	}
 }
 
+func TestObjectVersioning(t *testing.T) {
+	e := newEnv(t)
+	e.expect(e.do("PUT", "/vault", nil, nil), 200)
+
+	// An unversioned bucket surfaces no version id on PUT.
+	r := e.do("PUT", "/vault/k", []byte("plain"), nil)
+	e.expect(r, 200)
+	if v := r.Header.Get("x-amz-version-id"); v != "" {
+		t.Fatalf("unversioned PUT returned x-amz-version-id %q", v)
+	}
+
+	enable := []byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`)
+	e.expect(e.do("PUT", "/vault?versioning", enable, nil), 200)
+
+	// Two versions of one key; each PUT echoes a distinct version id.
+	r1 := e.do("PUT", "/vault/k", []byte("v1"), nil)
+	e.expect(r1, 200)
+	vid1 := r1.Header.Get("x-amz-version-id")
+	r2 := e.do("PUT", "/vault/k", []byte("v2"), nil)
+	e.expect(r2, 200)
+	vid2 := r2.Header.Get("x-amz-version-id")
+	if vid1 == "" || vid2 == "" || vid1 == vid2 {
+		t.Fatalf("version ids: %q, %q", vid1, vid2)
+	}
+
+	// Current read is the latest; each version is reachable by id.
+	if got := e.expect(e.do("GET", "/vault/k", nil, nil), 200); string(got) != "v2" {
+		t.Fatalf("current GET = %q", got)
+	}
+	if got := e.expect(e.do("GET", "/vault/k?versionId="+vid1, nil, nil), 200); string(got) != "v1" {
+		t.Fatalf("GET v1 = %q", got)
+	}
+
+	// A bad version id is NoSuchVersion, not a server error.
+	if code := e.errorCode(e.do("GET", "/vault/k?versionId=deadbeef", nil, nil), 404); code != "NoSuchVersion" {
+		t.Fatalf("bad version: %s", code)
+	}
+
+	// DELETE with no id inserts a delete marker; the current read becomes 404,
+	// but old versions remain reachable.
+	rd := e.do("DELETE", "/vault/k", nil, nil)
+	e.expect(rd, 204)
+	if rd.Header.Get("x-amz-delete-marker") != "true" {
+		t.Fatal("delete did not report a marker")
+	}
+	markerVID := rd.Header.Get("x-amz-version-id")
+	if markerVID == "" {
+		t.Fatal("marker carried no version id")
+	}
+	if code := e.errorCode(e.do("GET", "/vault/k", nil, nil), 404); code != "NoSuchKey" {
+		t.Fatalf("GET after marker: %s", code)
+	}
+	if got := e.expect(e.do("GET", "/vault/k?versionId="+vid2, nil, nil), 200); string(got) != "v2" {
+		t.Fatalf("GET v2 after marker = %q", got)
+	}
+
+	// GET of the delete marker by id is 405, flagged as a marker.
+	rm := e.do("GET", "/vault/k?versionId="+markerVID, nil, nil)
+	e.expect(rm, 405)
+	if rm.Header.Get("x-amz-delete-marker") != "true" {
+		t.Fatal("GET of marker not flagged")
+	}
+
+	// Permanent delete of one version frees it; it is then NoSuchVersion.
+	rdv := e.do("DELETE", "/vault/k?versionId="+vid1, nil, nil)
+	e.expect(rdv, 204)
+	if rdv.Header.Get("x-amz-version-id") != vid1 {
+		t.Fatalf("permanent delete echoed %q, want %q", rdv.Header.Get("x-amz-version-id"), vid1)
+	}
+	if code := e.errorCode(e.do("GET", "/vault/k?versionId="+vid1, nil, nil), 404); code != "NoSuchVersion" {
+		t.Fatalf("GET after permanent delete: %s", code)
+	}
+	// v2 survives the targeted delete of v1.
+	if got := e.expect(e.do("GET", "/vault/k?versionId="+vid2, nil, nil), 200); string(got) != "v2" {
+		t.Fatalf("v2 gone after deleting v1: %q", got)
+	}
+}
+
 func TestObjectRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	e.expect(e.do("PUT", "/bkt", nil, nil), 200)
