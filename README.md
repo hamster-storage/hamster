@@ -36,7 +36,7 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.1](https://github.com/hamster-storage/hamster/releases/tag/v0.1.0) | <ul><li>Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with <code>aws</code>, <code>rclone</code>, <code>restic</code>, <code>s3cmd</code>)</li><li>Durable single-node store with streaming uploads</li></ul> | ✅ |
 | [v0.2](https://github.com/hamster-storage/hamster/releases/tag/v0.2.0) | Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | ✅ |
 | [v0.3](https://github.com/hamster-storage/hamster/releases/tag/v0.3.0) | Erasure-coded durability with self-healing repair, the S3 endpoint served from the cluster | ✅ |
-| v0.4 | Partitioned placement and online rebalancing: drain, replace, remove, downsize | 🚧 in progress |
+| [v0.4](https://github.com/hamster-storage/hamster/releases/tag/v0.4.0) | Partitioned placement (failure-domain spread, capacity weighting) and online rebalancing — drain, replace, remove, grow, downsize — plus a continuous background scrubber that self-heals bitrot and lost shards | ✅ |
 | v0.5 | Object versioning | planned |
 | v0.6 | Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned |
 | v0.7 | Encryption at rest (SSE-S3) and key/CA rotation | planned |
@@ -98,7 +98,7 @@ Two ways to run Hamster, and they don't convert in place.
 
 **Single node.** `hamster serve` is a standalone S3 endpoint on one disk — no Raft, no inter-node TLS, no CA, nothing to configure. Right for a laptop, a homelab, or any workload that fits on one machine. Its durability is one disk's, and it **cannot become a cluster in place**: a `serve` node stores single-node blobs while a cluster stores erasure-coded shards, so there's nothing to promote. To grow, stand up a cluster and migrate the data over S3 (`rclone move`, which copies then deletes each object as it lands). That migration carries **current object data only** — version history (lands v0.5) and object-lock/WORM state (v0.6) do not transfer, and a COMPLIANCE-locked object can't be moved at all. **If you keep versioned or locked data, start clustered.**
 
-**Cluster.** `hamster cluster init` founds a cluster — the CA is minted for you — and objects are erasure-coded `k+m` across the nodes. The lifecycle below is online: no downtime, durability preserved throughout. (Drain, replace, remove, and downsize are the v0.4 placement work — built and tested on `main`, shipping in the v0.4 release.)
+**Cluster.** `hamster cluster init` founds a cluster — the CA is minted for you — and objects are erasure-coded `k+m` across the nodes, spread across failure domains and weighted by each node's capacity. The lifecycle below is online: no downtime, durability preserved throughout. A continuous background scrubber heals bitrot and lost shards on its own, before any read trips over them. (Grow, drain, replace, remove, and downsize are the v0.4 placement work.)
 
 | Operation | How | What happens |
 |---|---|---|
