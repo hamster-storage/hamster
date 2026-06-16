@@ -223,6 +223,9 @@ func marshalBucketConfig(c BucketConfig) []byte {
 	b = putUvarint(b, 3, uint64(c.CreatedUnixMS))
 	b = putUvarint(b, 4, uint64(c.Versioning))
 	b = putBool(b, 5, c.ObjectLockEnabled)
+	b = putUvarint(b, 6, uint64(c.DefaultRetentionMode))
+	b = putUvarint(b, 7, uint64(c.DefaultRetentionDays))
+	b = putUvarint(b, 8, uint64(c.DefaultRetentionYears))
 	return append(b, c.unknown...)
 }
 
@@ -241,6 +244,12 @@ func unmarshalBucketConfig(b []byte) (BucketConfig, error) {
 			c.Versioning = VersioningState(d.enum8())
 		case 5:
 			c.ObjectLockEnabled = d.bool()
+		case 6:
+			c.DefaultRetentionMode = RetentionMode(d.enum8())
+		case 7:
+			c.DefaultRetentionDays = d.uint32()
+		case 8:
+			c.DefaultRetentionYears = d.uint32()
 		default:
 			d.skipUnknown(&c.unknown)
 		}

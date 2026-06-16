@@ -43,16 +43,13 @@ func (g *Gateway) listBuckets(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) createBucket(w http.ResponseWriter, r *http.Request, bucket string) {
-	// Object-lock-enabled buckets need the retention surface (v0.6) to be
-	// usable; refusing the flag is honest, silently dropping it would be a
-	// compliance bug.
-	if strings.EqualFold(r.Header.Get("x-amz-bucket-object-lock-enabled"), "true") {
-		writeError(w, r, errNotImplemented)
-		return
-	}
+	// Object lock requires versioning; ApplyCreateBucket enables it when the
+	// lock flag is set (ADR-0006).
+	lock := strings.EqualFold(r.Header.Get("x-amz-bucket-object-lock-enabled"), "true")
 	applyErr := g.cfg.Meta.ApplyCreateBucket(meta.CreateBucket{
-		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
-		Bucket:           bucket,
+		ProposedAtUnixMS:  g.cfg.Clock.Now().UnixMilli(),
+		Bucket:            bucket,
+		ObjectLockEnabled: lock,
 	})
 	if applyErr != nil {
 		writeError(w, r, applyErr)

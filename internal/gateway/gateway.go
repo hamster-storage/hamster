@@ -87,6 +87,7 @@ type Metadata interface {
 	ApplyCreateBucket(meta.CreateBucket) error
 	ApplyDeleteBucket(meta.DeleteBucket) error
 	ApplySetBucketVersioning(meta.SetBucketVersioning) error
+	ApplySetObjectLockConfiguration(meta.SetObjectLockConfiguration) error
 	ApplyPutObject(meta.PutObject) (meta.PutResult, error)
 	ApplyDeleteObject(meta.DeleteObject) (meta.DeleteObjectResult, error)
 	ApplyDeleteVersion(meta.DeleteVersion) (meta.DeleteVersionResult, error)
@@ -267,6 +268,11 @@ func (l *loopMetadata) ApplySetBucketVersioning(p meta.SetBucketVersioning) (err
 	return
 }
 
+func (l *loopMetadata) ApplySetObjectLockConfiguration(p meta.SetObjectLockConfiguration) (err error) {
+	l.on(func() { err = l.store.ApplySetObjectLockConfiguration(p) })
+	return
+}
+
 func (l *loopMetadata) ApplyPutObject(p meta.PutObject) (res meta.PutResult, err error) {
 	l.on(func() { res, err = l.store.ApplyPutObject(p) })
 	return
@@ -371,6 +377,10 @@ func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, id *sigv4.
 			g.putBucketVersioning(w, r, id, bucket)
 			return
 		}
+		if q.Has("object-lock") {
+			g.putObjectLockConfiguration(w, r, id, bucket)
+			return
+		}
 		if len(q) != 0 {
 			writeError(w, r, errNotImplemented)
 			return
@@ -390,6 +400,8 @@ func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, id *sigv4.
 			g.getBucketLocation(w, r, bucket)
 		case q.Has("versioning"):
 			g.getBucketVersioning(w, r, bucket)
+		case q.Has("object-lock"):
+			g.getObjectLockConfiguration(w, r, bucket)
 		case q.Has("versions"):
 			g.listObjectVersions(w, r, bucket)
 		case q.Has("uploads"):

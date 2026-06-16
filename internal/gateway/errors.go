@@ -47,6 +47,10 @@ var (
 		"The Content-MD5 you specified did not match what we received."}
 	errEntityTooLarge = &s3Error{"EntityTooLarge", http.StatusBadRequest,
 		"The payload exceeds the maximum size this operation allows."}
+	errObjectLockNotFound = &s3Error{"ObjectLockConfigurationNotFoundError", http.StatusNotFound,
+		"Object Lock configuration does not exist for this bucket."}
+	errObjectLockNotEnabled = &s3Error{"InvalidRequest", http.StatusBadRequest,
+		"Object Lock configuration cannot be set on a bucket where it is not enabled; enable object lock when creating the bucket."}
 )
 
 // ErrNoSuchKey is the missing-key miss, exported for object backends.
@@ -84,6 +88,8 @@ func mapError(err error) *s3Error {
 			"The versioning state cannot be changed: an object lock configuration is present, or the requested state is invalid."}
 	case errors.Is(err, meta.ErrObjectLocked):
 		return &s3Error{"AccessDenied", http.StatusForbidden, "The object is protected by object lock."}
+	case errors.Is(err, meta.ErrInvalidRetention):
+		return &s3Error{"InvalidRequest", http.StatusBadRequest, "The object lock retention is not valid."}
 	case errors.Is(err, meta.ErrNoSuchUpload):
 		return &s3Error{"NoSuchUpload", http.StatusNotFound,
 			"The specified multipart upload does not exist."}

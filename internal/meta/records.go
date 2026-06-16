@@ -204,6 +204,17 @@ type BucketConfig struct {
 	Versioning        VersioningState
 	ObjectLockEnabled bool
 
+	// DefaultRetention is the bucket's object-lock default retention rule
+	// (ADR-0006), set by PutObjectLockConfiguration and applied to new objects
+	// that arrive without their own retention. The duration is kept in the S3
+	// shape — days or years, never an absolute date — so GetObjectLockConfiguration
+	// round-trips what the operator set; the absolute retain-until is computed per
+	// object at PUT time. Mode RetentionNone means no default; at most one of Days
+	// or Years is non-zero.
+	DefaultRetentionMode  RetentionMode
+	DefaultRetentionDays  uint32
+	DefaultRetentionYears uint32
+
 	unknown []byte
 }
 

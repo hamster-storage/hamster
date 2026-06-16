@@ -33,6 +33,20 @@ type SetBucketVersioning struct {
 	State            VersioningState
 }
 
+// SetObjectLockConfiguration is S3 PutObjectLockConfiguration: it sets (or, with
+// mode RetentionNone, clears) the bucket's default retention rule, applied to new
+// objects that arrive without their own retention (ADR-0006). The duration is in
+// the S3 shape — exactly one of Days or Years — never an absolute date; the
+// per-object retain-until is computed at PUT time. Object lock must already be
+// enabled on the bucket.
+type SetObjectLockConfiguration struct {
+	ProposedAtUnixMS      int64
+	Bucket                string
+	DefaultRetentionMode  RetentionMode
+	DefaultRetentionDays  uint32
+	DefaultRetentionYears uint32
+}
+
 // PutObject commits one object version. The data-plane facts (size, ETag,
 // checksums, partition, EC parameters) are inputs: the shards are already
 // durable when this proposal is made — the metadata commit is the
