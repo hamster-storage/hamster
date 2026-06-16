@@ -92,6 +92,10 @@ type cluster struct {
 	// fixed KEK so the encrypted write/read path is exercised deterministically.
 	encrypt bool
 	kek     keys.KEK
+	// keyring maps KEK fingerprint → loaded KEK, the rewrap sweep's view of the
+	// keys this node holds (ADR-0032): the old key plus, during a rotation, the
+	// new one. Populated by encryptCluster and rotateKeyBegin.
+	keyring map[uint64]keys.KEK
 }
 
 // encReader is a deterministic per-node entropy source for DEK generation
@@ -106,19 +110,51 @@ func (e encReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// encryptCluster turns on the encryption posture with a fixed KEK. Call
-// before writing the objects under test.
-func (c *cluster) encryptCluster() {
+// mkKEK loads a deterministic test KEK from a seed byte.
+func (c *cluster) mkKEK(seed byte) keys.KEK {
 	c.t.Helper()
 	material := make([]byte, keys.KEKLen)
 	for i := range material {
-		material[i] = byte(0x10 + i)
+		material[i] = seed + byte(i)
 	}
 	k, err := keys.LoadKEK(material)
 	if err != nil {
 		c.t.Fatalf("LoadKEK: %v", err)
 	}
+	return k
+}
+
+// encryptCluster turns on the encryption posture with a fixed KEK. Call
+// before writing the objects under test.
+func (c *cluster) encryptCluster() {
+	c.t.Helper()
+	k := c.mkKEK(0x10)
+	if c.keyring == nil {
+		c.keyring = map[uint64]keys.KEK{}
+	}
+	c.keyring[k.Fingerprint().Uint64()] = k
 	c.kek, c.encrypt = k, true
+}
+
+// rewrap drives one RewrapSweep through node id's coordinator to completion.
+func (c *cluster) rewrap(id seam.NodeID) (coord.RewrapReport, error) {
+	c.t.Helper()
+	var rep coord.RewrapReport
+	var rerr error
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.RewrapSweep(func(r coord.RewrapReport, e error) {
+			rep, rerr, done = r, e, true
+		})
+	})
+	for range 8000 {
+		c.s.Run(tick)
+		if done {
+			return rep, rerr
+		}
+	}
+	c.t.Fatal("rewrap never finished")
+	return rep, rerr
 }
 
 // newCluster builds n nodes; the first min(n, 3) are Raft voters.
@@ -168,6 +204,7 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 				Clock: w.Clock, Rand: w.Rand, Data: n.data, Raft: rn,
 				Entropy:    entropy,
 				Encryption: func() (keys.KEK, bool) { return c.kek, c.encrypt },
+				Keyring:    func(fp uint64) (keys.KEK, bool) { k, ok := c.keyring[fp]; return k, ok },
 				Layout: func() (place.Layout, bool) {
 					// Distinct host/zone per node: spread collapses to the
 					// bare rendezvous ranking readObject verifies against. The
