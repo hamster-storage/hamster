@@ -395,9 +395,6 @@ func Optimize(dataDir, addr string) (OptimizeReport, error) {
 // migrates data before the layout settles.
 const optimizeSettleWait = 5 * time.Minute
 
-// requestOptimize dials a node's control port and runs one optimize request. No
-// client read deadline: the sweep can take far longer than other control calls,
-// and the server holds the connection open until it finishes.
 // controlRetries / controlRetryWait bound the redial of a control request after
 // a transient connection or TLS error. The cluster control port runs over real
 // loopback mTLS — plumbing the simulator does not model — and under heavy load a
@@ -501,23 +498,15 @@ func leaderRedirect(op, target string, settleWait time.Duration, do func(addr st
 	}
 }
 
+// requestOptimize runs one optimize request — a single attempt, not
+// controlRoundTrip's bounded redial: the sweep can run minutes and the server
+// holds the connection open until it finishes (controlExchange sets no read
+// deadline), so a redial would only start a second sweep, not recover a lost
+// answer.
 func requestOptimize(addr string, cert tls.Certificate, pool *x509.CertPool) (optimizeResponse, error) {
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
-		MinVersion:            tls.VersionTLS13,
-		Certificates:          []tls.Certificate{cert},
-		InsecureSkipVerify:    true,
-		VerifyPeerCertificate: verifyChainToPool(pool),
-	})
+	buf, err := controlExchange(addr, cert, pool, encodeRequest(reqOptimize, nil))
 	if err != nil {
-		return optimizeResponse{}, fmt.Errorf("cluster: dialing %s: %w", addr, err)
-	}
-	defer conn.Close()
-	if err := writeFrame(conn, encodeRequest(reqOptimize, nil)); err != nil {
-		return optimizeResponse{}, fmt.Errorf("cluster: sending optimize request: %w", err)
-	}
-	buf, err := readFrame(conn)
-	if err != nil {
-		return optimizeResponse{}, fmt.Errorf("cluster: reading optimize response: %w", err)
+		return optimizeResponse{}, err
 	}
 	return decodeOptimizeResponse(buf)
 }
