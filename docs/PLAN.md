@@ -13,33 +13,103 @@ line here is done, delete it.
 
 ## Now / next — v0.7 encryption at rest
 
-v0.6 object lock shipped. WORM retention and legal holds are served on both the
-single-node gateway and the cluster path — `Put/GetObjectLockConfiguration` with
-a days/years bucket default, `Put/GetObjectRetention`,
-`Put/GetObjectLegalHold`, the `x-amz-object-lock-*` PUT/response headers, and
-bucket creation with object lock — and **invariant 4 is now a tested guarantee**:
-an adversarial meta test drives every delete-or-shorten path against a
-COMPLIANCE-locked version and proves refusal, with a gateway test and a cluster
-e2e enforcing the same `403` end to end and the real `aws` CLI exercising the
-surface ([ADR-0006](adr/0006-versioning-and-object-lock.md)).
+v0.6 object lock shipped (v0.6.0). The front line is now **encryption at rest** —
+envelope encryption, encrypt-then-EC, over the framed object stream, fully
+designed in [ADR-0021](adr/0021-envelope-encryption-at-rest.md) (per-object DEKs,
+the DEK wrapped by a cluster KEK from a pluggable source, opt-in/enable-only, an
+SSE-S3 surface). The design is decided; v0.7 is execution.
 
-The next front line is **v0.7 encryption at rest** — envelope encryption over the
-framed object stream ([ADR-0021](adr/0021-envelope-encryption-at-rest.md)) with a
-pluggable key source and the SSE-S3 surface (`x-amz-server-side-encryption:
-AES256` on PUT/HEAD/GET). Unlike versioning and object lock, the metadata model is
-*not* already half-built for this: it is a data-path change, so it must clear the
-deterministic simulation harness (invariant 5) the way the EC path did. The
-[DATA-STREAM.md](DATA-STREAM.md) design already reserves encryption as a per-chunk
-transform in the chunk → compress → encrypt → frame → EC order, and the stream
-header carries the reserved flag — so the framing is ready; v0.7 fills in the
-transform, the key management, and the API surface. A survey of what the stream
-layer reserves vs. what the key source and SSE headers must add is the first step.
+**This one is genuinely different from v0.5/v0.6.** Versioning and object lock were
+mostly "expose what the metadata already models." Encryption is not pre-built — a
+survey of the tree found:
 
-v0.7 also carries the **CA custody and rotation** work
+- `internal/stream` already reserves `flagEncrypted` in the frame header, but a
+  frame with it set is *refused* today, and the size arithmetic assumes identity
+  frames (`stored == plaintext`). The framing slot is ready; the transform and the
+  encrypted-size math (a per-chunk GCM tag) are not.
+- No crypto/key machinery exists at all (`internal/certs` is mTLS only): no
+  AES-GCM transform, no DEK or KEK, no key source, no SSE surface, and no
+  `VersionEntry` encryption field.
+- The pipeline order is fixed (ADR-0021, [DATA-STREAM.md](DATA-STREAM.md)): chunk →
+  compress → encrypt → frame → EC. So encryption is a per-chunk transform *inside*
+  the stream layer; EC, repair, scrub, and rebalance see ciphertext and never need
+  a key — the property that keeps storage nodes key-free.
+
+Because it touches the read/write path, v0.7 must clear the deterministic
+simulation harness (invariant 5) the way the EC path did. Passes, data-path-first
+(the S3 surface is last, not first):
+
+1. **The chunk encryption transform (`internal/stream`).** Wire `flagEncrypted`:
+   AES-256-GCM per chunk, the chunk index as nonce (safe — the DEK is never reused),
+   under a caller-supplied 256-bit DEK; fix the framed-size arithmetic for the
+   per-chunk tag. Pure computation, no seam — golden-pinned, every round-trip and
+   single-byte tamper proven detected (the GCM tag joins the existing CRC).
+
+2. **DEK lifecycle and the pluggable KEK (a new `internal/keys`-ish package).** DEK
+   generation from injected entropy (the seam `*rand.Rand` — `crypto/rand` in
+   production, seeded under the simulator, the determinism rule). DEK wrap/unwrap
+   under the KEK. The KEK from a source chosen at init: `--master-key-file`, a
+   passphrase through argon2id (`golang.org/x/crypto/argon2` — permissive,
+   [ADR-0011](adr/0011-permissive-only-dependencies.md) ok), or
+   `--master-key-command` (the exec hook — the zero-dependency KMS/Vault
+   integration point, behind the seam). Pure given inputs; the command hook is the
+   one seam touch.
+
+3. **Encryption in the coordinator (write/read path).** `coord` PUT mints a DEK,
+   encrypts through the stream transform, wraps the DEK under the node's loaded
+   KEK, and stores the wrapped DEK + algorithm in the `PutObject` proposal → an
+   additive `VersionEntry` field. GET reads the wrapped DEK, unwraps, decrypts.
+   Repair/scrub/rebalance/re-encode are untouched — they carry ciphertext shards
+   and never see a key. **The simulation pass:** the encrypted write path under the
+   existing crash schedules, plus the ADR's new ones — crash between shard write
+   and metadata commit for an encrypted object, GCM tag corruption caught on read
+   and on scrub.
+
+4. **Cluster posture and key availability.** `cluster init` key-source flags; a
+   replicated encryption posture (on/off + algorithm) so every node agrees;
+   enable-only (disabling refused, ADR-0021); `cluster status` reports it; a node
+   that cannot load its KEK at startup refuses encrypted reads *loudly* rather than
+   serving ciphertext or failing quietly. The KEK is never stored or transmitted.
+
+5. **The SSE-S3 surface.** `x-amz-server-side-encryption: AES256` on PUT/HEAD/GET
+   when the cluster encrypts; the request header accepted; SSE-KMS and SSE-C
+   refused honestly (the DEK machinery leaves room for SSE-C later).
+
+6. **KEK rotation, verification, docs.** KEK rotation as a metadata-only rewrap
+   scan (rewrap every DEK under a new KEK — object bytes untouched). Verification:
+   stream golden/tamper, key-source units, the coord sim schedules above, a cluster
+   e2e (an encrypted cluster, the posture in `status`, the SSE header, a read after
+   a node restart that must reload its KEK), and the `aws` CLI SSE round-trip under
+   `compat`. Docs: DATA-STREAM.md (encryption wired), S3-API.md (SSE surface);
+   ADR-0021 moves Proposed → Accepted, with a KEK-rotation ADR if the flow makes a
+   real decision.
+
+**Open design questions — settle before pass 1:**
+
+- **Single-node `serve` scope.** ADR-0021 is cluster-framed ("cluster init", "the
+  cluster KEK"). Decide whether `hamster serve` (the single-node dev preview) also
+  encrypts or v0.7 is cluster-only. Leaning cluster-only — that is where the
+  compliance story lives and `serve` is a preview — but the stream/key machinery is
+  shared, so adding `serve` support is cheap.
+- **Where the replicated posture lives.** The is-encrypted/algorithm posture must
+  be agreed cluster-wide. A meta singleton (like the stored cluster layout,
+  [ADR-0028](adr/0028-stored-cluster-layout.md)) vs. a layout field vs. node
+  config. The KEK is never part of this — only the posture.
+- **Cluster KEK distribution — the load-bearing one.** Every node needs the same
+  KEK to unwrap DEKs for the reads it serves locally, but the KEK must not transit
+  the cluster (that would undermine the model). The intended model: the operator
+  configures the *same* key source on every node (same file, passphrase, or
+  command), each node loads the KEK independently at startup, and a joining node
+  that cannot produce the cluster's KEK cannot serve encrypted reads. Confirm this
+  is the model and that join does **not** carry the KEK.
+
+**The other half of v0.7's "keys" — CA custody and rotation**
 ([ADR-0029](adr/0029-ca-custody-and-issuance.md),
-[ADR-0022](adr/0022-cluster-mtls.md)): [ADR-0022](adr/0022-cluster-mtls.md) pairs
-CA rotation with KEK rotation, so it is a keys problem that belongs with
-encryption, not the data-path milestones before it.
+[ADR-0022](adr/0022-cluster-mtls.md)): making issuance pluggable (operator/external
+PKI), and lost-CA-key recovery via a multi-CA trust bundle.
+[ADR-0022](adr/0022-cluster-mtls.md) pairs CA rotation with KEK rotation, so it
+belongs here as a keys problem. This is a second track that may split into v0.8 if
+encryption at rest alone fills v0.7 — decide once the encryption passes are scoped.
 
 ## Later versions
 
