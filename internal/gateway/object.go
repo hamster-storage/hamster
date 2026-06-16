@@ -33,6 +33,10 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 		writeError(w, r, lerr)
 		return
 	}
+	if err := parseSSEHeaders(r.Header, g.encryptionOn()); err != nil {
+		writeError(w, r, err)
+		return
+	}
 
 	// Mint first — the blob needs its address before the body can stream
 	// to disk.
@@ -92,6 +96,10 @@ func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *s
 		writeError(w, r, lerr)
 		return
 	}
+	if err := parseSSEHeaders(r.Header, g.encryptionOn()); err != nil {
+		writeError(w, r, err)
+		return
+	}
 	body, err := readBody(r, id)
 	if err != nil {
 		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
@@ -115,6 +123,12 @@ func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *s
 	state := g.bucketVersioning(bucket)
 	w.Header().Set("ETag", quoteETag(etag))
 	setVersionID(w, state, meta.VersionEntry{VersionID: vid, NullVersion: state != meta.VersioningEnabled})
+	// Echo the SSE header when the object was actually encrypted — read the
+	// committed record back, the authoritative per-object fact (the cluster
+	// posture, not the request header, decides).
+	if committed, ok := g.cfg.Meta.GetVersion(bucket, key, vid); ok {
+		setSSEHeader(w, committed)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -248,6 +262,7 @@ func (g *Gateway) serveEntry(w http.ResponseWriter, r *http.Request, entry meta.
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
 	setLockHeaders(w, entry)
+	setSSEHeader(w, entry)
 	w.Header().Set("Accept-Ranges", "bytes")
 	http.ServeContent(w, r, "", time.UnixMilli(entry.CreatedUnixMS).UTC(), bytes.NewReader(data))
 }

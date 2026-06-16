@@ -126,6 +126,13 @@ type Config struct {
 	// copy are refused — their cluster data path is later work. Nil on a
 	// single node, where Blobs serves object data.
 	Objects ObjectBackend
+
+	// EncryptionEnabled reports whether the cluster encrypts new writes at
+	// rest (ADR-0021, the SSE-S3 surface). Nil — the single-node preview and
+	// any unencrypted cluster — means it does not, so an explicit
+	// x-amz-server-side-encryption: AES256 request is refused honestly rather
+	// than silently storing plaintext.
+	EncryptionEnabled func() bool
 }
 
 // PutObjectOptions carries the request facts a cluster PUT records beyond the
