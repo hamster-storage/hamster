@@ -13,32 +13,69 @@ line here is done, delete it.
 
 ## Now / next — v0.6 object lock
 
-v0.5 versioning has **landed**. The S3 surface that exposes the version-list
-model the metadata has carried since v0.1 (invariant 3,
-[ADR-0006](adr/0006-versioning-and-object-lock.md)) is complete on both the
-single-node gateway and the cluster data path: per-bucket versioning config
-(Enabled/Suspended), `x-amz-version-id` on writes, `versionId` on GET/HEAD/DELETE
-(with the null version and delete-marker semantics), `ListObjectVersions` (paged,
-delimiter-grouped, `IsLatest`), and permanent version delete that frees the
-version's shards. No schema change. Proven by gateway and meta unit tests, a
-cluster e2e over the erasure-coded path, and the real `aws` CLI versioning surface
-under `task compat`. MFA Delete is out of scope and cross-version shard sharing is
-deferred — both recorded in [S3-API.md](S3-API.md).
+v0.5 versioning shipped (v0.5.0). Object lock builds directly on it: WORM
+retention and legal holds over the versioned keyspace
+([ADR-0006](adr/0006-versioning-and-object-lock.md)) — the compliance heart of
+Hamster's positioning, and the release where invariant 4 stops being a promise
+and becomes a tested guarantee.
 
-The next front line is **v0.6 object lock** — GOVERNANCE and COMPLIANCE retention
-and legal holds ([ADR-0006](adr/0006-versioning-and-object-lock.md)). As with
-versioning, much is already in the metadata: the lock fields on `VersionEntry`,
-the apply-layer guards (`ApplyUpdateRetention`, `ApplyUpdateLegalHold`, and the
-`lockedAt` check that `ApplyDeleteVersion` already honors — invariant 4), and the
-rule that an object-lock bucket cannot suspend versioning. So v0.6 is again mostly
-the **S3 surface**, gateway-first: `PutObjectRetention`/`GetObjectRetention`,
-`PutObjectLegalHold`/`GetObjectLegalHold`, `Put/GetObjectLockConfiguration`, the
-`x-amz-object-lock-*` headers on PUT, the bypass-governance path
-(`x-amz-bypass-governance-retention`, already plumbed through `DeleteVersion`),
-and creating a bucket with object lock enabled (today refused). The hard floor:
-no code path may delete or shorten retention on a COMPLIANCE-locked version — the
-hook v0.5 left clean closes here. A survey of what apply already enforces vs. what
-the surface must add is the first step.
+As with versioning, the survey for this milestone found the load-bearing half
+already built and Raft-ready:
+
+- `VersionEntry` carries `RetentionMode` (None/Governance/Compliance),
+  `RetainUntilUnixMS`, and `LegalHold`.
+- `lockedAt(at, bypassGovernance)` is the guard: a legal hold blocks always;
+  COMPLIANCE blocks until retain-until **regardless of bypass**; GOVERNANCE
+  blocks unless bypass. `ApplyDeleteVersion` already calls it, so the hard floor
+  (invariant 4 — no path deletes or shortens a COMPLIANCE-locked version) is
+  already enforced where deletes happen.
+- `ApplyUpdateRetention` (strengthen-only under COMPLIANCE; GOVERNANCE weakens
+  only with bypass) and `ApplyUpdateLegalHold` exist, with codecs and dispatch.
+- `ApplyPutObject` already accepts the lock fields and rejects them on a
+  non-lock bucket; `ApplyCreateBucket` already takes `ObjectLockEnabled`; the
+  gateway already threads `x-amz-bypass-governance-retention` into
+  `DeleteVersion` and maps `ErrObjectLocked` → `403 AccessDenied`.
+
+So v0.6 is again the **S3 surface**, gateway-first then cluster, in passes:
+
+1. **Object-lock bucket creation + configuration.** Accept
+   `x-amz-bucket-object-lock-enabled: true` on CreateBucket (today refused) —
+   which enables versioning on that bucket, since object lock requires it — and
+   serve `PutObjectLockConfiguration`/`GetObjectLockConfiguration` over the
+   `?object-lock` subresource, including the optional bucket **default
+   retention** applied to new objects.
+
+2. **Per-object retention.** `PutObjectRetention`/`GetObjectRetention` over the
+   `?retention` object subresource (driving the existing `ApplyUpdateRetention`),
+   and the `x-amz-object-lock-mode` / `x-amz-object-lock-retain-until-date` PUT
+   headers (plus any bucket default) flowing into `PutObject`. GET/HEAD surface
+   the lock headers.
+
+3. **Legal hold.** `PutObjectLegalHold`/`GetObjectLegalHold` over the
+   `?legal-hold` subresource and the `x-amz-object-lock-legal-hold` PUT header,
+   driving `ApplyUpdateLegalHold`.
+
+4. **Onto the cluster `-s3` path.** Thread the lock fields through `coord.Put`
+   into the `PutObject` proposal, add the retention/legal-hold proposals to the
+   `clusterMetadata` adapter, and surface the lock headers on cluster reads —
+   the same gateway, leader-only mutations.
+
+5. **Verification.** Gateway and meta units; a cluster e2e; the real `aws` CLI
+   under `task compat` (`put-object-lock-configuration`, `put-object-retention`,
+   `put-object-legal-hold`, and the get variants); and — the load-bearing one —
+   a simulation/invariant test that drives **every** delete-or-shorten path
+   against a COMPLIANCE-locked version and proves refusal, including under a
+   crash schedule. Invariant 4 is the thing this release exists to guarantee, so
+   it gets an adversarial test, not just a happy-path one.
+
+**Open design question (settle in pass 1):** the bucket *default retention* of
+`PutObjectLockConfiguration` needs somewhere to live. `BucketConfig` carries
+`ObjectLockEnabled` but no default rule, so this is an additive `BucketConfig`
+field (mode + a duration), versioned per invariant 2 — a small schema addition,
+the first of v0.6. Decide whether to store the duration in the S3 shape
+(days/years) and apply it at PUT time, versus materializing an absolute date
+onto the bucket; the former matches S3's `GetObjectLockConfiguration` round trip,
+which argues for storing days/years.
 
 ## Later versions
 
