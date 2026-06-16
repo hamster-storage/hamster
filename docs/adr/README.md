@@ -40,6 +40,7 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0030](0030-single-cluster-port.md) | One cluster port: join/status shares the peer transport listener, split by ALPN |
 | [0031](0031-reencode-across-profiles.md) | Re-encoding existing data across storage profiles: a physical re-representation for downsize/upsize, COMPLIANCE-safe |
 | [0032](0032-master-key-rotation.md) | Master key rotation: metadata-only DEK rewrap, per-version KEK fingerprints, observable and provably complete |
+| [0033](0033-ca-rotation.md) | CA rotation: dual-trust rollover over a replicated multi-CA trust bundle; planned rotation and lost-key recovery are one flow |
 
 ## Template
 
