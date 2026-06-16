@@ -325,12 +325,41 @@ func (n *Node) Addr() string { return n.transport.Addr() }
 // the peer transport (ADR-0030); join/status is routed off it by ALPN.
 func (n *Node) JoinAddr() string { return n.transport.Addr() }
 
+// onLoop runs fn on the node's loop and returns its result. ok is false if the
+// loop does not answer within timeout — wedged or stopping — leaving the caller
+// to choose what a non-answer means (an empty view, or the safe assumption). A
+// zero timeout waits forever. The single place the loop-roundtrip dance lives, so
+// the many call sites that need a value computed on the loop stay one line each.
+func onLoop[T any](n *Node, timeout time.Duration, fn func() T) (T, bool) {
+	return onLoopAsync(n, timeout, func(done func(T)) { done(fn()) })
+}
+
+// onLoopAsync is onLoop for results that arrive from a later callback rather than
+// fn's return — a Raft Propose completion, say. fn is posted to the loop and is
+// handed a done it calls once, synchronously for an early refusal or from the
+// async callback for a committed proposal. ok is false on timeout (zero waits
+// forever, for sweeps that may run minutes).
+func onLoopAsync[T any](n *Node, timeout time.Duration, fn func(done func(T))) (T, bool) {
+	ch := make(chan T, 1)
+	n.loop.Post(func() { fn(func(v T) { ch <- v }) })
+	var timed <-chan time.Time
+	if timeout > 0 {
+		timed = time.After(timeout)
+	}
+	select {
+	case v := <-ch:
+		return v, true
+	case <-timed: // a nil channel blocks forever, so timeout==0 never fires
+		var zero T
+		return zero, false
+	}
+}
+
 // members snapshots membership and leadership from the loop, labeling each
 // member with its failure-domain host/zone from the replicated layout (so
 // `cluster status` reports the same labels placement uses).
 func (n *Node) members() []Member {
-	done := make(chan []Member, 1)
-	n.loop.Post(func() {
+	ms, _ := onLoop(n, 5*time.Second, func() []Member {
 		lead, _ := n.raft.Leader()
 		labels := map[string]meta.LayoutNode{}
 		if cl, ok := n.raft.Store().ClusterLayout(); ok {
@@ -359,14 +388,9 @@ func (n *Node) members() []Member {
 			}
 			ms = append(ms, mem)
 		}
-		done <- ms
+		return ms // a wedged or stopping loop yields nil — callers see an empty cluster
 	})
-	select {
-	case ms := <-done:
-		return ms
-	case <-time.After(5 * time.Second):
-		return nil // the loop is wedged or stopping; callers see an empty cluster
-	}
+	return ms
 }
 
 func (n *Node) syncPeers() {
@@ -770,24 +794,21 @@ func (n *Node) handleDrain(conn *tls.Conn, payload []byte) drainResponse {
 // ErrNotLeader unchanged for the caller to translate. A new drain is refused
 // while one is already underway — one node at a time (drainBlockedReason).
 func (n *Node) proposeSetDraining(nodeID string, draining bool) error {
-	ch := make(chan error, 1)
-	n.loop.Post(func() {
+	err, ok := onLoopAsync(n, 30*time.Second, func(done func(error)) {
 		if draining {
 			if reason := n.drainBlockedReason(nodeID); reason != "" {
-				ch <- errors.New(reason)
+				done(errors.New(reason))
 				return
 			}
 		}
 		n.raft.Propose(meta.SetNodeDraining{
 			ProposedAtUnixMS: n.clock.Now().UnixMilli(), NodeID: nodeID, Draining: draining,
-		}, func(_ any, e error) { ch <- e })
+		}, func(_ any, e error) { done(e) })
 	})
-	select {
-	case err := <-ch:
-		return err
-	case <-time.After(30 * time.Second):
+	if !ok {
 		return fmt.Errorf("cluster: drain proposal timed out")
 	}
+	return err
 }
 
 // layoutOpInProgress returns a description of an in-flight layout operation — a
@@ -831,10 +852,9 @@ func (n *Node) proposeReplace(oldNode, newNode string) error {
 	if oldNode == newNode {
 		return fmt.Errorf("a node cannot replace itself")
 	}
-	ch := make(chan error, 1)
-	n.loop.Post(func() {
+	err, ok := onLoopAsync(n, 30*time.Second, func(done func(error)) {
 		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
-			ch <- raftnode.ErrNotLeader
+			done(raftnode.ErrNotLeader)
 			return
 		}
 		oldMember, newMember := false, false
@@ -847,27 +867,25 @@ func (n *Node) proposeReplace(oldNode, newNode string) error {
 			}
 		}
 		if !oldMember {
-			ch <- fmt.Errorf("node %s is not a cluster member", oldNode)
+			done(fmt.Errorf("node %s is not a cluster member", oldNode))
 			return
 		}
 		if newMember {
-			ch <- fmt.Errorf("node %s is already a cluster member; the replacement must be a fresh node — declare the replacement before joining it", newNode)
+			done(fmt.Errorf("node %s is already a cluster member; the replacement must be a fresh node — declare the replacement before joining it", newNode))
 			return
 		}
 		if reason := n.layoutOpInProgress(""); reason != "" {
-			ch <- fmt.Errorf("%s; only one layout change at a time", reason)
+			done(fmt.Errorf("%s; only one layout change at a time", reason))
 			return
 		}
 		n.raft.Propose(meta.SetNodeReplacedBy{
 			ProposedAtUnixMS: n.clock.Now().UnixMilli(), NodeID: oldNode, ReplacedBy: newNode,
-		}, func(_ any, e error) { ch <- e })
+		}, func(_ any, e error) { done(e) })
 	})
-	select {
-	case err := <-ch:
-		return err
-	case <-time.After(30 * time.Second):
+	if !ok {
 		return fmt.Errorf("cluster: replace timed out")
 	}
+	return err
 }
 
 // handleRemove serves a remove request (ADR-0004): a leader-only metadata
@@ -927,10 +945,9 @@ func (n *Node) proposeRemove(nodeID string) error {
 // removeAttempt runs one removal attempt on the loop: validate the gate, then
 // propose the Raft conf change. Idempotent — a node already gone is success.
 func (n *Node) removeAttempt(nodeID string) error {
-	ch := make(chan error, 1)
-	n.loop.Post(func() {
+	err, ok := onLoopAsync(n, 10*time.Second, func(done func(error)) {
 		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
-			ch <- raftnode.ErrNotLeader
+			done(raftnode.ErrNotLeader)
 			return
 		}
 		var raftID uint64
@@ -942,30 +959,28 @@ func (n *Node) removeAttempt(nodeID string) error {
 			}
 		}
 		if !found {
-			ch <- nil // already removed (a retry that raced a commit)
+			done(nil) // already removed (a retry that raced a commit)
 			return
 		}
 		if raftID == n.cfg.RaftID {
-			ch <- fmt.Errorf("a node cannot remove itself; issue remove from another node")
+			done(fmt.Errorf("a node cannot remove itself; issue remove from another node"))
 			return
 		}
 		if reason := n.removeBlockedReason(nodeID); reason != "" {
-			ch <- errors.New(reason)
+			done(errors.New(reason))
 			return
 		}
 		if err := n.raft.RemoveNode(raftID); err != nil {
-			ch <- err
+			done(err)
 			return
 		}
 		log.Printf("cluster: removing node %s (raft id %d)", nodeID, raftID)
-		ch <- nil
+		done(nil)
 	})
-	select {
-	case err := <-ch:
-		return err
-	case <-time.After(10 * time.Second):
+	if !ok {
 		return fmt.Errorf("cluster: remove timed out")
 	}
+	return err
 }
 
 // handleOptimize serves an optimize request (ADR-0004, ADR-0031): a leader-only
@@ -1019,21 +1034,22 @@ func (n *Node) runOptimize() (rep coord.RepairReport, retry bool, err error) {
 		retry bool
 		err   error
 	}
-	ch := make(chan result, 1)
-	n.loop.Post(func() {
+	// No timeout: an optimize sweep re-encodes every under-width object and may run
+	// minutes; only the refusals below are synchronous.
+	r, _ := onLoopAsync(n, 0, func(done func(result)) {
 		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
-			ch <- result{err: raftnode.ErrNotLeader}
+			done(result{err: raftnode.ErrNotLeader})
 			return
 		}
 		// An operator-initiated layout op (drain, replace) must be resolved first
 		// — not something to wait out.
 		for _, r := range n.raft.Store().Nodes() {
 			if r.Draining {
-				ch <- result{err: fmt.Errorf("node %s is draining; finish or undo it before optimizing", r.NodeID)}
+				done(result{err: fmt.Errorf("node %s is draining; finish or undo it before optimizing", r.NodeID)})
 				return
 			}
 			if r.ReplacedBy != "" {
-				ch <- result{err: fmt.Errorf("node %s is being replaced; let that finish before optimizing", r.NodeID)}
+				done(result{err: fmt.Errorf("node %s is being replaced; let that finish before optimizing", r.NodeID)})
 				return
 			}
 		}
@@ -1041,20 +1057,19 @@ func (n *Node) runOptimize() (rep coord.RepairReport, retry bool, err error) {
 		// or a recent join has not reconciled into the layout). Optimizing now would
 		// target a node count that is about to change — wait and re-ask.
 		if !n.layoutSettled() {
-			ch <- result{retry: true, err: errors.New("the cluster layout is still reconciling a recent membership change")}
+			done(result{retry: true, err: errors.New("the cluster layout is still reconciling a recent membership change")})
 			return
 		}
 		if n.sweeping {
-			ch <- result{retry: true, err: errors.New("a repair or optimize sweep is already running")}
+			done(result{retry: true, err: errors.New("a repair or optimize sweep is already running")})
 			return
 		}
 		n.sweeping = true
 		n.coord.Optimize(func(rep coord.RepairReport, err error) {
 			n.sweeping = false
-			ch <- result{rep: rep, err: err}
+			done(result{rep: rep, err: err})
 		})
 	})
-	r := <-ch
 	return r.rep, r.retry, r.err
 }
 
@@ -1133,38 +1148,28 @@ func (n *Node) maxStoredWidth() int {
 
 // isLeader reports, on the loop, whether this node is the current Raft leader.
 func (n *Node) isLeader() bool {
-	ch := make(chan bool, 1)
-	n.loop.Post(func() {
+	v, _ := onLoop(n, 5*time.Second, func() bool {
 		lead, _ := n.raft.Leader()
-		ch <- lead == n.cfg.RaftID
+		return lead == n.cfg.RaftID
 	})
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(5 * time.Second):
-		return false
-	}
+	return v // a wedged loop yields false — not the leader, the safe assumption
 }
 
 // isClusterMember reports, on the loop, whether nodeID is in the current Raft
 // membership.
 func (n *Node) isClusterMember(nodeID string) bool {
-	ch := make(chan bool, 1)
-	n.loop.Post(func() {
+	v, ok := onLoop(n, 5*time.Second, func() bool {
 		for _, m := range n.raft.Members() {
 			if string(m.Addr) == nodeID {
-				ch <- true
-				return
+				return true
 			}
 		}
-		ch <- false
+		return false
 	})
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(5 * time.Second):
+	if !ok {
 		return true // loop wedged; do not falsely report removed
 	}
+	return v
 }
 
 type joinOutcome struct {
