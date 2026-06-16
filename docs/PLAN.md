@@ -60,12 +60,18 @@ private key is **never** replicated through Raft. v0.8 builds the rotation on to
   (trust old+new, reissue every node cert from new, drop old) — issuance restored
   with no data at risk, since validation only ever needed the CA *certificate*.
 
-The rotation flow and its lost-key case get **their own ADR** when the work starts
-([ROADMAP.md](ROADMAP.md) records this).
+The rotation flow and its lost-key case are designed in
+**[ADR-0033](adr/0033-ca-rotation.md)** (Proposed): a dual-trust rollover over a
+replicated multi-CA trust **bundle** (CA *certs* only, never the key), the
+transport reading live trust + leaf per handshake (zero-downtime), reissuance as
+the self-service renewal path, a pluggable issuer (self-managed / external PKI),
+and the count of members still on the old CA as the provable convergence signal —
+planned rotation and lost-key recovery being one flow, since rotation never needs
+the *old* CA key. `cluster rotate-ca` drives it; `cluster status` shows progress.
 
-Track B (CA) still owes its own ADR (the multi-CA trust bundle, pluggable issuance,
-lost-key recovery) when the work starts. The KEK-rotation half of v0.8 is done; the
-release is not cut until Track B lands (or the operator decides to split it).
+The KEK-rotation half of v0.8 is done; the release is not cut until Track B lands
+(or the operator decides to split it). Track B passes are not yet broken out —
+the ADR is the next thing to settle before code.
 
 ## Later versions
 
