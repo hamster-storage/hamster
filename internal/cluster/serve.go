@@ -238,7 +238,7 @@ func (c *clusterMetadata) ApplyAbortMultipartUpload(p meta.AbortMultipartUpload)
 // clusterObjects is gateway.ObjectBackend over the coordinator.
 type clusterObjects struct{ n *Node }
 
-func (c *clusterObjects) Put(bucket, key string, body []byte, contentType string, userMeta map[string]string) ([]byte, error) {
+func (c *clusterObjects) Put(bucket, key string, body []byte, contentType string, userMeta map[string]string) ([]byte, meta.VersionID, error) {
 	type outcome struct {
 		res coord.PutResult
 		err error
@@ -250,9 +250,35 @@ func (c *clusterObjects) Put(bucket, key string, body []byte, contentType string
 	})
 	out := <-ch
 	if out.err != nil {
+		return nil, meta.VersionID{}, mapCoordErr(out.err)
+	}
+	return out.res.ETag, out.res.VersionID, nil
+}
+
+func (c *clusterObjects) GetVersion(bucket, key string, vid meta.VersionID) ([]byte, error) {
+	type outcome struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan outcome, 1)
+	var found bool
+	c.n.loop.Post(func() {
+		entry, ok := c.n.raft.Store().GetVersion(bucket, key, vid)
+		if !ok {
+			ch <- outcome{nil, nil}
+			return
+		}
+		found = true
+		c.n.coord.GetEntry(entry, 0, -1, func(b []byte, err error) { ch <- outcome{b, err} })
+	})
+	out := <-ch
+	if !found {
+		return nil, gateway.ErrNoSuchKey
+	}
+	if out.err != nil {
 		return nil, mapCoordErr(out.err)
 	}
-	return out.res.ETag, nil
+	return out.data, nil
 }
 
 func (c *clusterObjects) Get(bucket, key string) (data []byte, entry meta.VersionEntry, err error) {

@@ -131,8 +131,10 @@ type Config struct {
 // one consistent read, so response headers can never describe a different
 // version than the body.
 type ObjectBackend interface {
-	Put(bucket, key string, body []byte, contentType string, userMeta map[string]string) (etag []byte, err error)
+	Put(bucket, key string, body []byte, contentType string, userMeta map[string]string) (etag []byte, versionID meta.VersionID, err error)
 	Get(bucket, key string) (data []byte, entry meta.VersionEntry, err error)
+	// GetVersion serves a specific version's bytes (the ?versionId read).
+	GetVersion(bucket, key string, vid meta.VersionID) (data []byte, err error)
 	// DeleteShards best-effort reclaims a displaced version's shards.
 	DeleteShards(e meta.VersionEntry)
 }

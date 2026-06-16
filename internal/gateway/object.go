@@ -87,12 +87,14 @@ func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *s
 		}
 		return
 	}
-	etag, err := g.cfg.Objects.Put(bucket, key, body, r.Header.Get("Content-Type"), userMetadata(r.Header))
+	etag, vid, err := g.cfg.Objects.Put(bucket, key, body, r.Header.Get("Content-Type"), userMetadata(r.Header))
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
+	state := g.bucketVersioning(bucket)
 	w.Header().Set("ETag", quoteETag(etag))
+	setVersionID(w, state, meta.VersionEntry{VersionID: vid, NullVersion: state != meta.VersioningEnabled})
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -150,11 +152,27 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	versionID := r.URL.Query().Get("versionId")
 
 	if g.cfg.Objects != nil {
-		// The cluster path does not resolve a specific version or surface
-		// version IDs yet (v0.5 pass 4); refuse ?versionId rather than serve
-		// the current version under a versioned request.
+		state := g.bucketVersioning(bucket)
 		if versionID != "" {
-			writeError(w, r, errNotImplemented)
+			entry, err := g.resolveVersion(bucket, key, versionID)
+			if err != nil {
+				writeError(w, r, err)
+				return
+			}
+			if entry.Kind == meta.KindDeleteMarker {
+				w.Header().Set("x-amz-delete-marker", "true")
+				setVersionID(w, state, entry)
+				w.Header().Set("Last-Modified", time.UnixMilli(entry.CreatedUnixMS).UTC().Format(http.TimeFormat))
+				writeError(w, r, errMethodNotAllowed)
+				return
+			}
+			data, err := g.cfg.Objects.GetVersion(bucket, key, entry.VersionID)
+			if err != nil {
+				writeError(w, r, err)
+				return
+			}
+			setVersionID(w, state, entry)
+			g.serveEntry(w, r, entry, data)
 			return
 		}
 		data, entry, err := g.cfg.Objects.Get(bucket, key)
@@ -162,6 +180,7 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 			writeError(w, r, err)
 			return
 		}
+		setVersionID(w, state, entry)
 		g.serveEntry(w, r, entry, data)
 		return
 	}
@@ -255,12 +274,8 @@ func (g *Gateway) deleteObject(w http.ResponseWriter, r *http.Request, bucket, k
 
 // deleteObjectVersion permanently removes one version (S3 DELETE with a version
 // ID) — the operation that frees a version's data. A missing version is an
-// idempotent 204. The cluster path's versioned reclaim lands in pass 4.
+// idempotent 204.
 func (g *Gateway) deleteObjectVersion(w http.ResponseWriter, r *http.Request, bucket, key, versionID string) {
-	if g.cfg.Objects != nil {
-		writeError(w, r, errNotImplemented)
-		return
-	}
 	entry, err := g.resolveVersion(bucket, key, versionID)
 	if errors.Is(err, meta.ErrNoSuchVersion) {
 		// Deleting a version that is not there echoes the requested id, 204.
@@ -283,10 +298,15 @@ func (g *Gateway) deleteObjectVersion(w http.ResponseWriter, r *http.Request, bu
 		writeError(w, r, applyErr)
 		return
 	}
-	// Only an object version holds data; a delete marker frees nothing.
+	// Only an object version holds data; a delete marker frees nothing. Reclaim
+	// shards on the cluster path, blobs on the single node.
 	if res.Removed && entry.Kind == meta.KindObject {
-		for _, dataID := range entry.DataIDs() {
-			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+		if g.cfg.Objects != nil {
+			g.cfg.Objects.DeleteShards(entry)
+		} else {
+			for _, dataID := range entry.DataIDs() {
+				_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+			}
 		}
 	}
 	w.Header().Set("x-amz-version-id", versionLabel(entry))
