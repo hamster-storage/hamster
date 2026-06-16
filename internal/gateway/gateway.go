@@ -84,6 +84,7 @@ type Metadata interface {
 
 	ApplyCreateBucket(meta.CreateBucket) error
 	ApplyDeleteBucket(meta.DeleteBucket) error
+	ApplySetBucketVersioning(meta.SetBucketVersioning) error
 	ApplyPutObject(meta.PutObject) (meta.PutResult, error)
 	ApplyDeleteObject(meta.DeleteObject) (meta.DeleteObjectResult, error)
 	ApplyCreateMultipartUpload(meta.CreateMultipartUpload) error
@@ -246,6 +247,11 @@ func (l *loopMetadata) ApplyDeleteBucket(p meta.DeleteBucket) (err error) {
 	return
 }
 
+func (l *loopMetadata) ApplySetBucketVersioning(p meta.SetBucketVersioning) (err error) {
+	l.on(func() { err = l.store.ApplySetBucketVersioning(p) })
+	return
+}
+
 func (l *loopMetadata) ApplyPutObject(p meta.PutObject) (res meta.PutResult, err error) {
 	l.on(func() { res, err = l.store.ApplyPutObject(p) })
 	return
@@ -341,6 +347,10 @@ func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, id *sigv4.
 	q := r.URL.Query()
 	switch r.Method {
 	case http.MethodPut:
+		if q.Has("versioning") {
+			g.putBucketVersioning(w, r, id, bucket)
+			return
+		}
 		if len(q) != 0 {
 			writeError(w, r, errNotImplemented)
 			return
@@ -358,6 +368,8 @@ func (g *Gateway) serveBucket(w http.ResponseWriter, r *http.Request, id *sigv4.
 		switch {
 		case q.Has("location"):
 			g.getBucketLocation(w, r, bucket)
+		case q.Has("versioning"):
+			g.getBucketVersioning(w, r, bucket)
 		case q.Has("uploads"):
 			g.listMultipartUploads(w, r, bucket)
 		case q.Get("list-type") == "2":
@@ -438,9 +450,10 @@ func (g *Gateway) serveObject(w http.ResponseWriter, r *http.Request, id *sigv4.
 }
 
 // hasSubresource reports whether the query addresses an S3 subresource or
-// operation the gateway does not implement yet (?acl, ?tagging, ?uploads,
-// ?versioning, ...). SigV4 query parameters and listing parameters are not
-// subresources.
+// operation the gateway does not implement yet (?acl, ?tagging, ...).
+// Subresources that are implemented (?versioning, ?uploads, ?location) are
+// routed before this check. SigV4 query parameters and listing parameters are
+// not subresources.
 func hasSubresource(q map[string][]string) bool {
 	for k := range q {
 		switch k {

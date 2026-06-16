@@ -37,7 +37,7 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.2](https://github.com/hamster-storage/hamster/releases/tag/v0.2.0) | Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | ✅ |
 | [v0.3](https://github.com/hamster-storage/hamster/releases/tag/v0.3.0) | Erasure-coded durability with self-healing repair, the S3 endpoint served from the cluster | ✅ |
 | [v0.4](https://github.com/hamster-storage/hamster/releases/tag/v0.4.0) | Partitioned placement (failure-domain spread, capacity weighting) and online rebalancing — drain, replace, remove, grow, downsize — plus a continuous background scrubber that self-heals bitrot and lost shards | ✅ |
-| v0.5 | Object versioning | planned |
+| v0.5 | Object versioning — per-bucket versioning config, version IDs, delete markers, `ListObjectVersions` | 🚧 in progress |
 | v0.6 | Object lock and WORM retention (GOVERNANCE and COMPLIANCE modes) | planned |
 | v0.7 | Encryption at rest (SSE-S3) and key/CA rotation | planned |
 | v0.8 | Upgrade machinery: feature gates, health interlock, the upgrade test suite | planned |

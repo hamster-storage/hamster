@@ -143,6 +143,49 @@ func TestBucketLifecycle(t *testing.T) {
 	e.expect(e.do("HEAD", "/docs", nil, nil), 404)
 }
 
+func TestBucketVersioningConfig(t *testing.T) {
+	e := newEnv(t)
+
+	// Missing bucket: GetBucketVersioning is a 404, like any bucket subresource.
+	if code := e.errorCode(e.do("GET", "/vault?versioning", nil, nil), 404); code != "NoSuchBucket" {
+		t.Fatalf("versioning on missing bucket: %s", code)
+	}
+
+	e.expect(e.do("PUT", "/vault", nil, nil), 200)
+
+	// A fresh bucket is Unversioned: an empty <VersioningConfiguration/>, no Status.
+	body := e.expect(e.do("GET", "/vault?versioning", nil, nil), 200)
+	if strings.Contains(string(body), "<Status>") {
+		t.Fatalf("unversioned bucket should report no Status:\n%s", body)
+	}
+
+	enable := []byte(`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`)
+	e.expect(e.do("PUT", "/vault?versioning", enable, nil), 200)
+	body = e.expect(e.do("GET", "/vault?versioning", nil, nil), 200)
+	if !strings.Contains(string(body), "<Status>Enabled</Status>") {
+		t.Fatalf("expected Enabled:\n%s", body)
+	}
+
+	suspend := []byte(`<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>`)
+	e.expect(e.do("PUT", "/vault?versioning", suspend, nil), 200)
+	body = e.expect(e.do("GET", "/vault?versioning", nil, nil), 200)
+	if !strings.Contains(string(body), "<Status>Suspended</Status>") {
+		t.Fatalf("expected Suspended:\n%s", body)
+	}
+
+	// A Status S3 does not define is MalformedXML, not a silent accept.
+	bad := []byte(`<VersioningConfiguration><Status>Paused</Status></VersioningConfiguration>`)
+	if code := e.errorCode(e.do("PUT", "/vault?versioning", bad, nil), 400); code != "MalformedXML" {
+		t.Fatalf("bad status: %s", code)
+	}
+
+	// MFA Delete is a non-goal: refused honestly, never silently dropped.
+	mfa := []byte(`<VersioningConfiguration><Status>Enabled</Status><MfaDelete>Enabled</MfaDelete></VersioningConfiguration>`)
+	if code := e.errorCode(e.do("PUT", "/vault?versioning", mfa, nil), 501); code != "NotImplemented" {
+		t.Fatalf("mfa delete: %s", code)
+	}
+}
+
 func TestObjectRoundTrip(t *testing.T) {
 	e := newEnv(t)
 	e.expect(e.do("PUT", "/bkt", nil, nil), 200)
