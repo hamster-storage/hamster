@@ -55,6 +55,7 @@ func (n *Node) handleConn(conn *tls.Conn) {
 			resp.Error = "status requires a cluster certificate"
 		} else {
 			resp.Members = n.members()
+			resp.Encryption = n.encryptionLabel()
 		}
 		_ = writeFrame(conn, encodeStatusResponse(resp))
 	case reqDrain:
@@ -63,6 +64,8 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeRemoveResponse(n.handleRemove(conn, payload)))
 	case reqOptimize:
 		_ = writeFrame(conn, encodeOptimizeResponse(n.handleOptimize(conn)))
+	case reqEncrypt:
+		_ = writeFrame(conn, encodeEncryptResponse(n.handleEncrypt(conn)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }
@@ -280,6 +283,66 @@ func (n *Node) removeAttempt(nodeID string) error {
 // objects written when the cluster was smaller spread across the nodes added
 // since. Authenticated by a cluster certificate like drain; a non-leader answers
 // with the leader's dial address so the client can retry there.
+// encryptionLabel reads the cluster's encryption-at-rest posture (ADR-0021)
+// for `cluster status`: the algorithm name, or "" when the cluster does not
+// encrypt. Runs on the loop.
+func (n *Node) encryptionLabel() string {
+	label, _ := onLoop(n, 5*time.Second, func() string {
+		if n.raft.Store().EncryptionAlgorithm() == meta.EncAES256GCM {
+			return "AES256GCM"
+		}
+		return ""
+	})
+	return label
+}
+
+// handleEncrypt serves `cluster encrypt`: a leader-only proposal that turns on
+// the cluster's encryption posture (ADR-0021), authenticated by a cluster
+// certificate. Enable-only — there is no disable. A non-leader redirects.
+func (n *Node) handleEncrypt(conn *tls.Conn) encryptResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return encryptResponse{Error: "encrypt requires a cluster certificate"}
+	}
+	switch label, err := n.proposeEnableEncryption(); {
+	case errors.Is(err, raftnode.ErrNotLeader):
+		return encryptResponse{Error: notLeaderMsg, Leader: n.leaderDial()}
+	case err != nil:
+		return encryptResponse{Error: err.Error()}
+	default:
+		return encryptResponse{Encryption: label}
+	}
+}
+
+// proposeEnableEncryption commits the encryption posture (AES256GCM) through
+// Raft. Leader-only. It guards against the obvious footgun: a leader with no
+// KEK loaded refuses, since enabling there would make every encrypted write
+// fail — the operator must provision the key on every node first.
+func (n *Node) proposeEnableEncryption() (string, error) {
+	var label string
+	err, ok := onLoopAsync(n, 30*time.Second, func(done func(error)) {
+		if lead, _ := n.raft.Leader(); lead != n.cfg.RaftID {
+			done(raftnode.ErrNotLeader)
+			return
+		}
+		if !n.masterKey.Loaded() {
+			done(errors.New("this node has no master key loaded; pass -master-key-file on every node before enabling encryption"))
+			return
+		}
+		n.raft.Propose(meta.SetEncryptionPosture{
+			ProposedAtUnixMS: n.clock.Now().UnixMilli(), Algorithm: meta.EncAES256GCM,
+		}, func(_ any, e error) {
+			if e == nil {
+				label = "AES256GCM"
+			}
+			done(e)
+		})
+	})
+	if !ok {
+		return "", fmt.Errorf("cluster: encryption proposal timed out")
+	}
+	return label, err
+}
+
 func (n *Node) handleOptimize(conn *tls.Conn) optimizeResponse {
 	if len(conn.ConnectionState().PeerCertificates) == 0 {
 		return optimizeResponse{Error: "optimize requires a cluster certificate"}

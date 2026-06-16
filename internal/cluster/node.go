@@ -18,6 +18,7 @@ import (
 	"github.com/hamster-storage/hamster/internal/certs"
 	"github.com/hamster-storage/hamster/internal/coord"
 	"github.com/hamster-storage/hamster/internal/datapath"
+	"github.com/hamster-storage/hamster/internal/keys"
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/raftnode"
@@ -62,6 +63,7 @@ type Node struct {
 	data      *datapath.Service
 	coord     *coord.Coordinator
 	s3        *s3Server     // nil unless ServeS3 was asked for
+	masterKey keys.KEK      // the cluster KEK (ADR-0021), loaded from the operator's key source; zero if none
 	ready     chan struct{} // closed once the node is built; gates control conns
 	stopSync  chan struct{}
 
@@ -71,9 +73,30 @@ type Node struct {
 	stopped sync.Once
 }
 
+// Option configures a node at startup. Used for runtime inputs that must
+// not persist in node.conf — chiefly the cluster KEK (ADR-0021), which
+// lives only in memory.
+type Option func(*nodeOptions)
+
+type nodeOptions struct {
+	masterKey keys.KEK
+}
+
+// WithMasterKey supplies the loaded cluster KEK the node uses to wrap and
+// unwrap object keys. The key is held in memory only and never persisted —
+// the caller reads it from the operator's key source (a mounted file) at
+// startup. Omit it for an unencrypted cluster.
+func WithMasterKey(kek keys.KEK) Option {
+	return func(o *nodeOptions) { o.masterKey = kek }
+}
+
 // Run starts a cluster node from its data directory. The caller owns it
 // and must Stop it.
-func Run(dataDir string) (*Node, error) {
+func Run(dataDir string, opts ...Option) (*Node, error) {
+	var o nodeOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	dir := Dir(dataDir)
 	cfg, err := loadConfig(dir)
 	if err != nil {
@@ -113,7 +136,7 @@ func Run(dataDir string) (*Node, error) {
 		}
 	}
 	loop := sys.NewLoop()
-	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, ready: make(chan struct{}), stopSync: make(chan struct{})}
+	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, masterKey: o.masterKey, ready: make(chan struct{}), stopSync: make(chan struct{})}
 
 	peers := make(map[seam.NodeID]string)
 	raftPeers := make(map[uint64]seam.NodeID)
@@ -240,6 +263,16 @@ func Run(dataDir string) (*Node, error) {
 					Previous:       placeNodes(cl.Previous), // nil in steady state
 				}, true
 			},
+			// Encryption at rest (ADR-0021): the write posture is the
+			// replicated cluster fact; the KEK is this node's in-memory key.
+			// A node whose posture is on but whose KEK never loaded carries a
+			// zero KEK here, so the coordinator refuses encrypted work loudly
+			// rather than serving ciphertext. Entropy is crypto/rand in
+			// production (the DEK's only randomness).
+			Encryption: func() (keys.KEK, bool) {
+				return n.masterKey, rn.Store().EncryptionAlgorithm() != meta.EncNone
+			},
+			Entropy: rand.Reader,
 		})
 		// The continuous background scrubber (ADR-0009): every node starts it, but
 		// only the leader actually scrubs (it gates on leadership), so this simply
