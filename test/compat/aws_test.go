@@ -174,3 +174,40 @@ func TestAWSVersioning(t *testing.T) {
 	}
 	run(t, "s3", "rb", "s3://vbucket")
 }
+
+// TestAWSObjectLock drives the v0.6 object-lock surface through the real aws CLI:
+// creating a lock-enabled bucket, the bucket lock configuration, per-object
+// retention, and legal hold. The COMPLIANCE object is left in place — it cannot
+// be deleted, which is the point — and the per-test server is discarded with it.
+func TestAWSObjectLock(t *testing.T) {
+	bin := needTool(t, "aws")
+	s := startServer(t)
+	env := s.awsEnv(t)
+	run := func(t *testing.T, args ...string) string {
+		return runTool(t, env, bin, append([]string{"--endpoint-url", s.URL}, args...)...)
+	}
+	dir := t.TempDir()
+	writeRandomFile(t, filepath.Join(dir, "doc.bin"), 21, 16<<10)
+
+	run(t, "s3api", "create-bucket", "--bucket", "locked", "--object-lock-enabled-for-bucket")
+
+	// Bucket default retention round-trips.
+	run(t, "s3api", "put-object-lock-configuration", "--bucket", "locked",
+		"--object-lock-configuration", `{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"GOVERNANCE","Days":1}}}`)
+	if got := run(t, "s3api", "get-object-lock-configuration", "--bucket", "locked"); !strings.Contains(got, "GOVERNANCE") {
+		t.Fatalf("get-object-lock-configuration:\n%s", got)
+	}
+
+	// An object under explicit COMPLIANCE retention.
+	run(t, "s3api", "put-object", "--bucket", "locked", "--key", "doc", "--body", filepath.Join(dir, "doc.bin"),
+		"--object-lock-mode", "COMPLIANCE", "--object-lock-retain-until-date", "2099-01-01T00:00:00Z")
+	if got := run(t, "s3api", "get-object-retention", "--bucket", "locked", "--key", "doc"); !strings.Contains(got, "COMPLIANCE") {
+		t.Fatalf("get-object-retention:\n%s", got)
+	}
+
+	// Legal hold toggles and reads back.
+	run(t, "s3api", "put-object-legal-hold", "--bucket", "locked", "--key", "doc", "--legal-hold", "Status=ON")
+	if got := run(t, "s3api", "get-object-legal-hold", "--bucket", "locked", "--key", "doc"); !strings.Contains(got, "ON") {
+		t.Fatalf("get-object-legal-hold:\n%s", got)
+	}
+}
