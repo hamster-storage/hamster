@@ -15,6 +15,8 @@ func (s *Store) Apply(p any) (any, error) {
 		return nil, s.ApplyDeleteBucket(c)
 	case SetBucketVersioning:
 		return nil, s.ApplySetBucketVersioning(c)
+	case SetObjectLockConfiguration:
+		return nil, s.ApplySetObjectLockConfiguration(c)
 	case PutObject:
 		return s.ApplyPutObject(c)
 	case DeleteObject:

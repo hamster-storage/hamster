@@ -21,6 +21,8 @@ func fullProposals() []any {
 		CreateBucket{ProposedAtUnixMS: 1700000000001, Bucket: "docs", ObjectLockEnabled: true},
 		DeleteBucket{ProposedAtUnixMS: 1700000000002, Bucket: "docs"},
 		SetBucketVersioning{ProposedAtUnixMS: 1700000000003, Bucket: "docs", State: VersioningSuspended},
+		SetObjectLockConfiguration{ProposedAtUnixMS: 1700000000018, Bucket: "docs",
+			DefaultRetentionMode: RetentionGovernance, DefaultRetentionDays: 30},
 		PutObject{
 			ProposedAtUnixMS: 1700000000004, Bucket: "docs", Key: "dir/report.pdf",
 			VersionID: vid, Size: 12345, ETag: []byte{0xE1, 0xE2}, ContentType: "application/pdf",
@@ -131,9 +133,9 @@ func TestProposalDecodeErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":      {},
 		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		// Field 20 is the next unassigned command slot — a newer node's
+		// Field 21 is the next unassigned command slot — a newer node's
 		// command this build does not know, which must refuse, not half-apply.
-		"unknown_command": encode(envelope(20)),
+		"unknown_command": encode(envelope(21)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -145,7 +147,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(20)))
+	_, err := DecodeProposal(encode(envelope(21)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

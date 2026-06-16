@@ -63,6 +63,50 @@ func TestUnversionedPutReplaces(t *testing.T) {
 	}
 }
 
+func TestObjectLockConfiguration(t *testing.T) {
+	e := newEnv(t)
+	e.mustCreateBucket("vault", true) // object lock enabled at creation
+	if cfg, _ := e.s.GetBucket("vault"); !cfg.ObjectLockEnabled || cfg.Versioning != VersioningEnabled {
+		t.Fatal("object-lock bucket should enable versioning")
+	}
+
+	// A default retention rule round-trips in days/years shape.
+	if err := e.s.ApplySetObjectLockConfiguration(SetObjectLockConfiguration{
+		ProposedAtUnixMS: e.tick(), Bucket: "vault", DefaultRetentionMode: RetentionCompliance, DefaultRetentionDays: 30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := e.s.GetBucket("vault")
+	if cfg.DefaultRetentionMode != RetentionCompliance || cfg.DefaultRetentionDays != 30 || cfg.DefaultRetentionYears != 0 {
+		t.Fatalf("default retention = %v/%d/%d", cfg.DefaultRetentionMode, cfg.DefaultRetentionDays, cfg.DefaultRetentionYears)
+	}
+
+	// Exactly one of days/years; both (or neither, with a mode) is invalid.
+	if err := e.s.ApplySetObjectLockConfiguration(SetObjectLockConfiguration{
+		ProposedAtUnixMS: e.tick(), Bucket: "vault", DefaultRetentionMode: RetentionGovernance, DefaultRetentionDays: 1, DefaultRetentionYears: 1,
+	}); !errors.Is(err, ErrInvalidRetention) {
+		t.Fatalf("both days and years: %v", err)
+	}
+
+	// Clearing the default.
+	if err := e.s.ApplySetObjectLockConfiguration(SetObjectLockConfiguration{
+		ProposedAtUnixMS: e.tick(), Bucket: "vault", DefaultRetentionMode: RetentionNone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ := e.s.GetBucket("vault"); cfg.DefaultRetentionMode != RetentionNone {
+		t.Fatal("default retention not cleared")
+	}
+
+	// A bucket without object lock cannot take a lock configuration.
+	e.mustCreateBucket("plain", false)
+	if err := e.s.ApplySetObjectLockConfiguration(SetObjectLockConfiguration{
+		ProposedAtUnixMS: e.tick(), Bucket: "plain", DefaultRetentionMode: RetentionGovernance, DefaultRetentionDays: 1,
+	}); !errors.Is(err, ErrInvalidRetention) {
+		t.Fatalf("lock config on non-lock bucket: %v", err)
+	}
+}
+
 func TestListObjectVersions(t *testing.T) {
 	e := newEnv(t)
 	e.mustCreateBucket("docs", false)

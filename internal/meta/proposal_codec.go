@@ -43,6 +43,7 @@ const (
 	propSetNodeDraining   = 17 // member drain flag (ADR-0004)
 	propSetNodeReplacedBy = 18 // member replacement pairing (ADR-0004)
 	propReEncodeObject    = 19 // version EC re-encode (ADR-0004, ADR-0015)
+	propSetObjectLock     = 20 // bucket object-lock default retention (ADR-0006)
 )
 
 // EncodeProposal encodes one proposal for the Raft log. p must be one of
@@ -64,6 +65,12 @@ func EncodeProposal(p any) []byte {
 		atMS, num = c.ProposedAtUnixMS, propSetVersioning
 		cmd = putString(cmd, 1, c.Bucket)
 		cmd = putUvarint(cmd, 2, uint64(c.State))
+	case SetObjectLockConfiguration:
+		atMS, num = c.ProposedAtUnixMS, propSetObjectLock
+		cmd = putString(cmd, 1, c.Bucket)
+		cmd = putUvarint(cmd, 2, uint64(c.DefaultRetentionMode))
+		cmd = putUvarint(cmd, 3, uint64(c.DefaultRetentionDays))
+		cmd = putUvarint(cmd, 4, uint64(c.DefaultRetentionYears))
 	case PutObject:
 		atMS, num = c.ProposedAtUnixMS, propPutObject
 		cmd = putString(cmd, 1, c.Bucket)
@@ -216,7 +223,7 @@ func DecodeProposal(b []byte) (any, error) {
 			d.uint32() // format_version: additive, no branching yet
 		case d.num == propAt:
 			atMS = d.int64()
-		case d.num >= propCreateBucket && d.num <= propReEncodeObject:
+		case d.num >= propCreateBucket && d.num <= propSetObjectLock:
 			if seen {
 				d.fail("proposal carries more than one command")
 				break
@@ -273,6 +280,23 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.Bucket = d.str()
 			case 2:
 				c.State = VersioningState(d.enum8())
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propSetObjectLock:
+		c := SetObjectLockConfiguration{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.Bucket = d.str()
+			case 2:
+				c.DefaultRetentionMode = RetentionMode(d.enum8())
+			case 3:
+				c.DefaultRetentionDays = d.uint32()
+			case 4:
+				c.DefaultRetentionYears = d.uint32()
 			default:
 				d.skipUnknown(nil)
 			}

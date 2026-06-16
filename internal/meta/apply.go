@@ -74,6 +74,40 @@ func (s *Store) ApplySetBucketVersioning(p SetBucketVersioning) (err error) {
 	return nil
 }
 
+// ApplySetObjectLockConfiguration sets the bucket's default retention rule
+// (ADR-0006). Object lock must already be enabled on the bucket. Mode
+// RetentionNone clears the default; otherwise exactly one of Days or Years must
+// be non-zero — the rule is stored in this S3 shape, never as an absolute date.
+func (s *Store) ApplySetObjectLockConfiguration(p SetObjectLockConfiguration) (err error) {
+	defer s.txn(&err)()
+	cfg, ok := s.GetBucket(p.Bucket)
+	if !ok {
+		return ErrNoSuchBucket
+	}
+	if !cfg.ObjectLockEnabled {
+		return ErrInvalidRetention
+	}
+	switch p.DefaultRetentionMode {
+	case RetentionNone:
+		// Clearing the default: no duration may be set.
+		if p.DefaultRetentionDays != 0 || p.DefaultRetentionYears != 0 {
+			return ErrInvalidRetention
+		}
+	case RetentionGovernance, RetentionCompliance:
+		// A default rule needs exactly one of days or years.
+		if (p.DefaultRetentionDays == 0) == (p.DefaultRetentionYears == 0) {
+			return ErrInvalidRetention
+		}
+	default:
+		return ErrInvalidRetention
+	}
+	cfg.DefaultRetentionMode = p.DefaultRetentionMode
+	cfg.DefaultRetentionDays = p.DefaultRetentionDays
+	cfg.DefaultRetentionYears = p.DefaultRetentionYears
+	s.kv.set(bucketRowKey(p.Bucket), cfg)
+	return nil
+}
+
 // ApplyPutObject commits one object version: insert the v/ row, replace
 // the prior null version when versioning is not enabled, upsert the c/
 // row — one transaction.

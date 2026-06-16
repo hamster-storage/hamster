@@ -186,6 +186,45 @@ func TestBucketVersioningConfig(t *testing.T) {
 	}
 }
 
+func TestObjectLockConfig(t *testing.T) {
+	e := newEnv(t)
+
+	// Creating a bucket with object lock enables versioning on it.
+	e.expect(e.do("PUT", "/vault", nil, map[string]string{"x-amz-bucket-object-lock-enabled": "true"}), 200)
+	if body := e.expect(e.do("GET", "/vault?versioning", nil, nil), 200); !strings.Contains(string(body), "<Status>Enabled</Status>") {
+		t.Fatalf("object-lock bucket should report versioning Enabled:\n%s", body)
+	}
+
+	// A fresh lock bucket reports Enabled with no default rule.
+	body := e.expect(e.do("GET", "/vault?object-lock", nil, nil), 200)
+	if !strings.Contains(string(body), "<ObjectLockEnabled>Enabled</ObjectLockEnabled>") || strings.Contains(string(body), "<Rule>") {
+		t.Fatalf("fresh lock config:\n%s", body)
+	}
+
+	// Set a default retention rule; it round-trips in days shape.
+	rule := []byte(`<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>30</Days></DefaultRetention></Rule></ObjectLockConfiguration>`)
+	e.expect(e.do("PUT", "/vault?object-lock", rule, nil), 200)
+	body = e.expect(e.do("GET", "/vault?object-lock", nil, nil), 200)
+	if !strings.Contains(string(body), "<Mode>GOVERNANCE</Mode>") || !strings.Contains(string(body), "<Days>30</Days>") {
+		t.Fatalf("default retention:\n%s", body)
+	}
+
+	// Both Days and Years is malformed.
+	bad := []byte(`<ObjectLockConfiguration><Rule><DefaultRetention><Mode>COMPLIANCE</Mode><Days>1</Days><Years>1</Years></DefaultRetention></Rule></ObjectLockConfiguration>`)
+	if code := e.errorCode(e.do("PUT", "/vault?object-lock", bad, nil), 400); code != "MalformedXML" {
+		t.Fatalf("both days and years: %s", code)
+	}
+
+	// A bucket without object lock has no configuration and rejects one.
+	e.expect(e.do("PUT", "/plain", nil, nil), 200)
+	if code := e.errorCode(e.do("GET", "/plain?object-lock", nil, nil), 404); code != "ObjectLockConfigurationNotFoundError" {
+		t.Fatalf("get on non-lock bucket: %s", code)
+	}
+	if code := e.errorCode(e.do("PUT", "/plain?object-lock", rule, nil), 400); code != "InvalidRequest" {
+		t.Fatalf("put on non-lock bucket: %s", code)
+	}
+}
+
 func TestObjectVersioning(t *testing.T) {
 	e := newEnv(t)
 	e.expect(e.do("PUT", "/vault", nil, nil), 200)
@@ -640,9 +679,9 @@ func TestRequestValidation(t *testing.T) {
 	if code := e.errorCode(e.do("POST", "/bkt?notreal", nil, nil), 501); code != "NotImplemented" {
 		t.Fatalf("unknown bucket POST: %s", code)
 	}
-	if code := e.errorCode(e.do("PUT", "/locked", nil, map[string]string{
+	// Creating a bucket with object lock is supported as of v0.6 (it enables
+	// versioning); the full surface is covered in TestObjectLockConfig.
+	e.expect(e.do("PUT", "/locked", nil, map[string]string{
 		"x-amz-bucket-object-lock-enabled": "true",
-	}), 501); code != "NotImplemented" {
-		t.Fatalf("lock-enabled create: %s", code)
-	}
+	}), 200)
 }
