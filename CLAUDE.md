@@ -2,7 +2,7 @@
 
 Hamster is a self hosted, S3 compatible object store in a single Go binary, built around erasure coded durability and first class versioning and object lock.
 
-**Positioning:** the target user runs real workloads with compliance-shaped needs — retention, object lock, audits (HIPAA, SEC 17a-4 territory) — without a platform team. Design and performance work should serve that user: use the hardware well and be plenty fast, but never trade durability, compliance correctness, or operational simplicity for benchmark wins. Small-file microbenchmark supremacy is explicitly not a goal. In public-facing docs, name MinIO's community-edition archive as the factual origin story, but do not name or disparage other open source stores — generalize.
+**Positioning:** the target user runs real workloads with compliance-shaped needs — retention, object lock, audits (HIPAA, SEC 17a-4 territory) — without a platform team. Design and performance work should serve that user: use the hardware well and be plenty fast, but never trade durability, compliance correctness, or operational simplicity for benchmark wins. Small-file microbenchmark supremacy is explicitly not a goal. In public-facing docs, name MinIO's community-edition archive as the factual origin story. Naming other open-source stores is allowed where it serves the reader — chiefly the head-to-head comparison in [docs/COMPARISON.md](docs/COMPARISON.md) — provided it stays factual, neutral, and never disparaging, names where Hamster is itself behind, and is dated (the field moves). Outside that deliberate comparison, prefer to generalize rather than name rivals in passing.
 
 > **Status: early development (v0). Not production ready.** Nothing described in the docs is a guarantee yet; it is the design being built. Keep all documentation honest about this — features are goals until they ship and survive the simulation harness.
 
@@ -72,6 +72,7 @@ task release    # run the full gate, cross-compile, tag, and publish a GitHub re
 
 - [`docs/GLOSSARY.md`](docs/GLOSSARY.md) — the terminology: object, version, shard, stripe, partition, node, cluster, layout, transition, and the rest, grouped by layer and cross-linked. Start here if a term is unfamiliar.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the system design narrative: request paths, metadata/data separation, erasure coding, placement, upgrades, testing.
+- [`docs/COMPARISON.md`](docs/COMPARISON.md) — how Hamster compares to other S3-compatible stores (Ceph, the MinIO origin story, the breadth-first Apache rewrites, simpler single-node stores), including where Hamster is honestly behind. The one place docs name rivals; kept factual, neutral, and dated.
 - [`docs/SIMULATION.md`](docs/SIMULATION.md) — the testing strategy design: the deterministic simulation harness, the interface seam, fault model, invariants, and the end to end upgrade suite.
 - [`docs/METADATA.md`](docs/METADATA.md) — the metadata schema design: protobuf records, the BadgerDB keyspace, and how S3 operations map to transactions.
 - [`docs/ERASURE-CODING.md`](docs/ERASURE-CODING.md) — storage profiles: the k+m set, profile changes, small objects, the write-ack rule, and the single-node-to-cluster growth story.
