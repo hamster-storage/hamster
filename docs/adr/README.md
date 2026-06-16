@@ -39,6 +39,7 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0029](0029-ca-custody-and-issuance.md) | CA custody and issuance: self-managed default, external PKI supported, key never in Raft |
 | [0030](0030-single-cluster-port.md) | One cluster port: join/status shares the peer transport listener, split by ALPN |
 | [0031](0031-reencode-across-profiles.md) | Re-encoding existing data across storage profiles: a physical re-representation for downsize/upsize, COMPLIANCE-safe |
+| [0032](0032-master-key-rotation.md) | Master key rotation: metadata-only DEK rewrap, per-version KEK fingerprints, observable and provably complete |
 
 ## Template
 
