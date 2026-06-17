@@ -43,7 +43,7 @@ tasks:
     desc: Run the end-to-end suite against the real binary (real processes, loopback mTLS)
     cmds:
       - go vet -tags e2e ./test/e2e
-      - go test -tags e2e -count=1 -v -timeout 300s ./test/e2e
+      - go test -tags e2e -count=1 -v -timeout 600s ./test/e2e
 
   compat:
     desc: Run the third-party client compatibility suite (aws CLI, rclone, restic, s3cmd; absent tools skip)

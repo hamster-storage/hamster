@@ -140,7 +140,7 @@ Every simulated run drives a generated workload (PUTs, GETs, overwrites, deletes
 
 ## Layer 2: end to end tests (real binaries)
 
-> **Status:** the first incarnation exists (`test/e2e`, `task e2e`): the v0.2 cluster lifecycle against the built binary — init, token joins, status, leader failover on SIGINT, restart from disk, clean shutdown — plus an S3 serve smoke. The upgrade suite below arrives with the rolling-upgrade machinery (v0.9, [ADR-0034](adr/0034-rolling-upgrade-machinery.md)): per-node version advertisement, the health interlock, and a node-by-node roll under live load.
+> **Status:** the suite exists (`test/e2e`, `task e2e`): the v0.2 cluster lifecycle against the built binary — init, token joins, status, leader failover on SIGINT, restart from disk, clean shutdown — an S3 serve smoke, the erasure-coded object and operation suites, and the **rolling-upgrade suite** (v0.9, [ADR-0034](adr/0034-rolling-upgrade-machinery.md)): two binaries built from one source at generations N and N+1, a three-node cluster started on N with versioned + COMPLIANCE-locked data, then rolled node by node to N+1 honoring `cluster can-stop`, asserting continuous availability, zero data loss, the lock surviving, and the effective generation auto-rolling to N+1 only once the last node lands.
 
 ### Direct process execution, not containers
 
