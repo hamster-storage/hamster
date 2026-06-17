@@ -17,9 +17,12 @@ import (
 // state machines identical. Unknown fields inside a known command are
 // skipped, proto3-style: additive evolution within a command is legal, but
 // only once every node understands the field (ADR-0008 expand-then-
-// contract; the v0.8 feature gates enforce it mechanically). And there is
-// no unknown-field preservation: proposals are written once and never
-// rewritten.
+// contract). The additive discipline keeps most changes mixed-version-safe
+// with no gate at all; a non-additive change — chiefly a new command number,
+// which an old node refuses above — gates against the cluster's effective
+// generation when one first lands (ADR-0034: gate enforcement deferred to
+// first need). And there is no unknown-field preservation: proposals are
+// written once and never rewritten.
 
 const proposalFormatVersion = 1
 
