@@ -41,7 +41,7 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.6](https://github.com/hamster-storage/hamster/releases/tag/v0.6.0) | Object lock and WORM retention — GOVERNANCE and COMPLIANCE modes, legal holds, bucket default retention — on the single node and the cluster | ✅ |
 | [v0.7](https://github.com/hamster-storage/hamster/releases/tag/v0.7.0) | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | ✅ |
 | [v0.8](https://github.com/hamster-storage/hamster/releases/tag/v0.8.0) | Key and CA rotation: master-key rewrap and CA custody/rotation — both no-downtime, metadata- or trust-only | ✅ |
-| v0.9 | Upgrade machinery: feature gates, health interlock, the upgrade test suite | planned |
+| v0.9 | Upgrade machinery: cluster version advertisement, health interlock, the upgrade test suite | planned |
 | v0.10 | Zero-downtime rolling upgrades | planned |
 | v0.11 | Observability/Telemetry | planned |
 | v0.12 | Web console | planned |

@@ -33,7 +33,7 @@ Each v0 minor release carries one headline feature, in roughly this order. The o
 | v0.6 | Object lock: GOVERNANCE, COMPLIANCE, legal holds |
 | v0.7 | Encryption at rest (SSE-S3): envelope encryption over the framed stream, a pluggable key source, the SSE-S3 surface ([ADR-0021](adr/0021-envelope-encryption-at-rest.md)) |
 | v0.8 | Key and CA rotation: KEK rewrap under a new master key (object bytes untouched), and CA custody and rotation ([ADR-0022](adr/0022-cluster-mtls.md), [ADR-0029](adr/0029-ca-custody-and-issuance.md)) |
-| v0.9 | Upgrade machinery: feature gates, health interlock, the upgrade test suite |
+| v0.9 | Upgrade machinery: etcd-style cluster version advertisement, health interlock, the upgrade test suite ([ADR-0034](adr/0034-rolling-upgrade-machinery.md)) |
 | v0.10 | Zero-downtime rolling upgrades, validated by the upgrade test suite |
 | v0.11 | Observability and telemetry |
 | v0.12 | Web console ([ADR-0020](adr/0020-embedded-htmx-web-console.md): embedded, on the admin port, server-rendered with htmx) |
