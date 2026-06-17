@@ -79,6 +79,8 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeRotateCAResponse(n.handleRotateCA(conn)))
 	case reqReissue:
 		_ = writeFrame(conn, encodeReissueResponse(n.handleReissue(conn, payload)))
+	case reqCanStop:
+		_ = writeFrame(conn, encodeCanStopResponse(n.handleCanStop(conn, payload)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }

@@ -312,6 +312,37 @@ func Status(dataDir, addr string) (StatusReport, error) {
 	}, nil
 }
 
+// CanStop asks a node whether taking nodeID down for maintenance or upgrade is
+// safe (ADR-0034) — the advisory health interlock. An empty addr asks the local
+// node, authenticated by this node's own certificate (like Status). The verdict
+// is read-only and answered from the asked node's view, so no leader redirect.
+func CanStop(dataDir, addr, nodeID string) (safe bool, reason string, err error) {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return false, "", err
+	}
+	if addr == "" {
+		addr = cfg.JoinAddr
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return false, "", err
+	}
+	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqCanStop, encodeCanStopRequest(canStopRequest{NodeID: nodeID})))
+	if err != nil {
+		return false, "", err
+	}
+	resp, err := decodeCanStopResponse(buf)
+	if err != nil {
+		return false, "", err
+	}
+	if resp.Error != "" {
+		return false, "", fmt.Errorf("cluster: can-stop refused: %s", resp.Error)
+	}
+	return resp.Safe, resp.Reason, nil
+}
+
 // Drain marks a member draining (or clears it) — an operator command that
 // commits a leader-only metadata proposal (ADR-0004) over the cluster control
 // port, authenticated by this node's own certificate (like Status). An empty

@@ -22,19 +22,14 @@ decision 6: the cluster version auto-rolls etcd-style rather than via a manual
 admin finalize, because Hamster's additive formats make most changes auto-safe
 (etcd-like), so a manual gate only earns its keep for the rare non-additive change.
 
-Per-node version advertisement has landed (`SetNodeVersion`, the leader's
-`versionMonitor`, `cluster status` showing per-node version + effective generation
-+ skew note; `TestClusterVersionAdvertisement` proves a three-node roll). Two
-pieces remain, in order:
+Two of three pieces have landed: per-node version advertisement (`SetNodeVersion`,
+the leader's `versionMonitor`, `cluster status` showing per-node version +
+effective generation + skew note; `TestClusterVersionAdvertisement` proves a
+three-node roll), and the health interlock (`cluster can-stop <node>`, the quorum
++ no-other-down + no-open-transition check; `TestClusterCanStopInterlock` proves
+the quorum math at 1/2/3 voters). One piece remains:
 
-1. **The health interlock.** `cluster can-stop <node>`: safe only when the
-   remaining voters keep Raft quorum ([ADR-0017](adr/0017-raft-voter-cap-learners.md)),
-   no *other* node is currently down, and no layout transition is open
-   ([ADR-0004](adr/0004-partitioned-placement.md)) — the rolling discipline made
-   checkable (proceed only from full health, one node at a time). Advisory in v0.9;
-   v0.10's automated roll drives the same check. The data-plane dimension (EC
-   tolerance, not just quorum) is what etcd's interlock lacks and Hamster's adds.
-2. **The end-to-end upgrade suite** ([SIMULATION.md](SIMULATION.md) "the upgrade
+1. **The end-to-end upgrade suite** ([SIMULATION.md](SIMULATION.md) "the upgrade
    suite", [ADR-0009](adr/0009-deterministic-simulation-testing.md)): obtain the
    binary for version N (last release) and N+1 (this build), start at N, write
    versioned + object-locked data under live load, roll node-by-node to N+1

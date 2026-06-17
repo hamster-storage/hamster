@@ -27,6 +27,9 @@ commands:
            With -token, an uninitialized node joins first — one command,
            restart-safe
   status   show cluster membership from a running node
+  can-stop check whether taking a node down for maintenance/upgrade is safe now
+           (ADR-0034): quorum holds, no other node is down, no transition open.
+           Advisory — exits 0 (safe) or 1 (not); it never stops a node
   drain    take a node out of service: new writes steer off it, repair migrates
            its shards away. Reversible with undrain (e.g. for maintenance);
            follow with remove to decommission. If it shrinks the cluster past a
@@ -68,6 +71,8 @@ func clusterCmd(args []string) error {
 		return clusterRun(args[1:])
 	case "status":
 		return clusterStatus(args[1:])
+	case "can-stop":
+		return clusterCanStop(args[1:])
 	case "drain":
 		return clusterDrain(args[1:], true)
 	case "undrain":
@@ -409,6 +414,33 @@ func clusterStatus(args []string) error {
 		}
 		fmt.Println()
 	}
+	return nil
+}
+
+// clusterCanStop runs the advisory health interlock (ADR-0034): it asks whether
+// taking a node down for maintenance or upgrade is safe right now. It prints the
+// verdict and reason and exits 0 when safe, 1 when not — so a roll script can
+// gate on `hamster cluster can-stop <node> && stop-and-upgrade <node>`. Advisory
+// only: it never stops a node.
+func clusterCanStop(args []string) error {
+	fs := flag.NewFlagSet("cluster can-stop", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	node := fs.String("node", "", "the node to check (required)")
+	addr := fs.String("addr", "", "cluster listen address of the node to ask (default: this node's own)")
+	fs.Parse(args)
+	if *dataDir == "" || *node == "" {
+		return fmt.Errorf("-data-dir and -node are required")
+	}
+	safe, reason, err := cluster.CanStop(*dataDir, *addr, *node)
+	if err != nil {
+		return err
+	}
+	if safe {
+		fmt.Printf("can-stop %s: YES — %s\n", *node, reason)
+		return nil
+	}
+	fmt.Printf("can-stop %s: NO — %s\n", *node, reason)
+	os.Exit(1)
 	return nil
 }
 

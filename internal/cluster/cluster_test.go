@@ -949,6 +949,83 @@ func TestClusterVersionAdvertisement(t *testing.T) {
 	waitEffectiveGeneration(t, d1, 2, "effective rolls to 2 once the last node upgrades")
 }
 
+// TestClusterCanStopInterlock proves the advisory health interlock's quorum
+// dimension (ADR-0034): a voter is safe to stop only when a Raft majority
+// survives without it. A lone voter and a two-voter cluster refuse; a three-voter
+// cluster permits one. An unknown node is refused. (The other-node-down and
+// open-transition conditions are exercised end to end under real traffic.)
+func TestClusterCanStopInterlock(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "interlock", "n1", freeAddr(t), "", 0, now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	waitStatus(t, d1, "", "n1 leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].Leader
+	})
+
+	mustCanStop := func(node string, wantSafe bool, what string) {
+		t.Helper()
+		safe, reason, err := CanStop(d1, "", node)
+		if err != nil {
+			t.Fatalf("can-stop %s (%s): %v", node, what, err)
+		}
+		if safe != wantSafe {
+			t.Fatalf("can-stop %s (%s): safe=%v, want %v (reason: %s)", node, what, safe, wantSafe, reason)
+		}
+	}
+
+	// One voter: stopping it loses the cluster — refused.
+	mustCanStop("n1", false, "lone voter")
+	// An unknown node is refused.
+	if safe, reason, _ := CanStop(d1, "", "ghost"); safe || !strings.Contains(reason, "not a cluster member") {
+		t.Fatalf("can-stop ghost: safe=%v reason=%q, want refusal naming an unknown member", safe, reason)
+	}
+
+	// Two voters: a majority is 2, so stopping either still refuses.
+	tok, err := MintToken(d1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Join(d2, "n2", freeAddr(t), tok, "", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	n2, err := Run(d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n2.Stop()
+	waitStatus(t, d1, "", "two voters", func(ms []Member) bool {
+		return len(ms) == 2 && voters(ms) == 2
+	})
+	mustCanStop("n1", false, "two voters: no majority survives")
+
+	// Three voters: a majority is 2, so one can be stopped — the first size a
+	// rolling upgrade is safe at.
+	tok3, err := MintToken(d1, time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Join(d3, "n3", freeAddr(t), tok3, "", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	n3, err := Run(d3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n3.Stop()
+	waitStatus(t, d1, "", "three voters", func(ms []Member) bool {
+		return len(ms) == 3 && voters(ms) == 3
+	})
+	mustCanStop("n2", true, "three voters: a majority survives")
+}
+
 func TestClusterCapacityWeights(t *testing.T) {
 	now := time.Now()
 	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
