@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 Partially supersedes [ADR-0008](0008-versioned-formats-rolling-upgrades.md)
 decision 6 (a manually-finalized cluster version): the cluster version auto-rolls
@@ -45,23 +45,65 @@ reserve for the day a genuinely irreversible change needs it.
 
 ## Decision
 
-**1. The cluster version auto-rolls etcd-style.** Each node advertises its binary
-version in its replicated `NodeRecord` (the reserved `binary_version` field). The
-cluster's effective version is the **minimum across live members**, recomputed as
-membership and versions change — exactly etcd's cluster version. There is no
-manual finalize step in the common path. A feature that requires every node
-(should one ever exist) activates when the effective version reaches it; until
-then it is dormant, and because the version only rolls forward once the last node
-is upgraded, mixed-version operation never half-enables it.
+**1. The cluster version auto-rolls etcd-style, over a declared generation — not
+the release string.** Two distinct facts ride in each node's replicated
+`NodeRecord`:
+
+- `binary_version` — a *string* (e.g. `v0.11.0`, `v0.11.0-rc.1`), for display
+  only. `cluster status` shows it so a human sees exactly which build each node
+  runs.
+- the **declared protocol generation** — a small *monotonic integer* the binary
+  owns. This is what gating and the skew check compare. The cluster's **effective
+  generation is the minimum across live members**, recomputed as membership and
+  versions change — exactly etcd's cluster version. There is no manual finalize in
+  the common path: a feature that requires every node activates when the effective
+  generation reaches its threshold, and because the generation only rolls forward
+  once the last node is upgraded, mixed-version operation never half-enables it.
+
+The generation is decoupled from the release number on purpose, and the rule that
+keeps it sound is that **it advances by at most one per release, and only when
+that release carries a *coordinated* change** — one old nodes cannot safely ignore
+(a new Raft command type, an all-or-nothing behavior). A purely additive release
+does not advance it at all. So the generation *lags* the release string and moves
+one notch at a time:
+
+| release | generation | why |
+|---|---|---|
+| v0.9 | 1 | baseline |
+| v0.10 | 1 | additive-only — no tick |
+| v0.11 | 2 | first new command type — +1 |
+| v0.12 | 2 | additive-only — no tick |
+
+Several coordinated changes shipping in one release still advance it by one: they
+all gate against the same threshold (`activate when effective generation ≥ N`) — a
+gate is a `≥` test many features share, not a per-change counter. And **local
+development iteration does not consume generation numbers**: the integer
+coordinates *independently-deployed* nodes, so while iterating on an unreleased
+build (where the developer controls every node) a format change in flight is
+handled by wiping the test cluster and reusing the in-flight target generation,
+never by ticking through 2→3→4. Only cutting the release makes a `+1` real. That
+is what keeps the sequence dense — a shipped cluster never faces a 1→5 jump,
+because every release is `+1` or `+0`.
+
+**The one-generation skew rule.** Because expand-then-contract spans exactly two
+adjacent generations, a node's generation must be at most one ahead of the
+cluster's effective generation — the upgrade-one-step-at-a-time discipline
+([ADR-0008](0008-versioned-formats-rolling-upgrades.md)) made checkable, the
+analogue of Kubernetes' version-skew policy (no 1.29→1.31 jump). The dense
+generation sequence is what makes this honest: one release is always one step. In
+v0.9 the check is **advisory**, like the interlock — `cluster status` surfaces the
+skew and the join/`can-stop` paths warn, but nothing refuses; v0.10's coordinated
+roll enforces it by never stepping a node more than one generation past the
+cluster.
 
 **2. Feature-gate *enforcement* is deferred to first need.** v0.9 ships the
 version *advertisement* and its display, not a gate framework, because v0.9 adds
 no change that needs one — the additive discipline already covers field additions,
 and there is no new command type this release. When the first non-additive change
-lands (a new Raft command, say), it registers a gate against the effective version
-(don't propose the command until every node can apply it) — a small, local
-addition then, on the foundation laid here. A manual hold ("don't roll the version
-past N yet") can be added at that point if a future change is ever irreversible
+lands (a new Raft command, say), it registers a gate against the effective
+generation (don't propose the command until every node can apply it) — a small,
+local addition then, on the foundation laid here. A manual hold ("don't roll the
+generation past N yet") can be added at that point if a future change is ever irreversible
 enough to want a rollback window; it is not built speculatively now.
 
 **3. The health interlock is a conservative full-health gate.** `cluster can-stop
@@ -81,7 +123,7 @@ N (the last release) and N+1 (the current build), starts a cluster at N, writes 
 known workload including versioned and object-locked data, and rolls node by node
 to N+1 under a live read/write workload — honoring the interlock between steps —
 asserting continuous availability, zero data loss, and that reads come back
-intact. It also asserts the effective cluster version rolls forward as the last
+intact. It also asserts the effective generation rolls forward as the last
 node upgrades. (The "finalize → gated feature activates" step from ADR-0008's
 sketch is N/A until a gated feature exists; the suite gains it with the first
 gate.)
@@ -105,9 +147,18 @@ gate.)
   ignores. The day a change breaks that assumption, it must either stay additive or
   introduce the manual hold this ADR keeps in reserve — and the upgrade suite is
   where that obligation is enforced.
-- `binary_version` becoming replicated state means a node stamps it at
-  registration and on version change; `cluster status` surfaces the per-node
-  version and the effective cluster version, so a half-finished roll is visible.
+- `binary_version` and the declared generation becoming replicated state means a
+  node stamps both at registration and on version change; `cluster status`
+  surfaces the per-node build string, the per-node generation, and the effective
+  cluster generation, so a half-finished roll is visible.
+- Kicking off an upgrade is **out of band**: the operator — or the deployment
+  system (a systemd unit, a new container image, a new Helm chart) — stops a node,
+  swaps the binary, and starts it. Hamster does not install or swap binaries; it
+  owns only *is it safe to stop this node* (the interlock), *where is the roll* (the
+  advertisement), and *converge* (the auto-roll). An upgrade is a maintenance reboot
+  in which the binary changed — the same brief-outage flow erasure coding already
+  tolerates, plus the advisory `can-stop` check before each step. v0.10 adds the
+  orchestration that drives the loop; v0.9 leaves stop/swap/start to the operator.
 
 ## Alternatives considered
 

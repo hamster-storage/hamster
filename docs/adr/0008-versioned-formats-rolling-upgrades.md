@@ -4,6 +4,10 @@
 
 Accepted
 
+Decision 6 (a manually-finalized cluster version) is partially superseded by
+[ADR-0034](0034-rolling-upgrade-machinery.md): the cluster version auto-rolls
+etcd-style instead. Everything else in this ADR stands.
+
 ## Context
 
 A storage system's on disk formats outlive every version of the code that wrote them, and during any rolling upgrade two versions of the software read and write the same wire protocols simultaneously. Most upgrade disasters in storage systems trace back to format changes that were not designed to be survivable: a node writes a new format its peers cannot read, or an upgrade takes down a node while the cluster is already degraded and quorum breaks.
