@@ -269,6 +269,11 @@ type StatusReport struct {
 	KEKFingerprint string
 	RotatingTo     string
 	Remaining      uint64
+	// CA trust (ADR-0033): the trust-bundle generation this node is on, whether a
+	// CA rotation is open, and how many members still hold an old-CA leaf.
+	TrustVersion uint64
+	CARotating   bool
+	CAStragglers uint64
 }
 
 func Status(dataDir, addr string) (StatusReport, error) {
@@ -298,6 +303,7 @@ func Status(dataDir, addr string) (StatusReport, error) {
 	return StatusReport{
 		Members: resp.Members, Encryption: resp.Encryption,
 		KEKFingerprint: resp.KEKFingerprint, RotatingTo: resp.RotatingTo, Remaining: resp.Remaining,
+		TrustVersion: resp.TrustVersion, CARotating: resp.CARotating, CAStragglers: resp.CAStragglers,
 	}, nil
 }
 
@@ -479,6 +485,51 @@ func RotateKey(dataDir, addr string) (RotateKeyReport, error) {
 	})
 	if err != nil {
 		return RotateKeyReport{}, err
+	}
+	return report, nil
+}
+
+// RotateCAReport is what `cluster rotate-ca` reports (ADR-0033).
+type RotateCAReport struct {
+	Reissued  uint64 // members moved onto the new CA
+	Completed bool   // the old CA was dropped — it may be retired
+}
+
+// RotateCA rotates the cluster's CA (ADR-0033): a leader-driven dual-trust
+// rollover over the control port, authenticated by this node's own certificate.
+// The leader mints a new CA, widens the replicated trust bundle to it, reissues
+// every member's node certificate onto it, then drops the old CA. The new CA key
+// never leaves the leader; each member's new leaf rides the existing mTLS
+// channel, like a join. On success the old CA may be retired.
+func RotateCA(dataDir, addr string) (RotateCAReport, error) {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return RotateCAReport{}, err
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return RotateCAReport{}, err
+	}
+	target := addr
+	if target == "" {
+		target = cfg.ClusterAddr
+	}
+	var report RotateCAReport
+	err = leaderRedirect("rotate-ca", target, 0, func(addr string) (controlOutcome, error) {
+		buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqRotateCA, nil))
+		if err != nil {
+			return controlOutcome{}, err
+		}
+		resp, err := decodeRotateCAResponse(buf)
+		if err != nil {
+			return controlOutcome{}, err
+		}
+		report = RotateCAReport{Reissued: resp.Reissued, Completed: resp.Completed}
+		return controlOutcome{errStr: resp.Error, leader: resp.Leader}, nil
+	})
+	if err != nil {
+		return RotateCAReport{}, err
 	}
 	return report, nil
 }

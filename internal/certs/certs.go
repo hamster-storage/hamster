@@ -44,9 +44,20 @@ func NewCA(cluster string, now time.Time) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("certs: generating CA key: %w", err)
 	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, fmt.Errorf("certs: generating CA serial: %w", err)
+	}
+	// A Subject Key Identifier — a hash of the public key — makes this CA
+	// distinguishable from another with the same name (ADR-0033): during a CA
+	// rotation the old and new CA share the cluster name, so leaves carry an
+	// Authority Key Identifier that points x509 at the right one. With a random
+	// serial too, the two CAs are never confused for the same certificate.
+	skid := sha256.Sum256(pub)
 	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
+		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: cluster + " cluster CA"},
+		SubjectKeyId:          skid[:20],
 		NotBefore:             now.Add(-time.Hour), // tolerate skewed clocks
 		NotAfter:              now.Add(caValidity),
 		IsCA:                  true,

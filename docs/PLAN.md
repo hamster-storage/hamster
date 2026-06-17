@@ -39,39 +39,47 @@ status` shows the rotation and its straggler count. Proven by sim schedules
 (rotate, resume, COMPLIANCE-safe), in-process cluster tests, and an e2e that reads
 every object after restarting a node with only the new key.
 
-### Track B — CA custody, issuance, and rotation
+### Track B — CA rotation: SHIPPED, [ADR-0033](adr/0033-ca-rotation.md)
 
-[ADR-0029](adr/0029-ca-custody-and-issuance.md) settled custody: self-managed CA
-is the default, external/operator PKI is a first-class supported path, and the CA
-private key is **never** replicated through Raft. v0.8 builds the rotation on top:
+A dual-trust rollover over a replicated multi-CA trust **bundle** (CA *certs*
+only, never the key — [ADR-0029](adr/0029-ca-custody-and-issuance.md)'s line
+holds). Built across three passes, each gated + pushed:
 
-- **The design enabler: a multi-CA trust bundle.** Validate against the old and
-  the new CA at once (the dual-trust rollover etcd/CockroachDB/Vault use) so there
-  is no moment where nothing is trusted. This is the concrete thing to build first.
-- **Pluggable issuer interface** — the self-managed default and an external PKI
-  (Vault, an offline/HSM root, a corporate CA) behind one seam, so issuance source
-  is a configuration choice ([ADR-0029](adr/0029-ca-custody-and-issuance.md)
-  decision 2).
-- **Narrowed renewal vs issuance** ([ADR-0029](adr/0029-ca-custody-and-issuance.md)
-  consequences): renewing an already-admitted node's cert (prove possession, get a
-  new cert for the *same* identity) is self-service and need not carry the power to
-  mint *new* identities; joins stay rare and root-gated.
-- **Lost-CA-key recovery:** regenerate a new CA, migrate trust through the bundle
-  (trust old+new, reissue every node cert from new, drop old) — issuance restored
-  with no data at risk, since validation only ever needed the CA *certificate*.
+1. `internal/certs` + `internal/meta` — `CAFingerprint`/`PoolFromCAs`; the
+   replicated `TrustBundle` singleton (generational, compare-and-set), `NodeRecord`
+   `LeafCAFingerprint`, the `SetTrustBundle`/`SetNodeLeafCA` proposals.
+2. `internal/sys` — the transport reads this node's leaf and trust pool per
+   handshake (`GetConfigForClient` + per-dial config, a stable session-ticket key
+   preserving resumption), so a reissued leaf and a widened bundle take effect with
+   **no restart** — the zero-downtime enabler.
+3. `internal/cluster` + `cmd/hamster` — every node builds trust from the bundle
+   (seeded at formation, refreshed on each generation, persisted to ca.pem
+   atomically for restarts); `cluster rotate-ca` drives the rollover (mint new CA →
+   widen to dual trust → reissue every member onto it → drop the old), reissuance
+   being a leader-driven push of a new-CA leaf each member validates; `cluster
+   status` shows the trust generation and, mid-rotation, the count still on the old
+   CA. Distinct CA serials + Subject Key IDs keep same-named CAs unambiguous; the
+   driver rides out a leadership blip (`proposeAsLeader`) and a re-run converges
+   from any partial state.
 
-The rotation flow and its lost-key case are designed in
-**[ADR-0033](adr/0033-ca-rotation.md)** (Proposed): a dual-trust rollover over a
-replicated multi-CA trust **bundle** (CA *certs* only, never the key), the
-transport reading live trust + leaf per handshake (zero-downtime), reissuance as
-the self-service renewal path, a pluggable issuer (self-managed / external PKI),
-and the count of members still on the old CA as the provable convergence signal —
-planned rotation and lost-key recovery being one flow, since rotation never needs
-the *old* CA key. `cluster rotate-ca` drives it; `cluster status` shows progress.
+The convergence signal mirrors KEK rotation — the count of members still on the
+old CA reaching zero, so the old CA is dropped only when provably safe. Proven by
+in-process cluster tests and an e2e that **restarts a node trusting only the new
+CA** and still serves every object. Planned rotation and lost-CA-key recovery are
+one flow (rotation never needs the *old* CA key).
 
-The KEK-rotation half of v0.8 is done; the release is not cut until Track B lands
-(or the operator decides to split it). Track B passes are not yet broken out —
-the ADR is the next thing to settle before code.
+**Both v0.8 tracks are done.** The release is held until Nick signs off.
+
+### Deliberately deferred (noted, not built)
+
+- **External-PKI issuer** ([ADR-0029](adr/0029-ca-custody-and-issuance.md) decision
+  2): the self-managed CA is implemented; the pluggable-issuer seam for an operator
+  PKI is the additive next step, like the KEK's `--master-key-command`.
+- **Issuer-node addressing after rotation:** the rotation driver becomes the issuer
+  (holds the new CA key); a cluster whose join issuer is a different node would need
+  the new key provisioned there for future joins. Reissuance also transmits the
+  member's new key over mTLS, matching join — a CSR flow that keeps the key local is
+  the future refinement for both.
 
 ## Later versions
 

@@ -57,6 +57,7 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		} else {
 			resp.Members = n.members()
 			resp.Encryption, resp.KEKFingerprint, resp.RotatingTo, resp.Remaining = n.encryptionStatus()
+			resp.TrustVersion, resp.CARotating, resp.CAStragglers = n.caStatus()
 		}
 		_ = writeFrame(conn, encodeStatusResponse(resp))
 	case reqDrain:
@@ -69,6 +70,10 @@ func (n *Node) handleConn(conn *tls.Conn) {
 		_ = writeFrame(conn, encodeEncryptResponse(n.handleEncrypt(conn)))
 	case reqRotateKey:
 		_ = writeFrame(conn, encodeRotateKeyResponse(n.handleRotateKey(conn)))
+	case reqRotateCA:
+		_ = writeFrame(conn, encodeRotateCAResponse(n.handleRotateCA(conn)))
+	case reqReissue:
+		_ = writeFrame(conn, encodeReissueResponse(n.handleReissue(conn, payload)))
 	}
 	// Unknown kinds get no response: an upgraded client will know why.
 }
@@ -515,6 +520,72 @@ func (n *Node) runRotateKey() (rep coord.RewrapReport, err error) {
 			return rep, fmt.Errorf("cluster: rotation did not converge (%d still on the old key); resolve any in-flight layout change and re-run", rep.Remaining)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// caStatus reads the CA trust state for `cluster status` (ADR-0033): the trust
+// bundle generation this node is on, whether a rotation is open (the bundle
+// holds more than one CA), and how many members still hold an old-CA leaf.
+// Loop-owned.
+func (n *Node) caStatus() (trustVersion uint64, rotating bool, stragglers uint64) {
+	type out struct {
+		ver       uint64
+		rotating  bool
+		straggler uint64
+	}
+	o, _ := onLoop(n, 5*time.Second, func() out {
+		bundle, open := n.caRotationOpen()
+		r := out{ver: n.trustVersion, rotating: open}
+		if open {
+			r.straggler = n.caStragglerCount(bundle.IssuerFingerprint)
+		}
+		return r
+	})
+	return o.ver, o.rotating, o.straggler
+}
+
+// handleReissue serves a reissued node certificate the rotation driver pushed
+// (ADR-0033): the receiving member adopts it if it validates. Authenticated by a
+// cluster certificate like the other control calls; the certificate's own
+// validation (right identity, chains to the issuing CA) is the real gate, since
+// only the holder of the new CA key could have produced it.
+func (n *Node) handleReissue(conn *tls.Conn, payload []byte) reissueResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return reissueResponse{Error: "reissue requires a cluster certificate"}
+	}
+	req, err := decodeReissueRequest(payload)
+	if err != nil {
+		return reissueResponse{Error: "malformed reissue request"}
+	}
+	if err, _ := onLoop(n, 10*time.Second, func() error { return n.applyReissue(req.CertPEM, req.KeyPEM) }); err != nil {
+		return reissueResponse{Error: err.Error()}
+	}
+	return reissueResponse{}
+}
+
+// handleRotateCA serves `cluster rotate-ca` (ADR-0033): a leader-driven
+// dual-trust CA rollover, authenticated by a cluster certificate. A non-leader
+// redirects. The rollover reissues every member and can outrun the default
+// control deadline; extend it for the duration.
+func (n *Node) handleRotateCA(conn *tls.Conn) rotateCAResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return rotateCAResponse{Error: "rotate-ca requires a cluster certificate"}
+	}
+	// One rotation at a time on this node: a dropped control call that keeps
+	// running in the background must not be joined by a retry starting a second,
+	// concurrent rotation (which would mint a competing CA).
+	if !n.caRotating.CompareAndSwap(false, true) {
+		return rotateCAResponse{Error: "a CA rotation is already running on this node; wait for it to finish"}
+	}
+	defer n.caRotating.Store(false)
+	conn.SetDeadline(time.Now().Add(30 * time.Minute))
+	switch reissued, err := n.runRotateCA(); {
+	case errors.Is(err, raftnode.ErrNotLeader):
+		return rotateCAResponse{Error: notLeaderMsg, Leader: n.leaderDial()}
+	case err != nil:
+		return rotateCAResponse{Error: err.Error(), Reissued: reissued}
+	default:
+		return rotateCAResponse{Reissued: reissued, Completed: true}
 	}
 }
 
