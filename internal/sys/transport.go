@@ -1,6 +1,7 @@
 package sys
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -64,9 +65,19 @@ type TransportConfig struct {
 	// state (v0.2).
 	Peers map[seam.NodeID]string
 	// Cert is this node's certificate and key; CA is the cluster CA both
-	// sides verify against.
+	// sides verify against. They are the boot material and the fallback when
+	// the live providers below are unset.
 	Cert tls.Certificate
 	CA   *x509.CertPool
+	// Leaf and Roots, when set, supply this node's current certificate and
+	// trust pool per handshake (ADR-0033), so a CA rotation's reissued leaf and
+	// widened multi-CA trust bundle take effect without a node restart. The
+	// transport reads them on each inbound handshake (server) and each dial
+	// (client). When nil it falls back to the static Cert/CA. Reading state, not
+	// deciding — the no-logic-in-adapters rule holds (the core owns the
+	// providers). Must be safe to call concurrently.
+	Leaf  func() tls.Certificate
+	Roots func() *x509.CertPool
 	// Deliver receives each inbound message with its authenticated
 	// sender. It is called on reader goroutines: post to the loop.
 	Deliver func(from seam.NodeID, msg []byte)
@@ -103,39 +114,79 @@ const alpnPeer = "hamster/peer"
 
 // NewTransport starts listening and returns the transport.
 func NewTransport(cfg TransportConfig) (*Transport, error) {
-	if cfg.Cert.Certificate == nil || cfg.CA == nil {
+	if (cfg.Cert.Certificate == nil && cfg.Leaf == nil) || (cfg.CA == nil && cfg.Roots == nil) {
 		return nil, fmt.Errorf("transport: mTLS material is required (ADR-0022); there is no plaintext mode")
-	}
-	ln, err := tls.Listen("tcp", cfg.Listen, &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{cfg.Cert},
-		// VerifyClientCertIfGiven, not RequireAndVerify: the join handshake
-		// arrives certless (the joiner has no trust material yet), so the
-		// listener must admit it to route to OnControl. A presented
-		// certificate is still verified against the cluster CA, and a peer
-		// stream without a verified certificate is dropped in readLoop — peer
-		// traffic stays mutually authenticated (ADR-0022).
-		ClientAuth: tls.VerifyClientCertIfGiven,
-		ClientCAs:  cfg.CA,
-		NextProtos: []string{alpnPeer},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("transport: listen %s: %w", cfg.Listen, err)
 	}
 	t := &Transport{
 		cfg:   cfg,
-		ln:    ln,
 		done:  make(chan struct{}),
 		addrs: make(map[seam.NodeID]string),
 		peers: make(map[seam.NodeID]*peer),
 		conns: make(map[net.Conn]bool),
 	}
+	// The static listener config: VerifyClientCertIfGiven, not RequireAndVerify,
+	// because the join handshake arrives certless (the joiner has no trust
+	// material yet) and must be admitted to route to OnControl; a presented
+	// certificate is still verified, and a peer stream without a verified one is
+	// dropped in readLoop, so peer traffic stays mutually authenticated
+	// (ADR-0022).
+	base := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{alpnPeer},
+		Certificates: []tls.Certificate{t.leaf()},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		ClientCAs:    t.roots(),
+	}
+	// When the leaf or trust pool can change at runtime (CA rotation, ADR-0033),
+	// supply them per inbound handshake via GetConfigForClient, so a reissued
+	// leaf or a widened trust bundle takes effect without a restart. A stable
+	// session-ticket key keeps TLS resumption working across the fresh
+	// per-handshake configs. When neither provider is set, the static config
+	// above is used unchanged — the common path pays nothing.
+	if cfg.Leaf != nil || cfg.Roots != nil {
+		var ticketKey [32]byte
+		if _, err := rand.Read(ticketKey[:]); err != nil {
+			return nil, fmt.Errorf("transport: session ticket key: %w", err)
+		}
+		base.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			c := &tls.Config{
+				MinVersion:   tls.VersionTLS13,
+				NextProtos:   []string{alpnPeer},
+				Certificates: []tls.Certificate{t.leaf()},
+				ClientAuth:   tls.VerifyClientCertIfGiven,
+				ClientCAs:    t.roots(),
+			}
+			c.SetSessionTicketKeys([][32]byte{ticketKey})
+			return c, nil
+		}
+	}
+	ln, err := tls.Listen("tcp", cfg.Listen, base)
+	if err != nil {
+		return nil, fmt.Errorf("transport: listen %s: %w", cfg.Listen, err)
+	}
+	t.ln = ln
 	for id, addr := range cfg.Peers {
 		t.addrs[id] = addr
 	}
 	t.wg.Add(1)
 	go t.acceptLoop()
 	return t, nil
+}
+
+// leaf and roots read this node's current certificate and trust pool — the
+// live providers when set (ADR-0033), the static boot material otherwise.
+func (t *Transport) leaf() tls.Certificate {
+	if t.cfg.Leaf != nil {
+		return t.cfg.Leaf()
+	}
+	return t.cfg.Cert
+}
+
+func (t *Transport) roots() *x509.CertPool {
+	if t.cfg.Roots != nil {
+		return t.cfg.Roots()
+	}
+	return t.cfg.CA
 }
 
 // Addr is the address the transport accepts peers on.
@@ -210,13 +261,6 @@ func (t *Transport) sendLoop(p *peer, to seam.NodeID, addr string) {
 			conn.Close()
 		}
 	}()
-	clientTLS := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{t.cfg.Cert},
-		RootCAs:      t.cfg.CA,
-		ServerName:   string(to),         // the peer must prove it is this node
-		NextProtos:   []string{alpnPeer}, // route to the transport, not OnControl
-	}
 	for {
 		var msg []byte
 		select {
@@ -225,6 +269,15 @@ func (t *Transport) sendLoop(p *peer, to seam.NodeID, addr string) {
 		case msg = <-p.queue:
 		}
 		if conn == nil {
+			// Build the dial config per dial so a reissued leaf or a widened
+			// trust bundle (ADR-0033) is picked up without a restart.
+			clientTLS := &tls.Config{
+				MinVersion:   tls.VersionTLS13,
+				Certificates: []tls.Certificate{t.leaf()},
+				RootCAs:      t.roots(),
+				ServerName:   string(to),         // the peer must prove it is this node
+				NextProtos:   []string{alpnPeer}, // route to the transport, not OnControl
+			}
 			d := &net.Dialer{Timeout: dialWait}
 			c, err := tls.DialWithDialer(d, "tcp", addr, clientTLS)
 			if err != nil {
