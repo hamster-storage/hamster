@@ -3,6 +3,7 @@ package cluster
 import (
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -67,6 +69,18 @@ type Node struct {
 	newKey    keys.KEK      // the incoming KEK during a master-key rotation (ADR-0032), loaded from -new-master-key-file; zero otherwise
 	ready     chan struct{} // closed once the node is built; gates control conns
 	stopSync  chan struct{}
+
+	// Live mTLS material for CA rotation (ADR-0033): the transport reads these
+	// per handshake, so a reissued leaf and a widened trust bundle take effect
+	// without a restart. leaf is this node's current certificate; trust is the
+	// pool built from the replicated TrustBundle (or the boot CA before one is
+	// installed). bootCAPEM is the founding CA certificate, used to seed the
+	// first bundle. trustVersion tracks the bundle generation trust was built
+	// from, so refreshTrust rebuilds only on change.
+	leaf         atomic.Pointer[tls.Certificate]
+	trust        atomic.Pointer[x509.CertPool]
+	bootCAPEM    []byte
+	trustVersion uint64 // loop-owned
 
 	sweeping bool // loop-owned: a transition repair sweep is in flight (one at a time)
 
@@ -129,7 +143,7 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	cert, pool, _, err := loadNodeTLS(dir)
+	cert, pool, bootCAPEM, err := loadNodeTLS(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +177,12 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 		}
 	}
 	loop := sys.NewLoop()
-	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, masterKey: o.masterKey, newKey: o.newKey, ready: make(chan struct{}), stopSync: make(chan struct{})}
+	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, masterKey: o.masterKey, newKey: o.newKey, bootCAPEM: bootCAPEM, ready: make(chan struct{}), stopSync: make(chan struct{})}
+	// Seed the live mTLS material from the boot certificate and CA (ADR-0033);
+	// refreshTrust later rebuilds the pool from the replicated trust bundle.
+	bootCert := cert
+	n.leaf.Store(&bootCert)
+	n.trust.Store(pool)
 
 	peers := make(map[seam.NodeID]string)
 	raftPeers := make(map[uint64]seam.NodeID)
@@ -177,6 +196,11 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 	transport, err := sys.NewTransport(sys.TransportConfig{
 		NodeID: seam.NodeID(cfg.NodeID), Listen: cfg.ClusterAddr, Peers: peers,
 		Cert: cert, CA: pool,
+		// Live mTLS material (ADR-0033): the transport reads this node's current
+		// leaf and trust pool per handshake, so a CA rotation's reissued leaf and
+		// widened bundle take effect without a restart.
+		Leaf:  func() tls.Certificate { return *n.leaf.Load() },
+		Roots: func() *x509.CertPool { return n.trust.Load() },
 		// The channel envelope (ADR-0027 decision 6): Raft and shard
 		// traffic share the transport; the demux routes by channel.
 		// Unknown channels and malformed envelopes drop — silence is
