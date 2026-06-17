@@ -3,13 +3,90 @@ package sys
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/certs"
 	"github.com/hamster-storage/hamster/internal/seam"
 )
+
+// TestTransportLiveTrustRotation: the server consults its trust pool per
+// handshake (ADR-0033), so widening it to a new CA admits that CA's leaves
+// without a restart — the dual-trust rollover. A new-CA client is rejected
+// before the widening and accepted after, on fresh dials.
+func TestTransportLiveTrustRotation(t *testing.T) {
+	now := time.Now()
+	oldCA, err := certs.NewCA("old", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCA, err := certs.NewCA("new", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := certs.PoolFromCAs([][]byte{oldCA.CertPEM(), newCA.CertPEM()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The server n2 reads its trust pool live; it starts trusting only the old CA.
+	var roots atomic.Pointer[x509.CertPool]
+	roots.Store(oldCA.Pool())
+	n2Leaf, _ := oldCA.Issue("n2", now)
+	inbox := make(chan delivery, 8)
+	n2, err := NewTransport(TransportConfig{
+		NodeID: "n2", Listen: "127.0.0.1:0", Peers: map[seam.NodeID]string{},
+		Cert:    n2Leaf,
+		Roots:   func() *x509.CertPool { return roots.Load() },
+		Deliver: func(from seam.NodeID, msg []byte) { inbox <- delivery{from, msg} },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n2.Close()
+
+	// A fresh client presenting a NEW-CA leaf for "n1". Each Send from a fresh
+	// transport dials fresh, so it always sees the server's current trust.
+	dialNewCAClient := func(msg string) {
+		leaf, _ := newCA.Issue("n1", now)
+		c, err := NewTransport(TransportConfig{
+			NodeID: "n1", Listen: "127.0.0.1:0",
+			Peers: map[seam.NodeID]string{"n2": n2.Addr()},
+			Cert:  leaf, CA: oldCA.Pool(), // trusts n2's old-CA server cert
+			Deliver: func(seam.NodeID, []byte) {},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		c.Send("n2", []byte(msg))
+		time.Sleep(300 * time.Millisecond) // let the dial + handshake resolve
+	}
+
+	// Before widening: the new-CA leaf does not verify, nothing is delivered.
+	dialNewCAClient("rejected")
+	select {
+	case d := <-inbox:
+		t.Fatalf("new-CA leaf accepted before trust widened: %q", d.msg)
+	default:
+	}
+
+	// Widen the trust pool to the bundle — live, no restart.
+	roots.Store(bundle)
+
+	dialNewCAClient("accepted")
+	select {
+	case d := <-inbox:
+		if string(d.msg) != "accepted" || d.from != "n1" {
+			t.Fatalf("delivery %q from %s, want accepted from n1", d.msg, d.from)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("new-CA leaf not accepted after trust widened (live pool not consulted)")
+	}
+}
 
 type delivery struct {
 	from seam.NodeID
