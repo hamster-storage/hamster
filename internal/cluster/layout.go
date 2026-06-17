@@ -36,6 +36,11 @@ func (n *Node) reconcileLayout() {
 	if n.raft == nil {
 		return
 	}
+	// Track the replicated CA trust bundle (ADR-0033): pick up a widened or
+	// narrowed bundle (every node), and seed the first one from the founding CA
+	// (leader). Runs here because reconcile is posted on every commit and tick.
+	n.refreshTrust()
+	n.seedTrustBundle()
 	store := n.raft.Store()
 
 	// Step 1: ensure this node's known registrations are committed. The labels
