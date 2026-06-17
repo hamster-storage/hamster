@@ -11,79 +11,52 @@ completed item's record survives in git history, in its now-green test, and in
 the shipped ADR/doc. This file is not an archive and not a TODO graveyard: if a
 line here is done, delete it.
 
-## Now / next — v0.8 key and CA rotation
+## Now / next — v0.9 upgrade machinery
 
-v0.7 encryption at rest shipped (v0.7.0): envelope encryption, encrypt-then-EC,
-the `--master-key-file` KEK source, the enable-only posture singleton, the SSE-S3
-surface. What it deliberately left out is **rotation** — both the master key that
-wraps every object's DEK and the cluster CA that anchors inter-node trust. That is
-v0.8, and [ADR-0022](adr/0022-cluster-mtls.md) pairs the two: they are the same
-keys problem, so they travel as one release.
+v0.8 shipped (v0.8.0): master-key rotation (`cluster rotate-key`, [ADR-0032](adr/0032-master-key-rotation.md))
+and CA rotation (`cluster rotate-ca`, [ADR-0033](adr/0033-ca-rotation.md)). The
+front line is now the machinery a zero-downtime rolling upgrade needs — built so
+v0.10 can automate the roll on top. Designed in **[ADR-0034](adr/0034-rolling-upgrade-machinery.md)**
+(Proposed), which partially supersedes [ADR-0008](adr/0008-versioned-formats-rolling-upgrades.md)
+decision 6: the cluster version auto-rolls etcd-style rather than via a manual
+admin finalize, because Hamster's additive formats make most changes auto-safe
+(etcd-like), so a manual gate only earns its keep for the rare non-additive change.
 
-Two largely independent tracks under one headline. **Track A (KEK rotation) has
-landed**; Track B (CA) is the front line.
+Three pieces, in roughly this order:
 
-### Track A — KEK rotation (master-key rewrap) — shipped, [ADR-0032](adr/0032-master-key-rotation.md)
+1. **Per-node version advertisement.** Each node stamps its binary version in its
+   replicated `NodeRecord` (the reserved `binary_version` field); the cluster's
+   effective version is the min across live members (etcd-style, auto-rolled).
+   `cluster status` shows each node's version and the effective cluster version, so
+   a half-finished roll is visible. No gate consumes it yet — the additive
+   discipline covers field additions, and v0.9 adds no new Raft command type — so
+   gate *enforcement* and the first real gate are deferred to first need (the next
+   non-additive change registers its own gate; a manual hold stays in reserve for
+   the day an irreversible change wants a rollback window).
+2. **The health interlock.** `cluster can-stop <node>`: safe only when the
+   remaining voters keep Raft quorum ([ADR-0017](adr/0017-raft-voter-cap-learners.md)),
+   no *other* node is currently down, and no layout transition is open
+   ([ADR-0004](adr/0004-partitioned-placement.md)) — the rolling discipline made
+   checkable (proceed only from full health, one node at a time). Advisory in v0.9;
+   v0.10's automated roll drives the same check. The data-plane dimension (EC
+   tolerance, not just quorum) is what etcd's interlock lacks and Hamster's adds.
+3. **The end-to-end upgrade suite** ([SIMULATION.md](SIMULATION.md) "the upgrade
+   suite", [ADR-0009](adr/0009-deterministic-simulation-testing.md)): obtain the
+   binary for version N (last release) and N+1 (this build), start at N, write
+   versioned + object-locked data under live load, roll node-by-node to N+1
+   honoring the interlock, and assert continuous availability, zero data loss, and
+   that the effective cluster version rolls forward as the last node lands.
 
-A **metadata-only** rewrap sweep: object bytes and shards are never touched, only
-the small wrapped DEK alongside each version changes. Made observable by a
-**per-version KEK fingerprint** (an additive `VersionEntry` field — a 64-bit
-content hash of the wrapping key) plus a *current fingerprint* on the
-`EncryptionPosture` singleton; the count of versions still on the old fingerprint
-is the exact progress signal, so completion is *provable* (zero stragglers) and
-retiring the old key is safe, not hoped. A node whose loaded KEK fingerprint ≠ the
-posture's current fingerprint refuses encrypted writes (the split-key guard). One
-rotation at a time; never more than two KEKs loaded. `cluster rotate-key
--new-master-key-file` drives the leader-only sweep to convergence; `cluster
-status` shows the rotation and its straggler count. Proven by sim schedules
-(rotate, resume, COMPLIANCE-safe), in-process cluster tests, and an e2e that reads
-every object after restarting a node with only the new key.
+**Pre-step:** fix two stale comments that say feature gates are "v0.8"
+(`internal/meta/proposal_codec.go`, `docs/SIMULATION.md`) — they predate the
+v0.7/v0.8 split and the etcd-style decision; correct them to reflect [ADR-0034](adr/0034-rolling-upgrade-machinery.md)
+(additive discipline + a gate at first need, not a v0.8 feature-gate framework).
 
-### Track B — CA rotation: SHIPPED, [ADR-0033](adr/0033-ca-rotation.md)
-
-A dual-trust rollover over a replicated multi-CA trust **bundle** (CA *certs*
-only, never the key — [ADR-0029](adr/0029-ca-custody-and-issuance.md)'s line
-holds). Built across three passes, each gated + pushed:
-
-1. `internal/certs` + `internal/meta` — `CAFingerprint`/`PoolFromCAs`; the
-   replicated `TrustBundle` singleton (generational, compare-and-set), `NodeRecord`
-   `LeafCAFingerprint`, the `SetTrustBundle`/`SetNodeLeafCA` proposals.
-2. `internal/sys` — the transport reads this node's leaf and trust pool per
-   handshake (`GetConfigForClient` + per-dial config, a stable session-ticket key
-   preserving resumption), so a reissued leaf and a widened bundle take effect with
-   **no restart** — the zero-downtime enabler.
-3. `internal/cluster` + `cmd/hamster` — every node builds trust from the bundle
-   (seeded at formation, refreshed on each generation, persisted to ca.pem
-   atomically for restarts); `cluster rotate-ca` drives the rollover (mint new CA →
-   widen to dual trust → reissue every member onto it → drop the old), reissuance
-   being a leader-driven push of a new-CA leaf each member validates; `cluster
-   status` shows the trust generation and, mid-rotation, the count still on the old
-   CA. Distinct CA serials + Subject Key IDs keep same-named CAs unambiguous; the
-   driver rides out a leadership blip (`proposeAsLeader`) and a re-run converges
-   from any partial state.
-
-The convergence signal mirrors KEK rotation — the count of members still on the
-old CA reaching zero, so the old CA is dropped only when provably safe. Proven by
-in-process cluster tests and an e2e that **restarts a node trusting only the new
-CA** and still serves every object. Planned rotation and lost-CA-key recovery are
-one flow (rotation never needs the *old* CA key).
-
-**Both v0.8 tracks are done.** The release is held until Nick signs off.
-
-### Deliberately deferred (noted, not built)
-
-- **External-PKI issuer** ([ADR-0029](adr/0029-ca-custody-and-issuance.md) decision
-  2): the self-managed CA is implemented; the pluggable-issuer seam for an operator
-  PKI is the additive next step, like the KEK's `--master-key-command`.
-- **Issuer-node addressing after rotation:** the rotation driver becomes the issuer
-  (holds the new CA key); a cluster whose join issuer is a different node would need
-  the new key provisioned there for future joins. Reissuance also transmits the
-  member's new key over mTLS, matching join — a CSR flow that keeps the key local is
-  the future refinement for both.
+ADR-0034 is **Proposed** — pending acceptance, after which ADR-0008's status line
+gains the partial-supersede note and the passes break out.
 
 ## Later versions
 
-The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.9
-upgrade machinery (feature gates, health interlock, the upgrade test suite), v0.10
-zero-downtime rolling upgrades, v0.11 observability. They are pulled into the
-section above as they become the front line.
+The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.10
+zero-downtime rolling upgrades (orchestration over v0.9's interlock), v0.11
+observability. They are pulled into the section above as they become the front line.

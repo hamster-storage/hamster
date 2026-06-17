@@ -41,6 +41,7 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0031](0031-reencode-across-profiles.md) | Re-encoding existing data across storage profiles: a physical re-representation for downsize/upsize, COMPLIANCE-safe |
 | [0032](0032-master-key-rotation.md) | Master key rotation: metadata-only DEK rewrap, per-version KEK fingerprints, observable and provably complete |
 | [0033](0033-ca-rotation.md) | CA rotation: dual-trust rollover over a replicated multi-CA trust bundle; planned rotation and lost-key recovery are one flow |
+| [0034](0034-rolling-upgrade-machinery.md) | Rolling-upgrade machinery: etcd-style auto-rolled cluster version, the health interlock, the upgrade test suite (partially supersedes ADR-0008 dec. 6) |
 
 ## Template
 
