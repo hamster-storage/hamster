@@ -200,7 +200,9 @@ func clusterRun(args []string) error {
 			log.Printf("listen address set to %s", *listen)
 		}
 	}
-	var runOpts []cluster.Option
+	// Advertise this binary's version and declared protocol generation (ADR-0034)
+	// so the cluster's effective generation tracks the roll.
+	runOpts := []cluster.Option{cluster.WithVersion(fullVersion(), protocolGeneration())}
 	if *masterKeyFile != "" {
 		material, err := os.ReadFile(*masterKeyFile)
 		if err != nil {
@@ -319,7 +321,7 @@ func clusterStatus(args []string) error {
 	// tabwriter sizes each column to its widest cell, so labels like a full
 	// hostname never overrun the next column (stdlib, no dependency).
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "RAFT-ID\tNODE\tADDRESS\tROLE\tHOST\tZONE\tCAPACITY\tSTATE")
+	fmt.Fprintln(w, "RAFT-ID\tNODE\tADDRESS\tROLE\tHOST\tZONE\tCAPACITY\tVERSION\tGEN\tSTATE")
 	hosts, zones := map[string]bool{}, map[string]bool{}
 	anyDown := false
 	for _, m := range members {
@@ -344,7 +346,15 @@ func clusterStatus(args []string) error {
 			state = "down"
 			anyDown = true
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone, capacity, state)
+		ver := m.BinaryVersion
+		if ver == "" {
+			ver = "—"
+		}
+		gen := "—"
+		if m.Generation != 0 {
+			gen = fmt.Sprintf("%d", m.Generation)
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.RaftID, m.NodeID, m.Dial, role, m.Host, m.Zone, capacity, ver, gen, state)
 		if m.Host != "" {
 			hosts[m.Host] = true
 		}
@@ -359,6 +369,19 @@ func clusterStatus(args []string) error {
 		// STATE is the answering node's local, best-effort view (ADR-0027):
 		// a peer it currently treats as down, not a committed cluster fact.
 		fmt.Println("  note: STATE is this node's local liveness view; another node may differ")
+	}
+	// Cluster protocol generation (ADR-0034): the effective generation is the min
+	// across live members and rolls forward as the last node upgrades. Surface a
+	// roll in progress and flag a skew beyond one generation (the one-step rule).
+	if report.EffectiveGeneration != 0 || anyGeneration(members) {
+		fmt.Printf("\ncluster protocol generation: effective %d\n", report.EffectiveGeneration)
+		lo, hi := generationSpread(members)
+		if hi != lo {
+			fmt.Printf("  upgrade in progress: members span generation %d–%d; the effective generation rolls forward when the last node upgrades\n", lo, hi)
+		}
+		if hi-lo > 1 {
+			fmt.Printf("  WARNING: generation skew %d exceeds one step — upgrade one generation at a time (ADR-0034)\n", hi-lo)
+		}
 	}
 	fmt.Printf("\ntopology: %d node(s), %d host(s), %d zone(s)\n", len(members), len(hosts), len(zones))
 	if len(hosts) <= 1 {
@@ -387,6 +410,36 @@ func clusterStatus(args []string) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+// anyGeneration reports whether any member has advertised a protocol generation
+// (ADR-0034) — false on a cluster that predates version advertisement.
+func anyGeneration(ms []cluster.Member) bool {
+	for _, m := range ms {
+		if m.Generation != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// generationSpread returns the lowest and highest advertised generation across
+// members (ignoring unrecorded zeros), for the roll-in-progress and skew notes.
+func generationSpread(ms []cluster.Member) (lo, hi uint32) {
+	first := true
+	for _, m := range ms {
+		if m.Generation == 0 {
+			continue
+		}
+		if first || m.Generation < lo {
+			lo = m.Generation
+		}
+		if first || m.Generation > hi {
+			hi = m.Generation
+		}
+		first = false
+	}
+	return lo, hi
 }
 
 func clusterDrain(args []string, draining bool) error {

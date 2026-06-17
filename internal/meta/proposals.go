@@ -226,6 +226,20 @@ type SetNodeLeafCA struct {
 	LeafCAFingerprint uint64
 }
 
+// SetNodeVersion records a member's binary version and declared protocol
+// generation (ADR-0034). The leader's version monitor proposes it for any
+// member whose stored record lags what the member advertises, so an in-place
+// upgrade rolls the cluster's effective generation without a re-join. It
+// mutates only those two fields on an already-registered member (labels,
+// capacity, drain, leaf CA, and unknown fields untouched), so it is safe to
+// run against a draining or mid-rotation node. Apply refuses an unknown node ID.
+type SetNodeVersion struct {
+	ProposedAtUnixMS int64
+	NodeID           string
+	BinaryVersion    string
+	Generation       uint32
+}
+
 // SetTrustBundle installs a new CA trust-bundle generation (ADR-0033): the set
 // of CA certificates every node trusts for inter-node mTLS, and which CA issues
 // new leaves. Like SetClusterLayout it is a compare-and-set — apply accepts it

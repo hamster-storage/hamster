@@ -274,6 +274,10 @@ type StatusReport struct {
 	TrustVersion uint64
 	CARotating   bool
 	CAStragglers uint64
+	// EffectiveGeneration is the cluster's effective protocol generation
+	// (ADR-0034): the minimum across live members, as the answering node sees it.
+	// Each member's own generation is on its Member record.
+	EffectiveGeneration uint32
 }
 
 func Status(dataDir, addr string) (StatusReport, error) {
@@ -304,6 +308,7 @@ func Status(dataDir, addr string) (StatusReport, error) {
 		Members: resp.Members, Encryption: resp.Encryption,
 		KEKFingerprint: resp.KEKFingerprint, RotatingTo: resp.RotatingTo, Remaining: resp.Remaining,
 		TrustVersion: resp.TrustVersion, CARotating: resp.CARotating, CAStragglers: resp.CAStragglers,
+		EffectiveGeneration: resp.EffectiveGeneration,
 	}, nil
 }
 

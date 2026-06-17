@@ -62,6 +62,7 @@ func fullProposals() []any {
 		SetNodeLeafCA{ProposedAtUnixMS: 1700000000022, NodeID: "n1", LeafCAFingerprint: 0xCA0002},
 		SetTrustBundle{ProposedAtUnixMS: 1700000000023, Version: 2, IssuerFingerprint: 0xCA0002,
 			CAs: []TrustedCA{{Fingerprint: 0xCA0001, CertPEM: []byte("-old-")}, {Fingerprint: 0xCA0002, CertPEM: []byte("-new-")}}},
+		SetNodeVersion{ProposedAtUnixMS: 1700000000024, NodeID: "n1", BinaryVersion: "v0.11.0-rc.1", Generation: 2},
 	}
 }
 
@@ -142,9 +143,9 @@ func TestProposalDecodeErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":      {},
 		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		// Field 27 is the next unassigned command slot — a newer node's
+		// Field 28 is the next unassigned command slot — a newer node's
 		// command this build does not know, which must refuse, not half-apply.
-		"unknown_command": encode(envelope(27)),
+		"unknown_command": encode(envelope(28)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -156,7 +157,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(27)))
+	_, err := DecodeProposal(encode(envelope(28)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

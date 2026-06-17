@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -40,6 +41,25 @@ import (
 //
 //	go build -ldflags "-X main.version=v0.1.0" ./cmd/hamster
 var version = "dev"
+
+// protocolGenerationStr is the declared protocol generation (ADR-0034): the
+// monotonic integer this binary owns, advanced only by a coordinated format
+// change (not every release). The cluster's effective generation is the minimum
+// across live members, etcd-style, and a gate (when one first lands) compares
+// against it. Stamped like version — `-ldflags "-X main.protocolGenerationStr=2"`
+// — so the upgrade test can build two generations from one source; defaults to
+// the baseline generation 1.
+var protocolGenerationStr = "1"
+
+// protocolGeneration parses protocolGenerationStr, falling back to the baseline
+// on a malformed stamp (a build-time string, so this is defensive only).
+func protocolGeneration() uint32 {
+	g, err := strconv.ParseUint(protocolGenerationStr, 10, 32)
+	if err != nil {
+		return 1
+	}
+	return uint32(g)
+}
 
 // fullVersion is what banners and `hamster version` print: the stamped
 // release version as-is, or — for a plain `go build` — the commit Go

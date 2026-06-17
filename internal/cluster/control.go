@@ -58,6 +58,11 @@ func (n *Node) handleConn(conn *tls.Conn) {
 			resp.Members = n.members()
 			resp.Encryption, resp.KEKFingerprint, resp.RotatingTo, resp.Remaining = n.encryptionStatus()
 			resp.TrustVersion, resp.CARotating, resp.CAStragglers = n.caStatus()
+			// Version advertisement (ADR-0034): this node's own build, and the
+			// cluster's effective generation derived from the registry the
+			// member list already carries.
+			resp.LocalBinaryVersion, resp.LocalGeneration = n.binaryVersion, n.generation
+			resp.EffectiveGeneration = effectiveGeneration(resp.Members)
 		}
 		_ = writeFrame(conn, encodeStatusResponse(resp))
 	case reqDrain:

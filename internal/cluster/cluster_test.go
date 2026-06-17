@@ -812,6 +812,143 @@ func TestClusterZoneLabels(t *testing.T) {
 // it, the leader's reconcile writes it into the committed layout, and it
 // surfaces in status — read back from that same layout, the weight placement
 // biases by. One heavy node (3) and two equal ones (1).
+// genOf and verOf read a member's advertised generation/version from a status
+// member list.
+func genOf(ms []Member, id string) uint32 {
+	for _, m := range ms {
+		if m.NodeID == id {
+			return m.Generation
+		}
+	}
+	return 0
+}
+
+func verOf(ms []Member, id string) string {
+	for _, m := range ms {
+		if m.NodeID == id {
+			return m.BinaryVersion
+		}
+	}
+	return ""
+}
+
+// waitEffectiveGeneration polls a node's status until the cluster's effective
+// protocol generation reaches want (ADR-0034).
+func waitEffectiveGeneration(t *testing.T, dataDir string, want uint32, what string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		report, err := Status(dataDir, "")
+		if err == nil && report.EffectiveGeneration == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			got := uint32(0)
+			if r, e := Status(dataDir, ""); e == nil {
+				got = r.EffectiveGeneration
+			}
+			t.Fatalf("waiting for %s: effective generation %d, want %d", what, got, want)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestClusterVersionAdvertisement proves the etcd-style version roll (ADR-0034):
+// every node advertises its binary version and protocol generation into the
+// replicated registry, the leader's monitor keeps a peer's version current
+// across an in-place restart (no re-join), and the cluster's effective
+// generation — the minimum across members — rolls forward only once the *last*
+// node has upgraded. Three nodes so each single upgrade keeps quorum, exactly as
+// a real rolling upgrade does.
+func TestClusterVersionAdvertisement(t *testing.T) {
+	now := time.Now()
+	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()
+
+	if err := Init(d1, "vertest", "n1", freeAddr(t), "", 0, now); err != nil {
+		t.Fatal(err)
+	}
+	n1, err := Run(d1, WithVersion("v0.9.0", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1.Stop()
+	waitStatus(t, d1, "", "n1 leading alone", func(ms []Member) bool {
+		return len(ms) == 1 && ms[0].Leader
+	})
+
+	join := func(dir, id string, gen uint32) *Node {
+		tok, err := MintToken(d1, time.Hour, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Join(dir, id, freeAddr(t), tok, "", 0, ""); err != nil {
+			t.Fatal(err)
+		}
+		n, err := Run(dir, WithVersion("v0.9.0", gen))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	n2 := join(d2, "n2", 1)
+	defer n2.Stop()
+	n3 := join(d3, "n3", 1)
+	defer n3.Stop()
+
+	// All three advertise generation 1; the effective generation is 1 and each
+	// member carries its release string.
+	waitStatus(t, d1, "", "three members at generation 1", func(ms []Member) bool {
+		return len(ms) == 3 && genOf(ms, "n1") == 1 && genOf(ms, "n2") == 1 && genOf(ms, "n3") == 1
+	})
+	waitEffectiveGeneration(t, d1, 1, "all three at generation 1")
+	ms := waitStatus(t, d1, "", "n2 carries its version string", func(ms []Member) bool {
+		return verOf(ms, "n2") == "v0.9.0"
+	})
+	_ = ms
+
+	// Upgrade n3 in place: stop, restart on generation 2. The leader's monitor
+	// learns the new version by polling; the effective generation stays 1 (min)
+	// while n1 and n2 lag.
+	n3.Stop()
+	n3b := func() *Node {
+		n, err := Run(d3, WithVersion("v0.10.0", 2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}()
+	defer n3b.Stop()
+	waitStatus(t, d1, "", "n3 advertises generation 2", func(ms []Member) bool {
+		return genOf(ms, "n3") == 2 && genOf(ms, "n1") == 1 && genOf(ms, "n2") == 1
+	})
+	waitEffectiveGeneration(t, d1, 1, "effective stays 1 while n1/n2 lag")
+
+	// Upgrade n2: still one node (n1) behind, so the effective generation holds.
+	n2.Stop()
+	n2b := func() *Node {
+		n, err := Run(d2, WithVersion("v0.10.0", 2))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}()
+	defer n2b.Stop()
+	waitStatus(t, d1, "", "n2 advertises generation 2", func(ms []Member) bool {
+		return genOf(ms, "n2") == 2 && genOf(ms, "n1") == 1
+	})
+	waitEffectiveGeneration(t, d1, 1, "effective stays 1 while n1 lags")
+
+	// Upgrade n1 last: now every member is on generation 2, so the effective
+	// generation rolls forward — the etcd-style auto-roll, no manual finalize.
+	n1.Stop()
+	n1b, err := Run(d1, WithVersion("v0.10.0", 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n1b.Stop()
+	waitEffectiveGeneration(t, d1, 2, "effective rolls to 2 once the last node upgrades")
+}
+
 func TestClusterCapacityWeights(t *testing.T) {
 	now := time.Now()
 	d1, d2, d3 := t.TempDir(), t.TempDir(), t.TempDir()

@@ -554,14 +554,41 @@ func (s *Store) ApplyRegisterNode(p RegisterNode) (err error) {
 	if p.NodeID == "" {
 		return ErrInvalidNode
 	}
-	s.kv.set(nodeRowKey(p.NodeID), NodeRecord{
+	rec := NodeRecord{
 		FormatVersion:     currentFormatVersion,
 		NodeID:            p.NodeID,
 		Host:              p.Host,
 		Zone:              p.Zone,
 		Capacity:          p.Capacity,
 		LeafCAFingerprint: p.LeafCAFingerprint,
-	})
+	}
+	// RegisterNode carries labels, not version — SetNodeVersion (ADR-0034) owns
+	// the version fields. Preserve them across a label re-registration so a
+	// host/zone/capacity change never drops the generation the monitor recorded.
+	if v, ok := s.kv.get(nodeRowKey(p.NodeID)); ok {
+		prev := v.(NodeRecord)
+		rec.BinaryVersion, rec.Generation = prev.BinaryVersion, prev.Generation
+	}
+	s.kv.set(nodeRowKey(p.NodeID), rec)
+	return nil
+}
+
+// ApplySetNodeVersion updates a member's binary version and protocol generation
+// (ADR-0034), leaving its labels, capacity, drain flag, leaf CA, and unknown
+// fields intact. Idempotent; refuses an unknown node.
+func (s *Store) ApplySetNodeVersion(p SetNodeVersion) (err error) {
+	defer s.txn(&err)()
+	if p.NodeID == "" {
+		return ErrInvalidNode
+	}
+	v, ok := s.kv.get(nodeRowKey(p.NodeID))
+	if !ok {
+		return ErrInvalidNode
+	}
+	rec := v.(NodeRecord)
+	rec.BinaryVersion = p.BinaryVersion
+	rec.Generation = p.Generation
+	s.kv.set(nodeRowKey(p.NodeID), rec)
 	return nil
 }
 

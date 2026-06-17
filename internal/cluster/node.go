@@ -85,6 +85,15 @@ type Node struct {
 
 	sweeping bool // loop-owned: a transition repair sweep is in flight (one at a time)
 
+	// Version advertisement (ADR-0034): this binary's release string and declared
+	// protocol generation, supplied at startup (WithVersion) and not persisted —
+	// the binary owns them, read fresh each boot. The leader's version monitor
+	// replicates them into each member's NodeRecord so the cluster's effective
+	// generation (the min across live members) rolls forward etcd-style as the
+	// last node upgrades. Zero generation means unset (treated as behind).
+	binaryVersion string
+	generation    uint32
+
 	issueMu sync.Mutex // serializes joins: ID allocation and its durable record
 	stopped sync.Once
 }
@@ -95,8 +104,20 @@ type Node struct {
 type Option func(*nodeOptions)
 
 type nodeOptions struct {
-	masterKey keys.KEK
-	newKey    keys.KEK
+	masterKey     keys.KEK
+	newKey        keys.KEK
+	binaryVersion string
+	generation    uint32
+}
+
+// WithVersion supplies this binary's release string (for display) and its
+// declared protocol generation (ADR-0034): the monotonic integer the binary
+// owns, used for the cluster's effective generation and the skew check. Not
+// persisted — the binary owns these and they are read fresh each boot, so an
+// in-place upgrade advertises the new values without a re-join. Omit on a node
+// that does not advertise (generation 0 = unset).
+func WithVersion(release string, generation uint32) Option {
+	return func(o *nodeOptions) { o.binaryVersion, o.generation = release, generation }
 }
 
 // WithMasterKey supplies the loaded cluster KEK the node uses to wrap and
@@ -178,7 +199,7 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 		}
 	}
 	loop := sys.NewLoop()
-	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, masterKey: o.masterKey, newKey: o.newKey, bootCAPEM: bootCAPEM, ready: make(chan struct{}), stopSync: make(chan struct{})}
+	n := &Node{cfg: cfg, dir: dir, ca: ca, loop: loop, metadb: mdb, masterKey: o.masterKey, newKey: o.newKey, binaryVersion: o.binaryVersion, generation: o.generation, bootCAPEM: bootCAPEM, ready: make(chan struct{}), stopSync: make(chan struct{})}
 	// Seed the live mTLS material from the boot certificate and CA (ADR-0033);
 	// refreshTrust later rebuilds the pool from the replicated trust bundle.
 	bootCert := cert
@@ -477,6 +498,12 @@ func (n *Node) members() []Member {
 				down[string(id)] = true
 			}
 		}
+		// Each member's advertised version (ADR-0034) lives in the replicated
+		// NodeRecord, not the layout — read it for display.
+		recs := map[string]meta.NodeRecord{}
+		for _, r := range n.raft.Store().Nodes() {
+			recs[r.NodeID] = r
+		}
 		var ms []Member
 		for _, m := range n.raft.Members() {
 			mem := Member{
@@ -486,6 +513,9 @@ func (n *Node) members() []Member {
 			}
 			if lbl, ok := labels[string(m.Addr)]; ok {
 				mem.Host, mem.Zone, mem.Capacity, mem.Draining = lbl.Host, lbl.Zone, lbl.Weight, lbl.Draining
+			}
+			if rec, ok := recs[string(m.Addr)]; ok {
+				mem.BinaryVersion, mem.Generation = rec.BinaryVersion, rec.Generation
 			}
 			ms = append(ms, mem)
 		}
@@ -513,11 +543,13 @@ func (n *Node) leaderDial() string {
 func (n *Node) syncPeers() {
 	t := time.NewTicker(peerSyncEvery)
 	defer t.Stop()
+	tick := 0
 	for {
 		select {
 		case <-n.stopSync:
 			return
 		case <-t.C:
+			tick++
 			for _, m := range n.members() {
 				if m.Dial != "" {
 					n.transport.AddPeer(seam.NodeID(m.NodeID), m.Dial)
@@ -531,6 +563,13 @@ func (n *Node) syncPeers() {
 			// and close, so no second per-tick post is needed — adding one
 			// perturbs the conf-change pipeline enough to stall formation.
 			n.loop.Post(n.reconcileLayout)
+			// The version monitor (ADR-0034) polls peers and replicates their
+			// advertised versions — leader-only and on a slower cadence than peer
+			// sync, since a roll takes seconds to minutes per node and the poll
+			// dials every peer's status.
+			if tick%versionMonitorEvery == 0 {
+				n.versionMonitor()
+			}
 		}
 	}
 }

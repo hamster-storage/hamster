@@ -53,11 +53,12 @@ const (
 	propCompleteKEKRot    = 24 // close a master-key rotation (ADR-0032)
 	propSetNodeLeafCA     = 25 // a member's current leaf-CA fingerprint (ADR-0033)
 	propSetTrustBundle    = 26 // install a CA trust-bundle generation (ADR-0033)
+	propSetNodeVersion    = 27 // a member's binary version + protocol generation (ADR-0034)
 
 	// propMax is the highest command number this binary knows. The decoder
 	// admits the envelope command range [propCreateBucket, propMax]; a higher
 	// number is a newer node's command this binary cannot safely apply.
-	propMax = propSetTrustBundle
+	propMax = propSetNodeVersion
 )
 
 // EncodeProposal encodes one proposal for the Raft log. p must be one of
@@ -213,6 +214,11 @@ func EncodeProposal(p any) []byte {
 		atMS, num = c.ProposedAtUnixMS, propSetNodeLeafCA
 		cmd = putString(cmd, 1, c.NodeID)
 		cmd = putUvarint(cmd, 2, c.LeafCAFingerprint)
+	case SetNodeVersion:
+		atMS, num = c.ProposedAtUnixMS, propSetNodeVersion
+		cmd = putString(cmd, 1, c.NodeID)
+		cmd = putString(cmd, 2, c.BinaryVersion)
+		cmd = putUvarint(cmd, 3, uint64(c.Generation))
 	case SetTrustBundle:
 		atMS, num = c.ProposedAtUnixMS, propSetTrustBundle
 		cmd = putUvarint(cmd, 1, c.Version)
@@ -662,6 +668,21 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.NodeID = d.str()
 			case 2:
 				c.LeafCAFingerprint = d.uvarint()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propSetNodeVersion:
+		c := SetNodeVersion{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.NodeID = d.str()
+			case 2:
+				c.BinaryVersion = d.str()
+			case 3:
+				c.Generation = d.uint32()
 			default:
 				d.skipUnknown(nil)
 			}
