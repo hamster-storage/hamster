@@ -54,7 +54,14 @@ func bin(t *testing.T) string {
 // output, failing the test on a nonzero exit.
 func run(t *testing.T, args ...string) string {
 	t.Helper()
-	out, err := exec.Command(bin(t), args...).CombinedOutput()
+	return runBin(t, bin(t), args...)
+}
+
+// runBin is run with an explicit binary path — the upgrade suite runs commands
+// against a specific binary version (ADR-0034).
+func runBin(t *testing.T, binPath string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(binPath, args...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("hamster %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -88,7 +95,14 @@ type proc struct {
 // start launches a long-running hamster command (cluster run, serve).
 func start(t *testing.T, env []string, args ...string) *proc {
 	t.Helper()
-	p := &proc{cmd: exec.Command(bin(t), args...), out: &safeBuf{}}
+	return startBin(t, bin(t), env, args...)
+}
+
+// startBin is start with an explicit binary path — the upgrade suite starts a
+// node on a chosen binary version (ADR-0034).
+func startBin(t *testing.T, binPath string, env []string, args ...string) *proc {
+	t.Helper()
+	p := &proc{cmd: exec.Command(binPath, args...), out: &safeBuf{}}
 	p.cmd.Stdout = p.out
 	p.cmd.Stderr = p.out
 	p.cmd.Env = append(os.Environ(), env...)
@@ -168,10 +182,16 @@ func parseStatus(out string) []statusRow {
 // holds on the parsed rows.
 func waitStatus(t *testing.T, dataDir, what string, pred func([]statusRow) bool) []statusRow {
 	t.Helper()
+	return waitStatusBin(t, bin(t), dataDir, what, pred)
+}
+
+// waitStatusBin is waitStatus with an explicit binary path.
+func waitStatusBin(t *testing.T, binPath, dataDir, what string, pred func([]statusRow) bool) []statusRow {
+	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := exec.Command(bin(t), "cluster", "status", "-data-dir", dataDir).CombinedOutput()
+		out, err := exec.Command(binPath, "cluster", "status", "-data-dir", dataDir).CombinedOutput()
 		last = string(out)
 		if err == nil {
 			if rows := parseStatus(last); pred(rows) {
