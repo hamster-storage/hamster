@@ -111,6 +111,7 @@ Cluster commands:
   cluster join       join an existing cluster with a token
   cluster run        run this node (add -s3 <addr> to serve the S3 API)
   cluster status     show cluster membership
+  cluster can-stop   check whether a node is safe to stop for upgrade (ADR-0034)
   cluster recover    rebuild a cluster from a survivor after quorum loss
 
 Use "hamster <command> -h" for a command's flags.

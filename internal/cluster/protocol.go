@@ -112,6 +112,7 @@ const (
 	reqRotateKey    = 7
 	reqRotateCA     = 8
 	reqReissue      = 9
+	reqCanStop      = 10
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -251,6 +252,21 @@ type drainRequest struct {
 type drainResponse struct {
 	Error  string
 	Leader string // the leader's dial address when the asked node is not the leader
+}
+
+// canStopRequest asks whether taking NodeID down for maintenance/upgrade is safe
+// (ADR-0034). Advisory: it informs the operator's decision; it never stops a node.
+type canStopRequest struct {
+	NodeID string
+}
+
+// canStopResponse is the interlock's verdict (ADR-0034): Safe is the answer, and
+// Reason explains it either way (for an operator or an automated roll). Error is
+// set only on a malformed request or an unknown node.
+type canStopResponse struct {
+	Error  string
+	Safe   bool
+	Reason string
 }
 
 type removeRequest struct {
@@ -536,6 +552,45 @@ func decodeDrainRequest(buf []byte) (drainRequest, error) {
 			r.NodeID = string(f.b)
 		case 3:
 			r.Draining = f.u != 0
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeCanStopRequest(r canStopRequest) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	return putString(b, 2, r.NodeID)
+}
+
+func decodeCanStopRequest(buf []byte) (canStopRequest, error) {
+	var r canStopRequest
+	err := forEachField(buf, func(f field) error {
+		if f.num == 2 {
+			r.NodeID = string(f.b)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeCanStopResponse(r canStopResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	b = putBool(b, 3, r.Safe)
+	return putString(b, 4, r.Reason)
+}
+
+func decodeCanStopResponse(buf []byte) (canStopResponse, error) {
+	var r canStopResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Safe = f.u != 0
+		case 4:
+			r.Reason = string(f.b)
 		}
 		return nil
 	})
