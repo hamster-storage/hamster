@@ -91,6 +91,21 @@ func TestCodecRoundTrip(t *testing.T) {
 			t.Fatalf("round trip: %+v, %v", out, err)
 		}
 	})
+	t.Run("TrustBundle", func(t *testing.T) {
+		in := TrustBundle{FormatVersion: 1, Version: 3, IssuerFingerprint: 0xBEEF,
+			CAs: []TrustedCA{{Fingerprint: 0xCAFE, CertPEM: []byte("-old-")}, {Fingerprint: 0xBEEF, CertPEM: []byte("-new-")}}}
+		out, err := unmarshalTrustBundle(marshalTrustBundle(in))
+		if err != nil || !reflect.DeepEqual(in, out) {
+			t.Fatalf("round trip: %+v, %v", out, err)
+		}
+	})
+	t.Run("NodeRecord", func(t *testing.T) {
+		in := NodeRecord{FormatVersion: 1, NodeID: "n1", Host: "h", Zone: "z", Capacity: 2, ReplacedBy: "n9", LeafCAFingerprint: 0xCA11}
+		out, err := unmarshalNodeRecord(marshalNodeRecord(in))
+		if err != nil || !reflect.DeepEqual(in, out) {
+			t.Fatalf("round trip: %+v, %v", out, err)
+		}
+	})
 	t.Run("EncryptionPosture", func(t *testing.T) {
 		// A posture mid-rotation: both fingerprints set (ADR-0032).
 		in := EncryptionPosture{FormatVersion: 1, Algorithm: EncAES256GCM, CurrentKEKFingerprint: 0x1111, RotatingToKEKFingerprint: 0x2222}

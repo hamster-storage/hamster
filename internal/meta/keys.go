@@ -34,6 +34,12 @@ const clusterLayoutKey = "s/layout"
 // never crosses it and the layout get never hits it.
 const encryptionPostureKey = "s/enc"
 
+// trustBundleKey is the singleton row holding the cluster's CA trust bundle
+// (ADR-0033): the set of trusted CA certificates and which one issues new
+// leaves. Under the reserved s/ system prefix; "s/trust" sorts after s/node/,
+// so neither the node scan nor any singleton get crosses it.
+const trustBundleKey = "s/trust"
+
 // nodeScanPrefix groups the per-member registration rows (NodeRecord) under
 // the reserved s/ system prefix, one per node ID. It sorts after s/layout
 // ("s/n" > "s/l"), so a scan from the prefix never crosses the singleton.

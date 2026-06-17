@@ -48,11 +48,13 @@ const (
 	propBeginKEKRotation  = 22 // open a master-key rotation (ADR-0032)
 	propRewrapDEK         = 23 // rewrap one version's DEK under a new KEK (ADR-0032)
 	propCompleteKEKRot    = 24 // close a master-key rotation (ADR-0032)
+	propSetNodeLeafCA     = 25 // a member's current leaf-CA fingerprint (ADR-0033)
+	propSetTrustBundle    = 26 // install a CA trust-bundle generation (ADR-0033)
 
 	// propMax is the highest command number this binary knows. The decoder
 	// admits the envelope command range [propCreateBucket, propMax]; a higher
 	// number is a newer node's command this binary cannot safely apply.
-	propMax = propCompleteKEKRot
+	propMax = propSetTrustBundle
 )
 
 // EncodeProposal encodes one proposal for the Raft log. p must be one of
@@ -203,6 +205,19 @@ func EncodeProposal(p any) []byte {
 		cmd = putString(cmd, 2, c.Host)
 		cmd = putString(cmd, 3, c.Zone)
 		cmd = putUvarint(cmd, 4, uint64(c.Capacity))
+		cmd = putUvarint(cmd, 5, c.LeafCAFingerprint)
+	case SetNodeLeafCA:
+		atMS, num = c.ProposedAtUnixMS, propSetNodeLeafCA
+		cmd = putString(cmd, 1, c.NodeID)
+		cmd = putUvarint(cmd, 2, c.LeafCAFingerprint)
+	case SetTrustBundle:
+		atMS, num = c.ProposedAtUnixMS, propSetTrustBundle
+		cmd = putUvarint(cmd, 1, c.Version)
+		for _, ca := range c.CAs {
+			cmd = protowire.AppendTag(cmd, 2, protowire.BytesType)
+			cmd = protowire.AppendBytes(cmd, marshalTrustedCA(ca))
+		}
+		cmd = putUvarint(cmd, 3, c.IssuerFingerprint)
 	case SetNodeDraining:
 		atMS, num = c.ProposedAtUnixMS, propSetNodeDraining
 		cmd = putString(cmd, 1, c.NodeID)
@@ -629,6 +644,41 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.Zone = d.str()
 			case 4:
 				c.Capacity = d.uint32()
+			case 5:
+				c.LeafCAFingerprint = d.uvarint()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propSetNodeLeafCA:
+		c := SetNodeLeafCA{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.NodeID = d.str()
+			case 2:
+				c.LeafCAFingerprint = d.uvarint()
+			default:
+				d.skipUnknown(nil)
+			}
+		}
+		return c, d.err
+	case propSetTrustBundle:
+		c := SetTrustBundle{ProposedAtUnixMS: atMS}
+		for d.next() {
+			switch d.num {
+			case 1:
+				c.Version = d.uvarint()
+			case 2:
+				ca, err := unmarshalTrustedCA(d.bytes())
+				if err != nil {
+					d.fail("set_trust_bundle CA: %w", err)
+					break
+				}
+				c.CAs = append(c.CAs, ca)
+			case 3:
+				c.IssuerFingerprint = d.uvarint()
 			default:
 				d.skipUnknown(nil)
 			}

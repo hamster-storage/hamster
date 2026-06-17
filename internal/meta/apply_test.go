@@ -292,6 +292,60 @@ func TestKEKRotationRejections(t *testing.T) {
 	}
 }
 
+// TestTrustBundleCompareAndSet: the CA trust bundle installs generationally
+// (ADR-0033) — first install is Version 1, each later one exactly +1, a stale
+// or invalid generation refused — and a member's leaf-CA fingerprint updates in
+// place.
+func TestTrustBundleCompareAndSet(t *testing.T) {
+	e := newEnv(t)
+	const old, new = uint64(0xCA01), uint64(0xCA02)
+
+	if _, ok := e.s.TrustBundle(); ok {
+		t.Fatal("a fresh store should hold no trust bundle")
+	}
+	// A first install must be Version 1.
+	if err := e.s.ApplySetTrustBundle(SetTrustBundle{ProposedAtUnixMS: e.tick(), Version: 2,
+		CAs: []TrustedCA{{Fingerprint: old, CertPEM: []byte("-old-")}}, IssuerFingerprint: old}); !errors.Is(err, ErrStaleTrustBundle) {
+		t.Fatalf("first install at v2: %v, want ErrStaleTrustBundle", err)
+	}
+	if err := e.s.ApplySetTrustBundle(SetTrustBundle{ProposedAtUnixMS: e.tick(), Version: 1,
+		CAs: []TrustedCA{{Fingerprint: old, CertPEM: []byte("-old-")}}, IssuerFingerprint: old}); err != nil {
+		t.Fatal(err)
+	}
+	// Issuer must be a trusted CA; an empty bundle is invalid.
+	if err := e.s.ApplySetTrustBundle(SetTrustBundle{ProposedAtUnixMS: e.tick(), Version: 2,
+		CAs: []TrustedCA{{Fingerprint: old, CertPEM: []byte("-old-")}}, IssuerFingerprint: new}); !errors.Is(err, ErrInvalidTrustBundle) {
+		t.Fatalf("issuer not in bundle: %v, want ErrInvalidTrustBundle", err)
+	}
+	// Open the rotation: dual trust, issuer = new.
+	if err := e.s.ApplySetTrustBundle(SetTrustBundle{ProposedAtUnixMS: e.tick(), Version: 2,
+		CAs:               []TrustedCA{{Fingerprint: old, CertPEM: []byte("-old-")}, {Fingerprint: new, CertPEM: []byte("-new-")}},
+		IssuerFingerprint: new}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := e.s.TrustBundle()
+	if b.Version != 2 || b.IssuerFingerprint != new || !b.HasCA(old) || !b.HasCA(new) {
+		t.Fatalf("bundle after open: %+v", b)
+	}
+
+	// A member's leaf-CA fingerprint updates in place.
+	if err := e.s.ApplyRegisterNode(RegisterNode{ProposedAtUnixMS: e.tick(), NodeID: "n1", LeafCAFingerprint: old}); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := e.s.Node("n1"); rec.LeafCAFingerprint != old {
+		t.Fatalf("registered leaf CA %x, want %x", rec.LeafCAFingerprint, old)
+	}
+	if err := e.s.ApplySetNodeLeafCA(SetNodeLeafCA{ProposedAtUnixMS: e.tick(), NodeID: "n1", LeafCAFingerprint: new}); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := e.s.Node("n1"); rec.LeafCAFingerprint != new {
+		t.Fatalf("after reissue leaf CA %x, want %x", rec.LeafCAFingerprint, new)
+	}
+	if err := e.s.ApplySetNodeLeafCA(SetNodeLeafCA{ProposedAtUnixMS: e.tick(), NodeID: "ghost", LeafCAFingerprint: new}); !errors.Is(err, ErrInvalidNode) {
+		t.Fatalf("unknown node: %v, want ErrInvalidNode", err)
+	}
+}
+
 // TestComplianceLockIsAbsolute is invariant 4 made executable: no path may
 // destroy or weaken a COMPLIANCE-locked version, with or without a governance
 // bypass, until its retention expires.

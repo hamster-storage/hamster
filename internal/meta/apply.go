@@ -555,12 +555,68 @@ func (s *Store) ApplyRegisterNode(p RegisterNode) (err error) {
 		return ErrInvalidNode
 	}
 	s.kv.set(nodeRowKey(p.NodeID), NodeRecord{
-		FormatVersion: currentFormatVersion,
-		NodeID:        p.NodeID,
-		Host:          p.Host,
-		Zone:          p.Zone,
-		Capacity:      p.Capacity,
+		FormatVersion:     currentFormatVersion,
+		NodeID:            p.NodeID,
+		Host:              p.Host,
+		Zone:              p.Zone,
+		Capacity:          p.Capacity,
+		LeafCAFingerprint: p.LeafCAFingerprint,
 	})
+	return nil
+}
+
+// ApplySetNodeLeafCA updates which CA signed a member's current node certificate
+// (ADR-0033), leaving its labels, capacity, and unknown fields intact. Idempotent;
+// refuses an unknown node.
+func (s *Store) ApplySetNodeLeafCA(p SetNodeLeafCA) (err error) {
+	defer s.txn(&err)()
+	if p.NodeID == "" {
+		return ErrInvalidNode
+	}
+	v, ok := s.kv.get(nodeRowKey(p.NodeID))
+	if !ok {
+		return ErrInvalidNode
+	}
+	rec := v.(NodeRecord)
+	rec.LeafCAFingerprint = p.LeafCAFingerprint
+	s.kv.set(nodeRowKey(p.NodeID), rec)
+	return nil
+}
+
+// ApplySetTrustBundle installs a new CA trust-bundle generation (ADR-0033): the
+// replicated set of trusted CA certificates and the issuing CA. Compare-and-set
+// on Version (first install is Version 1, each later one exactly the stored
+// Version plus one), so a reconciling leader that retransmits, or two racing
+// proposals, is refused deterministically (ErrStaleTrustBundle) rather than
+// overwriting. A bundle with no CAs, or an IssuerFingerprint not among them, is
+// invalid — a node must have a trust anchor and the issuer must be trusted.
+func (s *Store) ApplySetTrustBundle(p SetTrustBundle) (err error) {
+	defer s.txn(&err)()
+	want := uint64(1)
+	if prev, ok := s.kv.get(trustBundleKey); ok {
+		want = prev.(TrustBundle).Version + 1
+	}
+	if p.Version != want {
+		return ErrStaleTrustBundle
+	}
+	if len(p.CAs) == 0 {
+		return ErrInvalidTrustBundle
+	}
+	bundle := TrustBundle{
+		FormatVersion:     currentFormatVersion,
+		Version:           p.Version,
+		IssuerFingerprint: p.IssuerFingerprint,
+	}
+	for _, c := range p.CAs {
+		if c.Fingerprint == 0 || len(c.CertPEM) == 0 {
+			return ErrInvalidTrustBundle
+		}
+		bundle.CAs = append(bundle.CAs, TrustedCA{Fingerprint: c.Fingerprint, CertPEM: append([]byte(nil), c.CertPEM...)})
+	}
+	if p.IssuerFingerprint == 0 || !bundle.HasCA(p.IssuerFingerprint) {
+		return ErrInvalidTrustBundle
+	}
+	s.kv.set(trustBundleKey, bundle)
 	return nil
 }
 

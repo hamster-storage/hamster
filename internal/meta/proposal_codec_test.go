@@ -48,7 +48,7 @@ func fullProposals() []any {
 		SetClusterLayout{ProposedAtUnixMS: 1700000000013, Version: 3, PartitionCount: 4096,
 			Nodes:    []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}},
 			Previous: []LayoutNode{{ID: "n1", Host: "h1", Zone: "z1"}, {ID: "n2", Host: "h2", Zone: "z2"}, {ID: "n3", Host: "h3", Zone: "z3"}}},
-		RegisterNode{ProposedAtUnixMS: 1700000000014, NodeID: "n1", Host: "boxA", Zone: "z1", Capacity: 4},
+		RegisterNode{ProposedAtUnixMS: 1700000000014, NodeID: "n1", Host: "boxA", Zone: "z1", Capacity: 4, LeafCAFingerprint: 0xCA0001},
 		SetNodeDraining{ProposedAtUnixMS: 1700000000015, NodeID: "n1", Draining: true},
 		SetNodeReplacedBy{ProposedAtUnixMS: 1700000000016, NodeID: "n1", ReplacedBy: "n7"},
 		ReEncodeObject{ProposedAtUnixMS: 1700000000017, Bucket: "docs", Key: "dir/report.pdf",
@@ -59,6 +59,9 @@ func fullProposals() []any {
 		RewrapDEK{ProposedAtUnixMS: 1700000000020, Bucket: "docs", Key: "dir/report.pdf",
 			VersionID: vid, WrappedDEK: []byte{0x70, 0x71, 0x72}, KEKFingerprint: 0x1112131415161718},
 		CompleteKEKRotation{ProposedAtUnixMS: 1700000000021, ToFingerprint: 0x1112131415161718},
+		SetNodeLeafCA{ProposedAtUnixMS: 1700000000022, NodeID: "n1", LeafCAFingerprint: 0xCA0002},
+		SetTrustBundle{ProposedAtUnixMS: 1700000000023, Version: 2, IssuerFingerprint: 0xCA0002,
+			CAs: []TrustedCA{{Fingerprint: 0xCA0001, CertPEM: []byte("-old-")}, {Fingerprint: 0xCA0002, CertPEM: []byte("-new-")}}},
 	}
 }
 
@@ -139,9 +142,9 @@ func TestProposalDecodeErrors(t *testing.T) {
 	cases := map[string][]byte{
 		"empty":      {},
 		"no_command": encode(func(b []byte) []byte { return putUvarint(b, propAt, 1) }),
-		// Field 25 is the next unassigned command slot — a newer node's
+		// Field 27 is the next unassigned command slot — a newer node's
 		// command this build does not know, which must refuse, not half-apply.
-		"unknown_command": encode(envelope(25)),
+		"unknown_command": encode(envelope(27)),
 		"two_commands":    encode(envelope(propCreateBucket), envelope(propDeleteBucket)),
 		"unknown_envelope_field": encode(envelope(propCreateBucket),
 			func(b []byte) []byte { return putUvarint(b, 90, 1) }),
@@ -153,7 +156,7 @@ func TestProposalDecodeErrors(t *testing.T) {
 		}
 	}
 	// The upgrade-hint error message matters: it is what an operator sees.
-	_, err := DecodeProposal(encode(envelope(25)))
+	_, err := DecodeProposal(encode(envelope(27)))
 	if err == nil || !strings.Contains(err.Error(), "upgrade") {
 		t.Fatalf("unknown command error should hint at upgrading: %v", err)
 	}

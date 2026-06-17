@@ -135,6 +135,54 @@ func PoolFromPEM(certPEM []byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// PoolFromCAs builds one trust pool that accepts certificates chaining to any
+// of the given CA certificates — the multi-CA trust bundle CA rotation needs
+// (ADR-0033): during a rollover a node trusts both the old and the new CA at
+// once, so neither side of the handshake is ever untrusted. Empty input is an
+// error: a node with no trust anchor would accept nothing.
+func PoolFromCAs(certPEMs [][]byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	added := 0
+	for _, p := range certPEMs {
+		if pool.AppendCertsFromPEM(p) {
+			added++
+		}
+	}
+	if added == 0 {
+		return nil, fmt.Errorf("certs: no usable CA certificate in the trust bundle")
+	}
+	return pool, nil
+}
+
+// CAFingerprint identifies a CA certificate by its content (ADR-0033): the
+// first 8 bytes of the SHA-256 of its DER, as a big-endian integer. A CA
+// certificate is public, so the fingerprint guards nothing — it is an
+// identifier, letting the trust bundle and each member's record name which CA
+// signed which leaf so a rotation's progress is countable, the CA analogue of
+// the per-version KEK fingerprint (ADR-0032). Zero means "none recorded".
+func CAFingerprint(certPEM []byte) (uint64, error) {
+	der, err := LoadCertDER(certPEM)
+	if err != nil {
+		return 0, err
+	}
+	sum := sha256.Sum256(der)
+	var fp uint64
+	for i := 0; i < 8; i++ {
+		fp = fp<<8 | uint64(sum[i])
+	}
+	return fp, nil
+}
+
+// Fingerprint is CAFingerprint for this CA's own certificate.
+func (ca *CA) Fingerprint() uint64 {
+	sum := sha256.Sum256(ca.cert.Raw)
+	var fp uint64
+	for i := 0; i < 8; i++ {
+		fp = fp<<8 | uint64(sum[i])
+	}
+	return fp
+}
+
 // CertPEMs encodes an issued certificate and its key as PEM, the inverse
 // of tls.X509KeyPair.
 func CertPEMs(cert tls.Certificate) (certPEM, keyPEM []byte, err error) {
