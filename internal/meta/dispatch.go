@@ -51,6 +51,10 @@ func (s *Store) Apply(p any) (any, error) {
 		return nil, s.ApplySetNodeDraining(c)
 	case SetNodeReplacedBy:
 		return nil, s.ApplySetNodeReplacedBy(c)
+	case SetNodeLeafCA:
+		return nil, s.ApplySetNodeLeafCA(c)
+	case SetTrustBundle:
+		return nil, s.ApplySetTrustBundle(c)
 	case ReEncodeObject:
 		return nil, s.ApplyReEncodeObject(c)
 	default:

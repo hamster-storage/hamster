@@ -628,6 +628,8 @@ func marshalNodeRecord(n NodeRecord) []byte {
 	}
 	// Field 7 (replaced_by) is additive and written only when set.
 	b = putString(b, 7, n.ReplacedBy)
+	// Field 8 (leaf CA fingerprint, ADR-0033) is additive and written only when set.
+	b = putUvarint(b, 8, n.LeafCAFingerprint)
 	return append(b, n.unknown...)
 }
 
@@ -650,11 +652,73 @@ func unmarshalNodeRecord(b []byte) (NodeRecord, error) {
 			n.Draining = d.uvarint() != 0
 		case 7:
 			n.ReplacedBy = d.str()
+		case 8:
+			n.LeafCAFingerprint = d.uvarint()
 		default:
 			d.skipUnknown(&n.unknown)
 		}
 	}
 	return n, d.err
+}
+
+func marshalTrustedCA(c TrustedCA) []byte {
+	var b []byte
+	b = putUvarint(b, 1, c.Fingerprint)
+	b = putBytes(b, 2, c.CertPEM)
+	return b
+}
+
+func unmarshalTrustedCA(b []byte) (TrustedCA, error) {
+	var c TrustedCA
+	d := &dec{b: b}
+	for d.next() {
+		switch d.num {
+		case 1:
+			c.Fingerprint = d.uvarint()
+		case 2:
+			c.CertPEM = d.bytes()
+		default:
+			d.skipUnknown(nil)
+		}
+	}
+	return c, d.err
+}
+
+func marshalTrustBundle(t TrustBundle) []byte {
+	var b []byte
+	b = putUvarint(b, 1, uint64(t.FormatVersion))
+	b = putUvarint(b, 2, t.Version)
+	for _, c := range t.CAs {
+		b = protowire.AppendTag(b, 3, protowire.BytesType)
+		b = protowire.AppendBytes(b, marshalTrustedCA(c))
+	}
+	b = putUvarint(b, 4, t.IssuerFingerprint)
+	return append(b, t.unknown...)
+}
+
+func unmarshalTrustBundle(b []byte) (TrustBundle, error) {
+	var t TrustBundle
+	d := &dec{b: b}
+	for d.next() {
+		switch d.num {
+		case 1:
+			t.FormatVersion = d.uint32()
+		case 2:
+			t.Version = d.uvarint()
+		case 3:
+			c, err := unmarshalTrustedCA(d.bytes())
+			if err != nil {
+				d.fail("field 3: trusted CA: %w", err)
+				break
+			}
+			t.CAs = append(t.CAs, c)
+		case 4:
+			t.IssuerFingerprint = d.uvarint()
+		default:
+			d.skipUnknown(&t.unknown)
+		}
+	}
+	return t, d.err
 }
 
 // --- row dispatch: a key's shape names its record type ---
@@ -676,6 +740,8 @@ func marshalRecord(v any) []byte {
 		return marshalClusterLayout(r)
 	case EncryptionPosture:
 		return marshalEncryptionPosture(r)
+	case TrustBundle:
+		return marshalTrustBundle(r)
 	case NodeRecord:
 		return marshalNodeRecord(r)
 	default:
@@ -692,6 +758,8 @@ func decodeRow(key string, value []byte) (any, error) {
 		return unmarshalClusterLayout(value)
 	case key == encryptionPostureKey:
 		return unmarshalEncryptionPosture(value)
+	case key == trustBundleKey:
+		return unmarshalTrustBundle(value)
 	case strings.HasPrefix(key, nodeScanPrefix):
 		return unmarshalNodeRecord(value)
 	case strings.HasPrefix(key, bucketScanPrefix):

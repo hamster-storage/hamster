@@ -189,6 +189,11 @@ type RegisterNode struct {
 	Host             string
 	Zone             string
 	Capacity         uint32
+	// LeafCAFingerprint names the CA that signed this member's node certificate
+	// at admission (ADR-0033): the issuer sets it so a CA rotation can count
+	// which members still hold an old-CA leaf. Zero when CA fingerprints are not
+	// in use.
+	LeafCAFingerprint uint64
 }
 
 // SetNodeDraining sets (or clears) the drain flag on an already-registered
@@ -209,6 +214,32 @@ type SetNodeReplacedBy struct {
 	ProposedAtUnixMS int64
 	NodeID           string
 	ReplacedBy       string
+}
+
+// SetNodeLeafCA records the CA that signed a member's current node certificate
+// (ADR-0033): set at admission and updated when the member reissues its leaf
+// during a CA rotation. It mutates only that field on an already-registered
+// member. Apply refuses an unknown node ID.
+type SetNodeLeafCA struct {
+	ProposedAtUnixMS  int64
+	NodeID            string
+	LeafCAFingerprint uint64
+}
+
+// SetTrustBundle installs a new CA trust-bundle generation (ADR-0033): the set
+// of CA certificates every node trusts for inter-node mTLS, and which CA issues
+// new leaves. Like SetClusterLayout it is a compare-and-set — apply accepts it
+// only when Version is exactly one greater than the stored bundle's (the first
+// install is Version 1) — so a reconciling leader that retransmits, or two
+// proposals that race, converge instead of clobbering. A CA rotation installs
+// one generation that adds the new CA (dual trust), then, once every member is
+// reissued, one that drops the old. Only certificates ride this; the CA private
+// key never does (ADR-0029).
+type SetTrustBundle struct {
+	ProposedAtUnixMS  int64
+	Version           uint64
+	CAs               []TrustedCA
+	IssuerFingerprint uint64
 }
 
 // SetClusterLayout installs a new cluster-layout generation (ADR-0028) —

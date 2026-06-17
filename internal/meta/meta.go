@@ -48,6 +48,8 @@ var (
 	ErrKEKMismatch            = errors.New("KEK fingerprint does not match the cluster's current key")
 	ErrNotEncrypting          = errors.New("cluster is not encrypting: nothing to rotate")
 	ErrInvalidRewrap          = errors.New("version cannot be rewrapped")
+	ErrStaleTrustBundle       = errors.New("trust bundle version is not the next generation")
+	ErrInvalidTrustBundle     = errors.New("invalid trust bundle")
 )
 
 // Multipart limits, S3 parity (docs/S3-API.md). Apply enforces both: the

@@ -341,6 +341,14 @@ type NodeRecord struct {
 	// Additive (invariant 2), encoded only when set.
 	ReplacedBy string
 
+	// LeafCAFingerprint names the CA that signed this member's current node
+	// certificate (ADR-0033): the certs-package CA fingerprint. A CA rotation
+	// reissues every member from the new CA and restamps this; the count of
+	// members still on the old CA is the rotation's provable progress (the CA
+	// analogue of the per-version KEK fingerprint). Zero means none recorded —
+	// a member admitted before CA fingerprints existed. Additive (invariant 2).
+	LeafCAFingerprint uint64
+
 	unknown []byte
 }
 
@@ -405,6 +413,52 @@ type EncryptionPosture struct {
 	RotatingToKEKFingerprint uint64
 
 	unknown []byte
+}
+
+// TrustedCA is one CA certificate in the cluster's trust bundle (ADR-0033):
+// its content fingerprint (the certs-package CA fingerprint) and its PEM. Only
+// public certificate material — the CA private key is never replicated
+// (ADR-0029).
+type TrustedCA struct {
+	Fingerprint uint64
+	CertPEM     []byte
+}
+
+// TrustBundle is the singleton row under s/trust — the replicated set of CA
+// certificates every node trusts for inter-node mTLS (ADR-0033, ADR-0022),
+// plus which CA new node certificates are issued under. Generational like the
+// cluster layout (ADR-0028): installed compare-and-set on Version. During a CA
+// rotation the bundle holds both the old and new CA at once (dual trust);
+// IssuerFingerprint names the CA leaves are now signed by, and the rotation
+// closes by installing a generation that drops the retired CA. Only
+// certificates are replicated; the CA private key never is (ADR-0029).
+type TrustBundle struct {
+	FormatVersion     uint32
+	Version           uint64
+	CAs               []TrustedCA
+	IssuerFingerprint uint64
+
+	unknown []byte
+}
+
+// CertPEMs returns every trusted CA certificate's PEM, for building a node's
+// mTLS trust pool (certs.PoolFromCAs).
+func (b TrustBundle) CertPEMs() [][]byte {
+	out := make([][]byte, len(b.CAs))
+	for i, c := range b.CAs {
+		out[i] = c.CertPEM
+	}
+	return out
+}
+
+// HasCA reports whether the bundle trusts the CA with the given fingerprint.
+func (b TrustBundle) HasCA(fingerprint uint64) bool {
+	for _, c := range b.CAs {
+		if c.Fingerprint == fingerprint {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectiveNodes returns the layout's labeled member set: Nodes when present

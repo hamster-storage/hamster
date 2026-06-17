@@ -73,6 +73,24 @@ func (s *Store) EncryptionPosture() EncryptionPosture {
 	return v.(EncryptionPosture)
 }
 
+// TrustBundle returns the cluster's CA trust bundle (ADR-0033): the set of
+// trusted CA certificates and the issuing CA, present once the first generation
+// is committed. A node builds its mTLS trust pool from it. The returned slices
+// are copies the caller may hold.
+func (s *Store) TrustBundle() (TrustBundle, bool) {
+	v, ok := s.kv.get(trustBundleKey)
+	if !ok {
+		return TrustBundle{}, false
+	}
+	t := v.(TrustBundle)
+	cas := make([]TrustedCA, len(t.CAs))
+	for i, c := range t.CAs {
+		cas[i] = TrustedCA{Fingerprint: c.Fingerprint, CertPEM: slices.Clone(c.CertPEM)}
+	}
+	t.CAs = cas
+	return t, true
+}
+
 // Node returns a member's registration row (ADR-0016, ADR-0004), present
 // once the issuer has committed it through RegisterNode.
 func (s *Store) Node(id string) (NodeRecord, bool) {
