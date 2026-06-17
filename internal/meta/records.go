@@ -349,6 +349,20 @@ type NodeRecord struct {
 	// a member admitted before CA fingerprints existed. Additive (invariant 2).
 	LeafCAFingerprint uint64
 
+	// BinaryVersion is the member's release string for display (ADR-0034), e.g.
+	// "v0.11.0" or "v0.11.0-rc.1". The leader's version monitor keeps it current
+	// across an in-place upgrade (SetNodeVersion). Empty means none recorded.
+	// Additive (invariant 2).
+	BinaryVersion string
+
+	// Generation is the member's declared protocol generation (ADR-0034): the
+	// monotonic integer the binary owns, advanced only by a coordinated format
+	// change. The cluster's effective generation is the minimum across live
+	// members, etcd-style. Zero means none recorded (treated as "behind" so the
+	// effective generation never claims a roll the member has not confirmed).
+	// Additive (invariant 2).
+	Generation uint32
+
 	unknown []byte
 }
 

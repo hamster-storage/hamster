@@ -138,6 +138,12 @@ type Member struct {
 	// this node for removal. Unlike Down (a local liveness view), every node
 	// reports the same value, read from the cluster layout.
 	Draining bool
+	// BinaryVersion and Generation are the member's advertised version (ADR-0034),
+	// read from the replicated NodeRecord: the release string for display and the
+	// declared protocol generation. Empty/zero until the leader's version monitor
+	// records them.
+	BinaryVersion string
+	Generation    uint32
 }
 
 type joinRequest struct {
@@ -180,6 +186,15 @@ type statusResponse struct {
 	TrustVersion uint64
 	CARotating   bool
 	CAStragglers uint64
+	// Version advertisement (ADR-0034). LocalBinaryVersion and LocalGeneration are
+	// the answering node's *own* build — what its binary owns, read fresh at boot
+	// — which the leader's version monitor reads from each peer to keep the
+	// registry current across an in-place upgrade. EffectiveGeneration is the
+	// cluster's effective generation (the min across live members, etcd-style),
+	// computed from the replicated registry by the answering node.
+	LocalBinaryVersion  string
+	LocalGeneration     uint32
+	EffectiveGeneration uint32
 }
 
 // reissueRequest carries a node certificate the rotation driver signed under the
@@ -391,7 +406,9 @@ func encodeMemberMsg(m Member) []byte {
 	b = putString(b, 7, m.Zone)
 	b = putUint(b, 8, uint64(m.Capacity))
 	b = putBool(b, 9, m.Down)
-	return putBool(b, 10, m.Draining)
+	b = putBool(b, 10, m.Draining)
+	b = putString(b, 11, m.BinaryVersion)
+	return putUint(b, 12, uint64(m.Generation))
 }
 
 func decodeMemberMsg(buf []byte) (Member, error) {
@@ -418,6 +435,10 @@ func decodeMemberMsg(buf []byte) (Member, error) {
 			m.Down = f.u != 0
 		case 10:
 			m.Draining = f.u != 0
+		case 11:
+			m.BinaryVersion = string(f.b)
+		case 12:
+			m.Generation = uint32(f.u)
 		}
 		return nil
 	})
@@ -618,7 +639,10 @@ func encodeStatusResponse(r statusResponse) []byte {
 	b = putUint(b, 7, r.Remaining)
 	b = putUint(b, 8, r.TrustVersion)
 	b = putBool(b, 9, r.CARotating)
-	return putUint(b, 10, r.CAStragglers)
+	b = putUint(b, 10, r.CAStragglers)
+	b = putString(b, 11, r.LocalBinaryVersion)
+	b = putUint(b, 12, uint64(r.LocalGeneration))
+	return putUint(b, 13, uint64(r.EffectiveGeneration))
 }
 
 func decodeStatusResponse(buf []byte) (statusResponse, error) {
@@ -647,6 +671,12 @@ func decodeStatusResponse(buf []byte) (statusResponse, error) {
 			r.CARotating = f.u != 0
 		case 10:
 			r.CAStragglers = f.u
+		case 11:
+			r.LocalBinaryVersion = string(f.b)
+		case 12:
+			r.LocalGeneration = uint32(f.u)
+		case 13:
+			r.EffectiveGeneration = uint32(f.u)
 		}
 		return nil
 	})

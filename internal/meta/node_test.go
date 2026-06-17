@@ -146,6 +146,37 @@ func TestApplySetNodeDraining(t *testing.T) {
 	}
 }
 
+// TestApplySetNodeVersion: the version + generation update on a registered
+// node, preserving labels and other sticky fields; an unknown node is refused;
+// and a label re-registration preserves the recorded version (ADR-0034).
+func TestApplySetNodeVersion(t *testing.T) {
+	s := NewStore()
+	if err := s.ApplySetNodeVersion(SetNodeVersion{NodeID: "ghost", BinaryVersion: "v0.11.0", Generation: 2}); err != ErrInvalidNode {
+		t.Fatalf("versioning an unregistered node: got %v, want ErrInvalidNode", err)
+	}
+	if err := s.ApplyRegisterNode(RegisterNode{NodeID: "n1", Host: "h1", Zone: "z1", Capacity: 7, LeafCAFingerprint: 0xCA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplySetNodeVersion(SetNodeVersion{NodeID: "n1", BinaryVersion: "v0.11.0-rc.1", Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Node("n1")
+	if got.BinaryVersion != "v0.11.0-rc.1" || got.Generation != 2 {
+		t.Fatalf("version not set: %+v", got)
+	}
+	if got.Host != "h1" || got.Zone != "z1" || got.Capacity != 7 || got.LeafCAFingerprint != 0xCA {
+		t.Fatalf("version set but labels/leaf-CA not preserved: %+v", got)
+	}
+	// A label re-registration keeps the recorded version (RegisterNode carries
+	// labels, not version — the monitor owns the version fields).
+	if err := s.ApplyRegisterNode(RegisterNode{NodeID: "n1", Host: "h1b", Zone: "z1b", Capacity: 9}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Node("n1"); got.BinaryVersion != "v0.11.0-rc.1" || got.Generation != 2 || got.Host != "h1b" {
+		t.Fatalf("re-register dropped the version: %+v", got)
+	}
+}
+
 // TestNodeRecordPersistRoundTrip proves node rows ride the snapshot path
 // (Dump/Restore) byte-identically — what a Raft snapshot ships and a
 // restarting node restores — alongside the layout singleton, with no key

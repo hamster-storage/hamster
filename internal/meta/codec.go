@@ -630,6 +630,10 @@ func marshalNodeRecord(n NodeRecord) []byte {
 	b = putString(b, 7, n.ReplacedBy)
 	// Field 8 (leaf CA fingerprint, ADR-0033) is additive and written only when set.
 	b = putUvarint(b, 8, n.LeafCAFingerprint)
+	// Fields 9/10 (binary version + protocol generation, ADR-0034) are additive
+	// and written only when recorded.
+	b = putString(b, 9, n.BinaryVersion)
+	b = putUvarint(b, 10, uint64(n.Generation))
 	return append(b, n.unknown...)
 }
 
@@ -654,6 +658,10 @@ func unmarshalNodeRecord(b []byte) (NodeRecord, error) {
 			n.ReplacedBy = d.str()
 		case 8:
 			n.LeafCAFingerprint = d.uvarint()
+		case 9:
+			n.BinaryVersion = d.str()
+		case 10:
+			n.Generation = d.uint32()
 		default:
 			d.skipUnknown(&n.unknown)
 		}
