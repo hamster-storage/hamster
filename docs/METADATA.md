@@ -32,7 +32,7 @@ BadgerDB is a flat sorted key-value store; structure comes from key encoding. On
 
 | Prefix | Key | Value | Contents |
 |---|---|---|---|
-| `s/` | `s/cluster`, `s/layout`, `s/node/<node-id>` | `ClusterConfig`, `ClusterLayout`, `NodeRecord` | Cluster-wide system state |
+| `s/` | `s/cluster`, `s/enc`, `s/layout`, `s/node/<node-id>`, `s/trust` | `ClusterConfig`, `EncryptionPosture`, `ClusterLayout`, `NodeRecord`, `TrustBundle` | Cluster-wide system state |
 | `b/` | `b/<bucket>` | `BucketConfig` | Bucket configuration |
 | `v/` | `v/<bucket>\x00<key>\x00<~version-id>` | `VersionEntry` | Version lists — **the truth** |
 | `c/` | `c/<bucket>\x00<key>` | `CurrentRecord` | Current-version index — **derived** |
@@ -200,9 +200,22 @@ message NodeRecord {             // s/node/<id>, ADR-0016 + ADR-0004
   string zone           = 4;   // operator failure-domain label, defaults to host
   uint32 capacity       = 5;   // relative weight (ADR-0004); 0 = equal
   bool   draining       = 6;   // operator-set removal flag (ADR-0004); set by SetNodeDraining
-  // Further liveness and upgrade fields arrive additively from field 7:
-  // control/data addresses, binary_version (the upgrade interlock), voter
-  // (ADR-0017).
+  string replaced_by    = 7;   // node taking this one's place (ADR-0004); set by SetNodeReplacedBy
+  uint64 leaf_ca_fingerprint = 8; // the CA that signed this member's current leaf (ADR-0033); set by SetNodeLeafCA
+  // Further liveness and upgrade fields arrive additively: control/data
+  // addresses, binary_version (the upgrade interlock), voter (ADR-0017).
+}
+
+message TrustBundle {            // s/trust, ADR-0033
+  uint32 format_version      = 1;
+  uint64 version             = 2;  // generation; compare-and-set install, like ClusterLayout
+  repeated TrustedCA cas     = 3;  // the set of trusted CA certificates (dual trust during a rotation)
+  uint64 issuer_fingerprint  = 4;  // which CA signs new leaves
+}
+
+message TrustedCA {              // ADR-0033 — public certificate only, never the key (ADR-0029)
+  uint64 fingerprint = 1;          // certs.CAFingerprint of the certificate
+  bytes  cert_pem    = 2;
 }
 ```
 

@@ -80,7 +80,8 @@ type Node struct {
 	leaf         atomic.Pointer[tls.Certificate]
 	trust        atomic.Pointer[x509.CertPool]
 	bootCAPEM    []byte
-	trustVersion uint64 // loop-owned
+	trustVersion uint64      // loop-owned
+	caRotating   atomic.Bool // a CA rotation is driving on this node — reject a concurrent one (e.g. a dropped-call retry)
 
 	sweeping bool // loop-owned: a transition repair sweep is in flight (one at a time)
 

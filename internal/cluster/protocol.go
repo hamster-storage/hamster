@@ -110,6 +110,8 @@ const (
 	reqOptimize     = 5
 	reqEncrypt      = 6
 	reqRotateKey    = 7
+	reqRotateCA     = 8
+	reqReissue      = 9
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -172,6 +174,36 @@ type statusResponse struct {
 	KEKFingerprint string
 	RotatingTo     string
 	Remaining      uint64
+	// CA trust (ADR-0033): the trust-bundle generation this node is on, and —
+	// while a CA rotation is open (the bundle holds more than one CA) — how many
+	// members still hold a leaf from the old CA.
+	TrustVersion uint64
+	CARotating   bool
+	CAStragglers uint64
+}
+
+// reissueRequest carries a node certificate the rotation driver signed under the
+// new CA for the receiving member (ADR-0033): the member adopts it if it is for
+// that member's identity and chains to the bundle's issuing CA. The key never
+// travels except over the established mTLS channel, the same as a join.
+type reissueRequest struct {
+	CertPEM []byte
+	KeyPEM  []byte
+}
+
+type reissueResponse struct {
+	Error string
+}
+
+// rotateCAResponse reports a CA rotation (ADR-0033): a leader-driven dual-trust
+// rollover. A non-leader answers with the leader's dial address. Reissued is how
+// many members were moved onto the new CA, and Completed whether the old CA was
+// dropped — at which point it may be retired.
+type rotateCAResponse struct {
+	Error     string
+	Leader    string
+	Reissued  uint64
+	Completed bool
 }
 
 // encryptResponse reports enabling encryption at rest (ADR-0021): a
@@ -583,7 +615,10 @@ func encodeStatusResponse(r statusResponse) []byte {
 	b = putString(b, 4, r.Encryption)
 	b = putString(b, 5, r.KEKFingerprint)
 	b = putString(b, 6, r.RotatingTo)
-	return putUint(b, 7, r.Remaining)
+	b = putUint(b, 7, r.Remaining)
+	b = putUint(b, 8, r.TrustVersion)
+	b = putBool(b, 9, r.CARotating)
+	return putUint(b, 10, r.CAStragglers)
 }
 
 func decodeStatusResponse(buf []byte) (statusResponse, error) {
@@ -606,6 +641,74 @@ func decodeStatusResponse(buf []byte) (statusResponse, error) {
 			r.RotatingTo = string(f.b)
 		case 7:
 			r.Remaining = f.u
+		case 8:
+			r.TrustVersion = f.u
+		case 9:
+			r.CARotating = f.u != 0
+		case 10:
+			r.CAStragglers = f.u
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeReissueRequest(r reissueRequest) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putBytes(b, 2, r.CertPEM)
+	return putBytes(b, 3, r.KeyPEM)
+}
+
+func decodeReissueRequest(buf []byte) (reissueRequest, error) {
+	var r reissueRequest
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.CertPEM = append([]byte(nil), f.b...)
+		case 3:
+			r.KeyPEM = append([]byte(nil), f.b...)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeReissueResponse(r reissueResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	return putString(b, 2, r.Error)
+}
+
+func decodeReissueResponse(buf []byte) (reissueResponse, error) {
+	var r reissueResponse
+	err := forEachField(buf, func(f field) error {
+		if f.num == 2 {
+			r.Error = string(f.b)
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeRotateCAResponse(r rotateCAResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	b = putString(b, 3, r.Leader)
+	b = putUint(b, 4, r.Reissued)
+	return putBool(b, 5, r.Completed)
+}
+
+func decodeRotateCAResponse(buf []byte) (rotateCAResponse, error) {
+	var r rotateCAResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Leader = string(f.b)
+		case 4:
+			r.Reissued = f.u
+		case 5:
+			r.Completed = f.u != 0
 		}
 		return nil
 	})

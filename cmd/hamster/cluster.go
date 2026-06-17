@@ -45,6 +45,9 @@ commands:
            key from the old to the new — metadata only, object bytes never move.
            Every node must run with -new-master-key-file holding the next key;
            on success the old key can be retired
+  rotate-ca  rotate the cluster CA (ADR-0033): mint a new CA, trust it alongside
+           the old, reissue every node's certificate onto it, then drop the old —
+           no downtime, no trust gap. The new CA key never leaves the leader
   recover  rewrite a stopped survivor into a new single-voter cluster —
            the last resort when a majority of voters is permanently lost
 `
@@ -77,6 +80,8 @@ func clusterCmd(args []string) error {
 		return clusterEncrypt(args[1:])
 	case "rotate-key":
 		return clusterRotateKey(args[1:])
+	case "rotate-ca":
+		return clusterRotateCA(args[1:])
 	case "recover":
 		return clusterRecover(args[1:])
 	default:
@@ -374,6 +379,13 @@ func clusterStatus(args []string) error {
 	} else {
 		fmt.Println("encryption at rest: off")
 	}
+	if report.TrustVersion > 0 {
+		fmt.Printf("cluster CA: trust bundle generation %d", report.TrustVersion)
+		if report.CARotating {
+			fmt.Printf(" — CA rotation in progress: %d node(s) still on the old CA", report.CAStragglers)
+		}
+		fmt.Println()
+	}
 	return nil
 }
 
@@ -532,6 +544,26 @@ func clusterRotateKey(args []string) error {
 		return fmt.Errorf("rotation did not converge: %d object(s) still on the old key — re-run `cluster rotate-key`", rep.Remaining)
 	}
 	log.Printf("key rotation complete: rewrapped %d object(s) onto the new key. The old key is no longer in use — retire it and run every node with the new key as -master-key-file.", rep.Rewrapped)
+	return nil
+}
+
+func clusterRotateCA(args []string) error {
+	fs := flag.NewFlagSet("cluster rotate-ca", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
+	fs.Parse(args)
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
+	}
+	log.Printf("rotating the cluster CA: minting a new CA, trusting it alongside the old, reissuing every node onto it, then dropping the old. No downtime.")
+	rep, err := cluster.RotateCA(*dataDir, *addr)
+	if err != nil {
+		return err
+	}
+	if !rep.Completed {
+		return fmt.Errorf("CA rotation did not complete (reissued %d) — re-run `cluster rotate-ca`", rep.Reissued)
+	}
+	log.Printf("CA rotation complete: reissued %d node certificate(s) onto the new CA and dropped the old one. The old CA is retired.", rep.Reissued)
 	return nil
 }
 
