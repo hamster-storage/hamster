@@ -113,6 +113,7 @@ const (
 	reqRotateCA     = 8
 	reqReissue      = 9
 	reqCanStop      = 10
+	reqMetrics      = 11
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.
@@ -267,6 +268,14 @@ type canStopResponse struct {
 	Error  string
 	Safe   bool
 	Reason string
+}
+
+// metricsResponse carries this node's metrics snapshot (ADR-0035): the marshaled
+// metrics.Snapshot, the same typed encoding the web console will render. Read-only
+// and per-node, answered by any member.
+type metricsResponse struct {
+	Error    string
+	Snapshot []byte
 }
 
 type removeRequest struct {
@@ -552,6 +561,26 @@ func decodeDrainRequest(buf []byte) (drainRequest, error) {
 			r.NodeID = string(f.b)
 		case 3:
 			r.Draining = f.u != 0
+		}
+		return nil
+	})
+	return r, err
+}
+
+func encodeMetricsResponse(r metricsResponse) []byte {
+	b := putUint(nil, 1, protocolVersion)
+	b = putString(b, 2, r.Error)
+	return putBytes(b, 3, r.Snapshot)
+}
+
+func decodeMetricsResponse(buf []byte) (metricsResponse, error) {
+	var r metricsResponse
+	err := forEachField(buf, func(f field) error {
+		switch f.num {
+		case 2:
+			r.Error = string(f.b)
+		case 3:
+			r.Snapshot = append([]byte(nil), f.b...)
 		}
 		return nil
 	})

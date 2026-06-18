@@ -34,14 +34,14 @@ scrape-time collectors, golden-pinned Prometheus text exposition), the admin HTT
 listener (`-admin <addr>` on `cluster run` and `serve`) serving `GET /metrics`, and
 a first signal set — `build_info`/`node_info`, uptime, and the cluster-wide gauges
 (members, voters, is-leader, effective generation) — proven end to end by
-`TestClusterMetricsEndpoint`. Histograms arrive with the latency signals (pass 3).
-Remaining passes:
+`TestClusterMetricsEndpoint`. Pass 2 has landed too: the typed snapshot
+(`metrics.Snapshot`/`Family`, the hand-written-protobuf `MarshalSnapshot` codec)
+served over a new `reqMetrics` control request, and `cluster metrics` rendering it
+through the shared `RenderText` — the same encoding the v0.11 console will consume.
+Histograms arrive with the latency signals (the remaining pass). Remaining:
 
-1. **The typed snapshot + CLI.** A versioned protobuf metrics snapshot over a new
-   `reqMetrics` control request (the encoding the v0.11 console will also consume),
-   a `cluster metrics` command that renders it, and a durability/health summary
-   line added to `cluster status`.
-2. **The real signals.** Histograms first, then wire the meaty ones through: durability/EC health (objects
+1. **The real signals.** Histograms first, then wire the meaty ones through (and a
+   durability/health summary line on `cluster status`): durability/EC health (objects
    at/below their redundancy floor, shards needing repair), repair/scrub coverage
    and backlog, Raft health (leader/term/commit lag), data-plane latency and
    request rates/errors, capacity. Each proven under the simulation harness where it

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // TestExpositionGolden pins the Prometheus text output: families in registration
@@ -122,4 +124,54 @@ func TestLabelCountMismatchPanics(t *testing.T) {
 		}
 	}()
 	g.Set(1, "only-one")
+}
+
+// TestSnapshotRoundTrip: a registry's snapshot survives the wire codec and
+// re-renders to the same Prometheus text.
+func TestSnapshotRoundTrip(t *testing.T) {
+	r := NewRegistry()
+	r.NewGauge("hamster_build_info", "Build info.", "version", "generation").Set(1, "v0.10.0", "1")
+	c := r.NewCounter("hamster_s3_requests_total", "Requests.", "method", "code")
+	c.Add(3, "GET", "200")
+	c.Inc("PUT", "503")
+	g := r.NewGauge("hamster_frac", "A fraction.")
+	g.Set(0.25)
+
+	snap := r.Snapshot()
+	wire := MarshalSnapshot(snap)
+	back, err := UnmarshalSnapshot(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var a, b strings.Builder
+	if err := RenderText(&a, snap); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenderText(&b, back); err != nil {
+		t.Fatal(err)
+	}
+	if a.String() != b.String() {
+		t.Fatalf("snapshot diverged across the wire:\n--- before ---\n%s\n--- after ---\n%s", a.String(), b.String())
+	}
+	if !strings.Contains(b.String(), `hamster_s3_requests_total{method="GET",code="200"} 3`) {
+		t.Fatalf("decoded snapshot lost a sample:\n%s", b.String())
+	}
+}
+
+// TestUnmarshalSnapshotSkipsUnknownField: a future field is skipped, not an error.
+func TestUnmarshalSnapshotSkipsUnknownField(t *testing.T) {
+	r := NewRegistry()
+	r.NewGauge("hamster_x", "x.").Set(7)
+	wire := MarshalSnapshot(r.Snapshot())
+	// Append an unknown top-level field (number 15, varint) a newer encoder might add.
+	wire = protowire.AppendTag(wire, 15, protowire.VarintType)
+	wire = protowire.AppendVarint(wire, 1)
+	fams, err := UnmarshalSnapshot(wire)
+	if err != nil {
+		t.Fatalf("unknown field should be skipped: %v", err)
+	}
+	if len(fams) != 1 || fams[0].Name != "hamster_x" {
+		t.Fatalf("families = %+v", fams)
+	}
 }

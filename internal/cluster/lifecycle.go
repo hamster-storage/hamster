@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/certs"
+	"github.com/hamster-storage/hamster/internal/metrics"
 	"github.com/hamster-storage/hamster/internal/raftnode"
 	"github.com/hamster-storage/hamster/internal/seam"
 	"github.com/hamster-storage/hamster/internal/sys"
@@ -310,6 +311,36 @@ func Status(dataDir, addr string) (StatusReport, error) {
 		TrustVersion: resp.TrustVersion, CARotating: resp.CARotating, CAStragglers: resp.CAStragglers,
 		EffectiveGeneration: resp.EffectiveGeneration,
 	}, nil
+}
+
+// Metrics fetches a node's metrics snapshot (ADR-0035) over the control channel,
+// authenticated by this node's own certificate (like Status). An empty addr asks
+// the local node. Read-only and per-node — answered by whichever node is asked.
+func Metrics(dataDir, addr string) ([]metrics.Family, error) {
+	dir := Dir(dataDir)
+	cfg, err := loadConfig(dir)
+	if err != nil {
+		return nil, err
+	}
+	if addr == "" {
+		addr = cfg.JoinAddr
+	}
+	cert, pool, _, err := loadNodeTLS(dir)
+	if err != nil {
+		return nil, err
+	}
+	buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqMetrics, nil))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := decodeMetricsResponse(buf)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("cluster: metrics refused: %s", resp.Error)
+	}
+	return metrics.UnmarshalSnapshot(resp.Snapshot)
 }
 
 // CanStop asks a node whether taking nodeID down for maintenance or upgrade is

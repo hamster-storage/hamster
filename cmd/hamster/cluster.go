@@ -15,6 +15,7 @@ import (
 	"github.com/hamster-storage/hamster/internal/cluster"
 	"github.com/hamster-storage/hamster/internal/ec"
 	"github.com/hamster-storage/hamster/internal/keys"
+	"github.com/hamster-storage/hamster/internal/metrics"
 )
 
 const clusterUsage = `usage: hamster cluster <command> [flags]
@@ -31,6 +32,8 @@ commands:
   can-stop check whether taking a node down for maintenance/upgrade is safe now
            (ADR-0034): quorum holds, no other node is down, no transition open.
            Advisory — exits 0 (safe) or 1 (not); it never stops a node
+  metrics  print a node's metrics snapshot (ADR-0035) in Prometheus text form;
+           the same signals the admin port serves at /metrics for scrapers
   drain    take a node out of service: new writes steer off it, repair migrates
            its shards away. Reversible with undrain (e.g. for maintenance);
            follow with remove to decommission. If it shrinks the cluster past a
@@ -74,6 +77,8 @@ func clusterCmd(args []string) error {
 		return clusterStatus(args[1:])
 	case "can-stop":
 		return clusterCanStop(args[1:])
+	case "metrics":
+		return clusterMetrics(args[1:])
 	case "drain":
 		return clusterDrain(args[1:], true)
 	case "undrain":
@@ -423,6 +428,25 @@ func clusterStatus(args []string) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+// clusterMetrics fetches a node's metrics snapshot over the control channel and
+// renders it (ADR-0035) — the typed snapshot the web console will also consume,
+// shown here in the Prometheus text format. Use the admin port's /metrics for an
+// external scraper; this is the operator's at-a-glance view from the CLI.
+func clusterMetrics(args []string) error {
+	fs := flag.NewFlagSet("cluster metrics", flag.ExitOnError)
+	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
+	addr := fs.String("addr", "", "cluster listen address of the node to ask (default: this node's own)")
+	fs.Parse(args)
+	if *dataDir == "" {
+		return fmt.Errorf("-data-dir is required")
+	}
+	families, err := cluster.Metrics(*dataDir, *addr)
+	if err != nil {
+		return err
+	}
+	return metrics.RenderText(os.Stdout, families)
 }
 
 // clusterCanStop runs the advisory health interlock (ADR-0034): it asks whether
