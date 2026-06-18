@@ -197,6 +197,13 @@ type statusResponse struct {
 	LocalBinaryVersion  string
 	LocalGeneration     uint32
 	EffectiveGeneration uint32
+	// Durability posture (ADR-0035): the active auto storage profile (k+m) and
+	// whether a layout migration is open — the `cluster status` health summary,
+	// read cheaply from the answering node's layout (the object-version count is a
+	// metrics-only signal, to keep the status path scan-free).
+	DataShards     uint32
+	ParityShards   uint32
+	TransitionOpen bool
 }
 
 // reissueRequest carries a node certificate the rotation driver signed under the
@@ -726,7 +733,11 @@ func encodeStatusResponse(r statusResponse) []byte {
 	b = putUint(b, 10, r.CAStragglers)
 	b = putString(b, 11, r.LocalBinaryVersion)
 	b = putUint(b, 12, uint64(r.LocalGeneration))
-	return putUint(b, 13, uint64(r.EffectiveGeneration))
+	b = putUint(b, 13, uint64(r.EffectiveGeneration))
+	// Field 14 (object-version count) was removed before release — kept reserved.
+	b = putUint(b, 15, uint64(r.DataShards))
+	b = putUint(b, 16, uint64(r.ParityShards))
+	return putBool(b, 17, r.TransitionOpen)
 }
 
 func decodeStatusResponse(buf []byte) (statusResponse, error) {
@@ -761,6 +772,12 @@ func decodeStatusResponse(buf []byte) (statusResponse, error) {
 			r.LocalGeneration = uint32(f.u)
 		case 13:
 			r.EffectiveGeneration = uint32(f.u)
+		case 15:
+			r.DataShards = uint32(f.u)
+		case 16:
+			r.ParityShards = uint32(f.u)
+		case 17:
+			r.TransitionOpen = f.u != 0
 		}
 		return nil
 	})

@@ -279,6 +279,11 @@ type StatusReport struct {
 	// (ADR-0034): the minimum across live members, as the answering node sees it.
 	// Each member's own generation is on its Member record.
 	EffectiveGeneration uint32
+	// Durability posture (ADR-0035): the active auto storage profile (k+m) and
+	// whether a layout migration is open.
+	DataShards     uint32
+	ParityShards   uint32
+	TransitionOpen bool
 }
 
 func Status(dataDir, addr string) (StatusReport, error) {
@@ -310,6 +315,7 @@ func Status(dataDir, addr string) (StatusReport, error) {
 		KEKFingerprint: resp.KEKFingerprint, RotatingTo: resp.RotatingTo, Remaining: resp.Remaining,
 		TrustVersion: resp.TrustVersion, CARotating: resp.CARotating, CAStragglers: resp.CAStragglers,
 		EffectiveGeneration: resp.EffectiveGeneration,
+		DataShards:          resp.DataShards, ParityShards: resp.ParityShards, TransitionOpen: resp.TransitionOpen,
 	}, nil
 }
 

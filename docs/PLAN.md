@@ -29,23 +29,31 @@ Prometheus text exposition on the admin port, and a typed snapshot over the cont
 channel that the CLI and the v0.11 web console both render. Durability/EC health is
 the headline signal; tracing deferred.
 
-Pass 1 has landed: the hand-rolled `internal/metrics` registry (counters, gauges,
-scrape-time collectors, golden-pinned Prometheus text exposition), the admin HTTP
-listener (`-admin <addr>` on `cluster run` and `serve`) serving `GET /metrics`, and
-a first signal set — `build_info`/`node_info`, uptime, and the cluster-wide gauges
-(members, voters, is-leader, effective generation) — proven end to end by
-`TestClusterMetricsEndpoint`. Pass 2 has landed too: the typed snapshot
-(`metrics.Snapshot`/`Family`, the hand-written-protobuf `MarshalSnapshot` codec)
-served over a new `reqMetrics` control request, and `cluster metrics` rendering it
-through the shared `RenderText` — the same encoding the v0.11 console will consume.
-Histograms arrive with the latency signals (the remaining pass). Remaining:
+All three passes have landed and are gated/pushed:
 
-1. **The real signals.** Histograms first, then wire the meaty ones through (and a
-   durability/health summary line on `cluster status`): durability/EC health (objects
-   at/below their redundancy floor, shards needing repair), repair/scrub coverage
-   and backlog, Raft health (leader/term/commit lag), data-plane latency and
-   request rates/errors, capacity. Each proven under the simulation harness where it
-   lives on the deterministic path.
+- **The registry + Prometheus `/metrics`** — `internal/metrics` (counters, gauges,
+  scrape-time collectors, golden-pinned exposition), the `-admin <addr>` listener on
+  `cluster run` and `serve`.
+- **The typed snapshot + CLI** — `metrics.Snapshot`/`Family` and the
+  hand-written-protobuf `MarshalSnapshot` codec, served over `reqMetrics`, rendered
+  by `cluster metrics` through the shared `RenderText` (the encoding the v0.11
+  console will consume).
+- **The real signals** — the durability posture any node derives from its replica
+  (object-version and bucket counts, the active auto profile's k/m,
+  layout-transition-open), the `hamster_s3_requests_total{method,code}` counter the
+  `ServeS3` middleware increments, and a durability summary line on `cluster status`.
+  `TestClusterMetricsEndpoint` proves the gauges, the counter (after an S3 request),
+  and the status line end to end.
+
+v0.10 is ready for a **release decision** (held until Nick signs off). The one
+additive increment left is **request-latency histograms** — the registry gains a
+Histogram type (Prometheus `_bucket`/`_sum`/`_count` exposition + snapshot encoding)
+and the `ServeS3` middleware observes request durations through the gateway clock.
+It is deliberately its own increment (a histogram with no latency signal is unused
+scaffolding); it can ship in v0.10 before release or as a fast-follow. Deeper
+durability signals sourced from the repair/scrub sweeps (objects below their floor,
+shards needing repair, scrub coverage) and Raft term/commit-lag are the natural
+next instrumentation, additive over this foundation.
 
 ## Later versions
 

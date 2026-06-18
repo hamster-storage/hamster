@@ -16,15 +16,22 @@ import (
 // /metrics, carrying the first signal set — build/node identity, uptime, and the
 // cluster-wide gauges derived from the node's own replica.
 func TestClusterMetricsEndpoint(t *testing.T) {
+	env := []string{"HAMSTER_ACCESS_KEY_ID=e2e-m", "HAMSTER_SECRET_ACCESS_KEY=e2e-m-secret"}
 	root := t.TempDir()
 	d1 := filepath.Join(root, "n1")
 	adminAddr := freeAddr(t)
+	s3Addr := freeAddr(t)
 
 	run(t, "cluster", "init", "-data-dir", d1, "-cluster", "e2e-metrics", "-node", "n1", "-listen", freeAddr(t))
-	start(t, nil, "cluster", "run", "-data-dir", d1, "-admin", adminAddr)
+	start(t, env, "cluster", "run", "-data-dir", d1, "-s3", s3Addr, "-admin", adminAddr)
 	waitStatus(t, d1, "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
+
+	// One S3 request (unsigned → 403) so the request counter has a series.
+	if _, err := http.Get("http://" + s3Addr + "/"); err != nil {
+		t.Fatalf("S3 probe: %v", err)
+	}
 
 	wantSignals := []string{
 		"# TYPE hamster_build_info gauge",
@@ -34,6 +41,12 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 		"hamster_cluster_members 1",
 		"hamster_cluster_voters 1",
 		"hamster_raft_is_leader 1",
+		// Durability posture (a lone node is the 1+0 auto profile).
+		"hamster_object_versions 0",
+		"hamster_storage_profile_data_shards 1",
+		"hamster_layout_transition_open 0",
+		// The S3 request counter, after the probe above.
+		`hamster_s3_requests_total{method="GET",code="403"} 1`,
 	}
 
 	// The Prometheus scrape surface on the admin port.
@@ -52,6 +65,12 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 		if !strings.Contains(cli, want) {
 			t.Fatalf("`cluster metrics` output missing %q:\n%s", want, cli)
 		}
+	}
+
+	// The durability health summary on `cluster status` (ADR-0035).
+	status := run(t, "cluster", "status", "-data-dir", d1)
+	if !strings.Contains(status, "durability:") || !strings.Contains(status, "profile 1+0") {
+		t.Fatalf("`cluster status` missing the durability summary:\n%s", status)
 	}
 }
 

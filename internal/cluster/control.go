@@ -63,6 +63,10 @@ func (n *Node) handleConn(conn *tls.Conn) {
 			// member list already carries.
 			resp.LocalBinaryVersion, resp.LocalGeneration = n.binaryVersion, n.generation
 			resp.EffectiveGeneration = effectiveGeneration(resp.Members)
+			// Durability posture for the status health summary (ADR-0035): the
+			// cheap layout-only read, no keyspace scan on the status path.
+			k, m, transition := n.layoutPosture()
+			resp.DataShards, resp.ParityShards, resp.TransitionOpen = uint32(k), uint32(m), transition
 		}
 		_ = writeFrame(conn, encodeStatusResponse(resp))
 	case reqDrain:

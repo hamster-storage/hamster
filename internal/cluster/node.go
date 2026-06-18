@@ -98,8 +98,9 @@ type Node struct {
 	// Observability (ADR-0035): the node's metrics registry, and the start time
 	// uptime is measured from (via the seam clock). Collectors registered on the
 	// registry read live cluster state at scrape time.
-	metrics *metrics.Registry
-	startAt time.Time
+	metrics    *metrics.Registry
+	s3Requests *metrics.Counter // incremented by the ServeS3 middleware
+	startAt    time.Time
 
 	issueMu sync.Mutex // serializes joins: ID allocation and its durable record
 	stopped sync.Once
