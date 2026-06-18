@@ -29,22 +29,19 @@ Prometheus text exposition on the admin port, and a typed snapshot over the cont
 channel that the CLI and the v0.11 web console both render. Durability/EC health is
 the headline signal; tracing deferred.
 
-Passes, in order:
+Pass 1 has landed: the hand-rolled `internal/metrics` registry (counters, gauges,
+scrape-time collectors, golden-pinned Prometheus text exposition), the admin HTTP
+listener (`-admin <addr>` on `cluster run` and `serve`) serving `GET /metrics`, and
+a first signal set — `build_info`/`node_info`, uptime, and the cluster-wide gauges
+(members, voters, is-leader, effective generation) — proven end to end by
+`TestClusterMetricsEndpoint`. Histograms arrive with the latency signals (pass 3).
+Remaining passes:
 
-1. **The registry + Prometheus `/metrics`.** A hand-rolled `internal/metrics`
-   (counters, gauges, histograms, scrape-time collector callbacks for derived
-   signals) with a golden-pinned Prometheus text exposition; an admin HTTP listener
-   (`-admin <addr>` on `cluster run` and `serve`) serving `GET /metrics`; a first
-   signal set proving it end to end — `build_info{version,generation}`, uptime, and
-   on a cluster node a few cheap cluster-wide-derived gauges (members, voters,
-   is-leader, effective generation). Recording stays deterministic (no ambient time
-   — durations are computed at the call site through the seam clock and observed as
-   values; metrics never feed replicated state).
-2. **The typed snapshot + CLI.** A versioned protobuf metrics snapshot over a new
+1. **The typed snapshot + CLI.** A versioned protobuf metrics snapshot over a new
    `reqMetrics` control request (the encoding the v0.11 console will also consume),
    a `cluster metrics` command that renders it, and a durability/health summary
    line added to `cluster status`.
-3. **The real signals.** Wire the meaty ones through: durability/EC health (objects
+2. **The real signals.** Histograms first, then wire the meaty ones through: durability/EC health (objects
    at/below their redundancy floor, shards needing repair), repair/scrub coverage
    and backlog, Raft health (leader/term/commit lag), data-plane latency and
    request rates/errors, capacity. Each proven under the simulation harness where it

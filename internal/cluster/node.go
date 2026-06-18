@@ -22,6 +22,7 @@ import (
 	"github.com/hamster-storage/hamster/internal/datapath"
 	"github.com/hamster-storage/hamster/internal/keys"
 	"github.com/hamster-storage/hamster/internal/meta"
+	"github.com/hamster-storage/hamster/internal/metrics"
 	"github.com/hamster-storage/hamster/internal/place"
 	"github.com/hamster-storage/hamster/internal/raftnode"
 	"github.com/hamster-storage/hamster/internal/seam"
@@ -93,6 +94,12 @@ type Node struct {
 	// last node upgrades. Zero generation means unset (treated as behind).
 	binaryVersion string
 	generation    uint32
+
+	// Observability (ADR-0035): the node's metrics registry, and the start time
+	// uptime is measured from (via the seam clock). Collectors registered on the
+	// registry read live cluster state at scrape time.
+	metrics *metrics.Registry
+	startAt time.Time
 
 	issueMu sync.Mutex // serializes joins: ID allocation and its durable record
 	stopped sync.Once
@@ -295,6 +302,7 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 			binary.LittleEndian.Uint64(seed[0:8]), binary.LittleEndian.Uint64(seed[8:16])))
 		n.rng = rng
 		n.clock = clock
+		n.startAt = clock.Now()
 		rn, err := raftnode.New(raftnode.Config{
 			ID: cfg.RaftID, Peers: raftPeers, Dials: dials, Join: cfg.Join,
 			Clock:     clock,
@@ -387,6 +395,10 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 	// (join/status) the shared listener has been accepting since NewTransport
 	// can now be served. handleConn waits on this.
 	close(n.ready)
+
+	// The metrics registry and its collectors (ADR-0035): build/node info set
+	// once, cluster-wide gauges refreshed from live state at scrape time.
+	n.initMetrics()
 
 	// Membership grows the transport's address book: joined members appear
 	// in the replicated state, the transport learns where they dial.

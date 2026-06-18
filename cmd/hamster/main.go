@@ -207,6 +207,7 @@ func serve(args []string) error {
 	dataDir := fs.String("data-dir", "", "directory for object data (required)")
 	region := fs.String("region", "us-east-1", "SigV4 region string")
 	domain := fs.String("domain", "", "base domain for virtual-hosted bucket addressing, e.g. s3.example.com (empty: path-style only)")
+	admin := fs.String("admin", "", "serve the admin endpoints on this address (host:port): Prometheus metrics at /metrics (ADR-0035); empty disables")
 	fs.Parse(args)
 
 	if *dataDir == "" {
@@ -267,18 +268,26 @@ func serve(args []string) error {
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()
 
+	var adminSrv *http.Server
+	if *admin != "" {
+		adminSrv = startAdmin(*admin, newProcessRegistry(fullVersion(), protocolGeneration(), time.Now()))
+		log.Printf("hamster serve: admin endpoints on http://%s (metrics at /metrics)", *admin)
+	}
+
 	log.Printf("hamster serve: %s — S3 API on http://%s (region %s)", fullVersion(), *listen, *region)
 	log.Printf("hamster serve: data in %s (%d metadata rows restored)", *dataDir, restored)
 	log.Printf("hamster serve: DEV PREVIEW — single node, v0 formats may change between releases")
 
 	select {
 	case err := <-done:
+		shutdownAdmin(adminSrv)
 		return err
 	case <-stop:
 	}
 	log.Printf("hamster serve: shutting down")
 	// Shutdown order per the gateway contract: HTTP first, loop second —
 	// and the metadata db last, once nothing can post a transaction.
+	shutdownAdmin(adminSrv)
 	if err := srv.Close(); err != nil {
 		return err
 	}

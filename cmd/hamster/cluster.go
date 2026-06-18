@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -167,6 +168,7 @@ func clusterRun(args []string) error {
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight when joining with -token (ADR-0004); 0 means equal")
 	replaces := fs.String("replaces", "", "when joining with -token, replace an existing member with this node at the same cluster size (ADR-0004): the old node's shards migrate here and it is evicted, profile unchanged")
 	s3 := fs.String("s3", "", "serve the S3 API on this address (host:port); empty disables")
+	admin := fs.String("admin", "", "serve the admin endpoints on this address (host:port): Prometheus metrics at /metrics (ADR-0035); empty disables")
 	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
 	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
 	masterKeyFile := fs.String("master-key-file", "", "path to the cluster master key (KEK) for encryption at rest (ADR-0021): 32 bytes raw, or hex/base64. The same key on every node; held in memory only, never persisted. Mount it off the data disk (e.g. a Kubernetes Secret volume)")
@@ -256,6 +258,11 @@ func clusterRun(args []string) error {
 	} else {
 		log.Printf("hamster cluster node: DEV PREVIEW — pass -s3 to serve the S3 API over the cluster data path")
 	}
+	var adminSrv *http.Server
+	if *admin != "" {
+		adminSrv = startAdmin(*admin, n.Metrics())
+		log.Printf("hamster cluster node: admin endpoints on http://%s (metrics at /metrics)", *admin)
+	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	select {
@@ -266,6 +273,7 @@ func clusterRun(args []string) error {
 		// linger as a stopped, tombstoned process.
 		log.Printf("hamster cluster node: removed from the cluster; exiting")
 	}
+	shutdownAdmin(adminSrv)
 	n.Stop()
 	return nil
 }
