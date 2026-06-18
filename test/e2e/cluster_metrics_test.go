@@ -26,8 +26,7 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 		return len(rows) == 1 && rows[0].leader
 	})
 
-	body := scrapeMetrics(t, adminAddr)
-	for _, want := range []string{
+	wantSignals := []string{
 		"# TYPE hamster_build_info gauge",
 		"hamster_build_info{version=",
 		"hamster_node_info{node_id=\"n1\",cluster=\"e2e-metrics\"} 1",
@@ -35,9 +34,23 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 		"hamster_cluster_members 1",
 		"hamster_cluster_voters 1",
 		"hamster_raft_is_leader 1",
-	} {
+	}
+
+	// The Prometheus scrape surface on the admin port.
+	body := scrapeMetrics(t, adminAddr)
+	for _, want := range wantSignals {
 		if !strings.Contains(body, want) {
-			t.Fatalf("metrics output missing %q:\n%s", want, body)
+			t.Fatalf("/metrics output missing %q:\n%s", want, body)
+		}
+	}
+
+	// The same registry, fetched as the typed snapshot over the control channel
+	// and rendered by `cluster metrics` (ADR-0035) — proves the snapshot path the
+	// web console will use.
+	cli := run(t, "cluster", "metrics", "-data-dir", d1)
+	for _, want := range wantSignals {
+		if !strings.Contains(cli, want) {
+			t.Fatalf("`cluster metrics` output missing %q:\n%s", want, cli)
 		}
 	}
 }

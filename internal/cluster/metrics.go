@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"crypto/tls"
 	"strconv"
 
 	"github.com/hamster-storage/hamster/internal/metrics"
@@ -14,6 +15,16 @@ import (
 
 // Metrics returns the node's registry, for the admin /metrics endpoint.
 func (n *Node) Metrics() *metrics.Registry { return n.metrics }
+
+// handleMetrics serves a metrics snapshot request (ADR-0035): the node's registry
+// as the typed wire snapshot, authenticated by a cluster certificate like status.
+// Read-only and per-node, so any member answers — no leader redirect.
+func (n *Node) handleMetrics(conn *tls.Conn) metricsResponse {
+	if len(conn.ConnectionState().PeerCertificates) == 0 {
+		return metricsResponse{Error: "metrics requires a cluster certificate"}
+	}
+	return metricsResponse{Snapshot: metrics.MarshalSnapshot(n.metrics.Snapshot())}
+}
 
 // initMetrics builds the registry and registers the first signal set. Constant
 // identity metrics are set once; the cluster-wide gauges are refreshed by a

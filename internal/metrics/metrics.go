@@ -134,10 +134,26 @@ func (m *metric) series_(labelValues []string) *series {
 	return s
 }
 
-// WritePrometheus runs the collectors, then writes the registry in the Prometheus
-// text exposition format. Output is deterministic: families in registration
-// order, series sorted by their label values, so a golden test can pin it.
-func (r *Registry) WritePrometheus(w io.Writer) error {
+// Sample is one labeled value: Labels are the values for the family's label
+// names, in order.
+type Sample struct {
+	Labels []string
+	Value  float64
+}
+
+// Family is a metric family — a name, help, type, label schema, and its samples —
+// in a snapshot. This is the typed model the CLI and the web console render, and
+// the wire snapshot (snapshot.go) serializes.
+type Family struct {
+	Name, Help, Type string
+	LabelNames       []string
+	Samples          []Sample
+}
+
+// Snapshot runs the collectors and returns the registry as typed families,
+// deterministic: families in registration order, samples sorted by label values.
+// It is the one gather the Prometheus text and the wire snapshot both render.
+func (r *Registry) Snapshot() []Family {
 	r.mu.Lock()
 	collectors := append([]func(){}, r.collectors...)
 	order := append([]string(nil), r.order...)
@@ -151,7 +167,7 @@ func (r *Registry) WritePrometheus(w io.Writer) error {
 		fn()
 	}
 
-	bw := bufio.NewWriter(w)
+	out := make([]Family, 0, len(order))
 	for _, name := range order {
 		m := fams[name]
 		m.mu.Lock()
@@ -164,23 +180,42 @@ func (r *Registry) WritePrometheus(w io.Writer) error {
 			continue
 		}
 		sort.Slice(all, func(i, j int) bool { return less(all[i].labelValues, all[j].labelValues) })
+		f := Family{Name: m.name, Help: m.help, Type: m.typ, LabelNames: append([]string(nil), m.labelNames...)}
+		for _, s := range all {
+			f.Samples = append(f.Samples, Sample{Labels: append([]string(nil), s.labelValues...), Value: s.get()})
+		}
+		out = append(out, f)
+	}
+	return out
+}
 
+// WritePrometheus writes the registry in the Prometheus text exposition format,
+// after running collectors. Output is deterministic, so a golden test can pin it.
+func (r *Registry) WritePrometheus(w io.Writer) error {
+	return RenderText(w, r.Snapshot())
+}
+
+// RenderText writes families in the Prometheus text exposition format. Shared by
+// the live /metrics endpoint (from a registry's Snapshot) and `cluster metrics`
+// (from a snapshot fetched over the wire), so both render identically.
+func RenderText(w io.Writer, families []Family) error {
+	bw := bufio.NewWriter(w)
+	for _, f := range families {
 		bw.WriteString("# HELP ")
-		bw.WriteString(m.name)
+		bw.WriteString(f.Name)
 		bw.WriteByte(' ')
-		bw.WriteString(escapeHelp(m.help))
+		bw.WriteString(escapeHelp(f.Help))
 		bw.WriteByte('\n')
 		bw.WriteString("# TYPE ")
-		bw.WriteString(m.name)
+		bw.WriteString(f.Name)
 		bw.WriteByte(' ')
-		bw.WriteString(m.typ)
+		bw.WriteString(f.Type)
 		bw.WriteByte('\n')
-
-		for _, s := range all {
-			bw.WriteString(m.name)
-			writeLabels(bw, m.labelNames, s.labelValues)
+		for _, s := range f.Samples {
+			bw.WriteString(f.Name)
+			writeLabels(bw, f.LabelNames, s.Labels)
 			bw.WriteByte(' ')
-			bw.WriteString(formatValue(s.get()))
+			bw.WriteString(formatValue(s.Value))
 			bw.WriteByte('\n')
 		}
 	}
