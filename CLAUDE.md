@@ -79,6 +79,7 @@ task release    # run the full gate, cross-compile, tag, and publish a GitHub re
 - [`docs/ERASURE-CODING.md`](docs/ERASURE-CODING.md) — storage profiles: the k+m set, profile changes, small objects, the write-ack rule, and the single-node-to-cluster growth story.
 - [`docs/DATA-STREAM.md`](docs/DATA-STREAM.md) — the framed object stream between the gateway and erasure coding: chunking, optional compression and encryption as per-chunk transforms, and why the order is chunk → compress → encrypt → frame → EC.
 - [`docs/S3-API.md`](docs/S3-API.md) — the S3 compatibility surface: operations by release, SigV4 authentication, ETag semantics, limits, and non-goals.
+- [`docs/UPGRADES.md`](docs/UPGRADES.md) — the operator's rolling-upgrade runbook (v0.9, [ADR-0034](docs/adr/0034-rolling-upgrade-machinery.md)): the per-node out-of-band procedure (`can-stop` → swap the binary your way → confirm via `status` → next), one version at a time, rollback, and per-deployment-mode examples. The binary swap is the deployment system's job; Hamster owns the safety machinery.
 - [`docs/adr/`](docs/adr/) — Architecture Decision Records. One decision per file, with the reasoning and the rejected alternatives. Start at the [index](docs/adr/README.md).
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — the v0.x and v1.0 milestones.
 

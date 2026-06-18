@@ -11,28 +11,29 @@ completed item's record survives in git history, in its now-green test, and in
 the shipped ADR/doc. This file is not an archive and not a TODO graveyard: if a
 line here is done, delete it.
 
-## Now / next — v0.10 zero-downtime rolling upgrades
+## Now / next — v0.10 observability and telemetry
 
-v0.9 upgrade machinery has landed (all three pieces of [ADR-0034](adr/0034-rolling-upgrade-machinery.md)):
-per-node version advertisement (`SetNodeVersion`, the leader's `versionMonitor`,
-`cluster status` showing per-node version + effective generation + skew note), the
-health interlock (`cluster can-stop <node>`), and the end-to-end upgrade suite
-(`TestClusterRollingUpgrade`: two generations from one source, a three-node roll
-under live load with versioned + COMPLIANCE-locked data, proving availability,
-zero loss, and the effective generation auto-rolling only after the last node).
+**Zero-downtime rolling upgrades shipped at v0.9.0** ([ADR-0034](adr/0034-rolling-upgrade-machinery.md)):
+version advertisement (`SetNodeVersion`, the leader's `versionMonitor`, etcd-style
+auto-roll), the health interlock (`cluster can-stop`), the end-to-end upgrade suite
+(`TestClusterRollingUpgrade`), and the supported operator-driven per-node procedure
+([UPGRADES.md](UPGRADES.md)). The binary swap is the deployment system's job, per
+node — Hamster owns the safety machinery and the proof, not the swap — so there is
+no in-cluster "upgrade driver" to build. The roadmap pulled forward a version: what
+was v0.11 is now the front line.
 
-The front line is now **v0.10: zero-downtime rolling upgrades** — the orchestration
-*over* v0.9's machinery. v0.9 left stop/swap/start to the operator (advisory
-`can-stop`, out-of-band binary swap); v0.10 drives the loop: an operator command
-(or controller) that, given a target version, rolls the cluster node by node on
-its own — consult `can-stop`, drain/stop, wait for the replacement to rejoin and
-re-advertise, repeat — and *enforces* what v0.9 only surfaces (the one-generation
-skew rule, the interlock as a hard gate by never asking to stop a refused node).
-Design owes its own ADR before the passes break out; the interlock and
-advertisement it builds on are tested and shipped.
+The front line is **v0.10: observability and telemetry** — making a running cluster
+legible to an operator and their monitoring stack. The shape is still to be
+designed (it owes its own ADR before passes break out); the open questions are
+roughly: a metrics surface (Prometheus `/metrics` on the admin port? OpenTelemetry?
+both?), which signals matter first (durability/EC health, repair/scrub progress,
+Raft and data-plane latency, capacity, request rates and errors), structured logs
+and request tracing, and how this lands without a platform team — useful out of the
+box, integrating with what an operator already runs. Design next, then break out
+the passes.
 
 ## Later versions
 
 The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.11
-observability/telemetry, v0.12 web console. They are pulled into the section above
-as they become the front line.
+web console (over v0.10's signals), then hardening toward v1.0. They are pulled into
+the section above as they become the front line.

@@ -41,10 +41,9 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.6](https://github.com/hamster-storage/hamster/releases/tag/v0.6.0) | Object lock and WORM retention — GOVERNANCE and COMPLIANCE modes, legal holds, bucket default retention — on the single node and the cluster | ✅ |
 | [v0.7](https://github.com/hamster-storage/hamster/releases/tag/v0.7.0) | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | ✅ |
 | [v0.8](https://github.com/hamster-storage/hamster/releases/tag/v0.8.0) | Key and CA rotation: master-key rewrap and CA custody/rotation — both no-downtime, metadata- or trust-only | ✅ |
-| [v0.9](https://github.com/hamster-storage/hamster/releases/tag/v0.9.0) | Upgrade machinery: cluster version advertisement, health interlock, the upgrade test suite | ✅ |
-| v0.10 | Zero-downtime rolling upgrades | 🚧 in progress |
-| v0.11 | Observability/Telemetry | planned |
-| v0.12 | Web console | planned |
+| [v0.9](https://github.com/hamster-storage/hamster/releases/tag/v0.9.0) | Zero-downtime rolling upgrades: cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the [supported per-node roll](docs/UPGRADES.md) | ✅ |
+| v0.10 | Observability/Telemetry | 🚧 in progress |
+| v0.11 | Web console | planned |
 | TBD | TBD prior to v1 | planning |
 | v1.0 | Software updates and migrations supported from v1 | planned |
 
@@ -119,6 +118,7 @@ Drain is reversible (undrain) and pairs with remove to decommission — the same
 - [Glossary](docs/GLOSSARY.md) — the vocabulary (object, version, shard, stripe, partition, node, cluster, layout, …), grouped by layer. Start here if a term is unfamiliar.
 - [Architecture](docs/ARCHITECTURE.md) — the system design narrative: request paths, metadata/data separation, erasure coding, placement, upgrades.
 - [How Hamster compares](docs/COMPARISON.md) — an honest map next to Ceph, the MinIO origin story, the breadth-first Apache rewrites, and simpler single-node stores — including where Hamster is behind.
+- [Upgrading](docs/UPGRADES.md) — the no-downtime, one-node-at-a-time rolling-upgrade procedure: `can-stop`, swapping the binary your own way, confirming the roll, and rollback.
 - [Architecture Decision Records](docs/adr/README.md) — one decision per file, with the reasoning and the rejected alternatives.
 - [Roadmap](docs/ROADMAP.md) — the v0.x and v1.0 milestones.
 
