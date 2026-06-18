@@ -401,6 +401,16 @@ func clusterStatus(args []string) error {
 			fmt.Printf("  WARNING: generation skew %d exceeds one step — upgrade one generation at a time (ADR-0034)\n", hi-lo)
 		}
 	}
+	// Durability health summary (ADR-0035): the active profile and its node-loss
+	// tolerance, and any migration in flight. Object counts live in /metrics.
+	if report.DataShards > 0 {
+		fmt.Printf("\ndurability: profile %d+%d (tolerates %d node loss)",
+			report.DataShards, report.ParityShards, report.ParityShards)
+		if report.TransitionOpen {
+			fmt.Print(" — layout migration in progress")
+		}
+		fmt.Println()
+	}
 	fmt.Printf("\ntopology: %d node(s), %d host(s), %d zone(s)\n", len(members), len(hosts), len(zones))
 	if len(hosts) <= 1 {
 		fmt.Println("  note: one host — no host-level failure tolerance (shards can share a machine)")

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/hamster-storage/hamster/internal/coord"
@@ -70,9 +71,32 @@ func (n *Node) ServeS3(cfg S3Config) (addr string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("cluster: S3 listener on %s: %w", cfg.Listen, err)
 	}
-	n.s3 = &s3Server{ln: ln, srv: &http.Server{Handler: g}}
+	n.s3 = &s3Server{ln: ln, srv: &http.Server{Handler: n.instrumentS3(g)}}
 	go func() { _ = n.s3.srv.Serve(ln) }()
 	return ln.Addr().String(), nil
+}
+
+// instrumentS3 wraps the gateway handler to count requests by method and HTTP
+// status (ADR-0035) — the data-plane request-rate and error signal. A counter
+// Inc is deterministic (no clock or randomness); request-latency histograms are a
+// follow-on increment.
+func (n *Node) instrumentS3(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &s3StatusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		n.s3Requests.Inc(r.Method, strconv.Itoa(rec.status))
+	})
+}
+
+// s3StatusRecorder captures the response status for the request counter.
+type s3StatusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *s3StatusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
 
 // on runs fn on the node's loop and waits.

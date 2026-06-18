@@ -4,6 +4,8 @@ import (
 	"crypto/tls"
 	"strconv"
 
+	"github.com/hamster-storage/hamster/internal/ec"
+	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/metrics"
 )
 
@@ -81,4 +83,102 @@ func (n *Node) initMetrics() {
 		effGen.Set(float64(effectiveGeneration(ms)))
 		down.Set(float64(d))
 	})
+
+	// S3 request counter (ADR-0035): incremented by the ServeS3 middleware. The
+	// counter family is declared here so it appears in the registry from the
+	// start; a method/code series springs into being on its first request.
+	n.s3Requests = r.NewCounter("hamster_s3_requests_total",
+		"S3 requests served by this node, by method and HTTP status code.", "method", "code")
+
+	// Durability posture (ADR-0035): cluster-wide signals any node derives from its
+	// own replica — the compliance-shaped store's headline question, "is my data
+	// safe and at what width." Refreshed at scrape time from one loop read.
+	objects := r.NewGauge("hamster_object_versions",
+		"Stored object versions known to this node's replica.")
+	buckets := r.NewGauge("hamster_buckets", "Buckets known to this node's replica.")
+	dataShards := r.NewGauge("hamster_storage_profile_data_shards",
+		"Active auto storage-profile data shards (k) at the current active node count (ADR-0015).")
+	parityShards := r.NewGauge("hamster_storage_profile_parity_shards",
+		"Active auto storage-profile parity shards (m): node-loss tolerance (ADR-0015).")
+	transition := r.NewGauge("hamster_layout_transition_open",
+		"1 while a layout migration is in progress (ADR-0004), else 0.")
+
+	r.AddCollector(func() {
+		if n.raft == nil {
+			return
+		}
+		st := n.durabilityStats()
+		objects.Set(float64(st.objectVersions))
+		buckets.Set(float64(st.buckets))
+		dataShards.Set(float64(st.dataShards))
+		parityShards.Set(float64(st.parityShards))
+		if st.transitionOpen {
+			transition.Set(1)
+		} else {
+			transition.Set(0)
+		}
+	})
+}
+
+// durabilityStat is the cluster's durability posture as one node's replica sees
+// it (ADR-0035): the stored version count, the bucket count, the active auto
+// storage profile (k+m at the current active node count), and whether a layout
+// migration is open. Shared by the metrics collector and `cluster status`.
+type durabilityStat struct {
+	objectVersions           uint64
+	buckets                  int
+	dataShards, parityShards int
+	transitionOpen           bool
+}
+
+// layoutPosture reads the cheap durability posture for `cluster status` (ADR-0035):
+// the active auto storage profile (k+m) and whether a layout migration is open —
+// both from the layout alone, no keyspace scan, so the frequently-polled status
+// path stays light. The object-version count (which does scan) lives only in the
+// metrics collector, where the scrape cadence tolerates it.
+func (n *Node) layoutPosture() (dataShards, parityShards int, transitionOpen bool) {
+	n.on(func() {
+		active := 0
+		if cl, ok := n.raft.Store().ClusterLayout(); ok {
+			for _, e := range cl.EffectiveNodes() {
+				if !e.Draining {
+					active++
+				}
+			}
+			transitionOpen = len(cl.Previous) > 0
+		}
+		p := ec.AutoProfile(active)
+		dataShards, parityShards = p.Data, p.Parity
+	})
+	return
+}
+
+// durabilityStats reads the full durability posture, including the object-version
+// count (a keyspace scan), on the loop. Called off-loop from the metrics collector
+// at scrape time — not from the status path, which uses the cheaper layoutPosture.
+func (n *Node) durabilityStats() durabilityStat {
+	var st durabilityStat
+	n.on(func() {
+		store := n.raft.Store()
+		bs := store.ListBuckets()
+		st.buckets = len(bs)
+		for _, b := range bs {
+			store.ScanVersions(b.Name, func(_ string, _ meta.VersionEntry) bool {
+				st.objectVersions++
+				return true
+			})
+		}
+		active := 0
+		if cl, ok := store.ClusterLayout(); ok {
+			for _, e := range cl.EffectiveNodes() {
+				if !e.Draining {
+					active++
+				}
+			}
+			st.transitionOpen = len(cl.Previous) > 0
+		}
+		p := ec.AutoProfile(active)
+		st.dataShards, st.parityShards = p.Data, p.Parity
+	})
+	return st
 }
