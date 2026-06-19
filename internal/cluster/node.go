@@ -100,7 +100,12 @@ type Node struct {
 	// registry read live cluster state at scrape time.
 	metrics    *metrics.Registry
 	s3Requests *metrics.Counter // incremented by the ServeS3 middleware
-	startAt    time.Time
+
+	putInflight          *metrics.Gauge   // streaming PUTs currently in flight
+	putBytes             *metrics.Counter // object bytes accepted by completed PUTs
+	putBackpressureWaits *metrics.Counter // feeder stalls waiting on the coordinator
+
+	startAt time.Time
 
 	issueMu sync.Mutex // serializes joins: ID allocation and its durable record
 	stopped sync.Once

@@ -284,6 +284,8 @@ func (c *clusterMetadata) ApplyAbortMultipartUpload(p meta.AbortMultipartUpload)
 type clusterObjects struct{ n *Node }
 
 func (c *clusterObjects) Put(bucket, key string, body io.Reader, size int64, opts gateway.PutObjectOptions) ([]byte, meta.VersionID, error) {
+	c.n.putInflight.Add(1)
+	defer c.n.putInflight.Add(-1)
 	type outcome struct {
 		res coord.PutResult
 		err error
@@ -327,28 +329,38 @@ func (c *clusterObjects) Put(bucket, key string, body io.Reader, size int64, opt
 	var feedErr error
 feedLoop:
 	for {
+		// Acquire one want credit. If none is ready, the coordinator is
+		// shard-bound (its shard-stream windows are full) and the feeder is
+		// throttled — count the stall, then wait for a credit or completion.
 		select {
 		case <-finished:
 			break feedLoop
 		case <-wantCh:
-			buf := make([]byte, chunkSize)
-			n, rerr := io.ReadFull(body, buf)
-			switch {
-			case rerr == nil:
+		default:
+			c.n.putBackpressureWaits.Inc()
+			select {
+			case <-finished:
+				break feedLoop
+			case <-wantCh:
+			}
+		}
+		buf := make([]byte, chunkSize)
+		n, rerr := io.ReadFull(body, buf)
+		switch {
+		case rerr == nil:
+			chunk := buf[:n]
+			c.n.loop.Post(func() { h.Feed(chunk) })
+		case rerr == io.EOF || rerr == io.ErrUnexpectedEOF:
+			if n > 0 {
 				chunk := buf[:n]
 				c.n.loop.Post(func() { h.Feed(chunk) })
-			case rerr == io.EOF || rerr == io.ErrUnexpectedEOF:
-				if n > 0 {
-					chunk := buf[:n]
-					c.n.loop.Post(func() { h.Feed(chunk) })
-				}
-				c.n.loop.Post(func() { h.FeedEOF() })
-				break feedLoop
-			default:
-				feedErr = rerr
-				c.n.loop.Post(func() { h.Abort(rerr) })
-				break feedLoop
 			}
+			c.n.loop.Post(func() { h.FeedEOF() })
+			break feedLoop
+		default:
+			feedErr = rerr
+			c.n.loop.Post(func() { h.Abort(rerr) })
+			break feedLoop
 		}
 	}
 	out := <-resCh
@@ -358,6 +370,7 @@ feedLoop:
 	if out.err != nil {
 		return nil, meta.VersionID{}, mapCoordErr(out.err)
 	}
+	c.n.putBytes.Add(float64(size))
 	return out.res.ETag, out.res.VersionID, nil
 }
 
