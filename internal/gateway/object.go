@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"net/http"
 	"strconv"
@@ -87,10 +89,13 @@ func (g *Gateway) putObject(w http.ResponseWriter, r *http.Request, id *sigv4.Id
 	w.WriteHeader(http.StatusOK)
 }
 
-// putObjectCluster is PutObject on the erasure-coded cluster path: the
-// backend places, encodes, transfers, and commits — one call. The body is
-// buffered whole (the v0.3 preview shape, like the single-node GET; the
-// streaming pump arrives with the operational hardening).
+// putObjectCluster is PutObject on the erasure-coded cluster path: the backend
+// places, encodes, transfers, and commits as the body streams through it — read
+// in bounded chunks under backpressure, never buffered whole. The object size
+// is resolved from the request headers up front (the coordinator needs it to
+// pick the storage profile and frame the stream), and the body is wrapped so
+// SigV4/Content-MD5 validation surfaces as a read error that aborts the write
+// before it commits.
 func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string) {
 	mode, retainUntil, legalHold, lerr := parseLockHeaders(r.Header)
 	if lerr != nil {
@@ -101,16 +106,16 @@ func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *s
 		writeError(w, r, err)
 		return
 	}
-	body, err := readBody(r, id)
-	if err != nil {
-		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
-			writeAuthError(w, r, err)
-		} else {
-			writeError(w, r, err)
-		}
+	size, serr := putBodySize(r, id)
+	if serr != nil {
+		writeError(w, r, serr)
 		return
 	}
-	etag, vid, err := g.cfg.Objects.Put(bucket, key, body, PutObjectOptions{
+	if size > maxObjectSize {
+		writeError(w, r, errEntityTooLarge)
+		return
+	}
+	etag, vid, err := g.cfg.Objects.Put(bucket, key, validatingBody(r, id), size, PutObjectOptions{
 		ContentType:       r.Header.Get("Content-Type"),
 		UserMetadata:      userMetadata(r.Header),
 		RetentionMode:     mode,
@@ -118,7 +123,14 @@ func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *s
 		LegalHold:         legalHold,
 	})
 	if err != nil {
-		writeError(w, r, err)
+		// A tampered chunk stream or a failed payload validation surfaces here
+		// as the read error the feeder aborted on — an authentication failure,
+		// not a bad argument.
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
 		return
 	}
 	state := g.bucketVersioning(bucket)
@@ -131,6 +143,102 @@ func (g *Gateway) putObjectCluster(w http.ResponseWriter, r *http.Request, id *s
 		setSSEHeader(w, committed)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// putBodySize resolves the object's plaintext size up front — the coordinator
+// needs it before streaming to pick the storage profile and frame the stream.
+// For an aws-chunked upload that is the decoded-length header (Content-Length is
+// then the encoded size); otherwise it is Content-Length. A PUT without a usable
+// length is refused with 411, as S3 requires.
+func putBodySize(r *http.Request, id *sigv4.Identity) (int64, error) {
+	if id.Streaming {
+		v := r.Header.Get("x-amz-decoded-content-length")
+		if v == "" {
+			return 0, errMissingContentLength
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			return 0, errInvalidArgument
+		}
+		return n, nil
+	}
+	if r.ContentLength < 0 {
+		return 0, errMissingContentLength
+	}
+	return r.ContentLength, nil
+}
+
+// validatingBody returns the request payload as a streaming reader that
+// validates as it is consumed: an aws-chunked body verifies each chunk's
+// signature inline (bodyReader), and a signed single-shot payload or a
+// Content-MD5 header is checked against the body at EOF — surfaced as a read
+// error, so a mismatch aborts the in-flight write before it commits.
+func validatingBody(r *http.Request, id *sigv4.Identity) io.Reader {
+	base := &capReader{r: bodyReader(r, id), remaining: maxObjectSize}
+	needSHA := !id.Streaming && id.PayloadHash != sigv4.UnsignedPayload
+	wantMD5 := r.Header.Get("Content-MD5")
+	if !needSHA && wantMD5 == "" {
+		return base // streaming/unsigned with no Content-MD5: nothing to check at EOF
+	}
+	vr := &validatingReader{r: base, wantMD5: wantMD5}
+	if needSHA {
+		vr.sha, vr.wantSHA = sha256.New(), id.PayloadHash
+	}
+	if wantMD5 != "" {
+		vr.md5h = md5.New()
+	}
+	return vr
+}
+
+// validatingReader tees the body through the hashes a SigV4 single-shot
+// signature and a Content-MD5 header require, then runs the checks at EOF,
+// replacing io.EOF with the validation error on a mismatch.
+type validatingReader struct {
+	r          io.Reader
+	sha        hash.Hash
+	md5h       hash.Hash
+	wantSHA    string
+	wantMD5    string
+	checked    bool
+	pendingErr error // a validation failure to surface on the next (zero-byte) read
+}
+
+func (vr *validatingReader) Read(p []byte) (int, error) {
+	if vr.pendingErr != nil {
+		return 0, vr.pendingErr
+	}
+	n, err := vr.r.Read(p)
+	if n > 0 {
+		if vr.sha != nil {
+			vr.sha.Write(p[:n])
+		}
+		if vr.md5h != nil {
+			vr.md5h.Write(p[:n])
+		}
+	}
+	if err == io.EOF && !vr.checked {
+		vr.checked = true
+		if verr := vr.validate(); verr != nil {
+			// Never return the error together with data: io.ReadFull masks an
+			// error that arrives with a full buffer. Surface it on the next read.
+			if n > 0 {
+				vr.pendingErr = verr
+				return n, nil
+			}
+			return n, verr
+		}
+	}
+	return n, err
+}
+
+func (vr *validatingReader) validate() error {
+	if vr.sha != nil && vr.wantSHA != hex.EncodeToString(vr.sha.Sum(nil)) {
+		return errContentSHA256Mismatch
+	}
+	if vr.md5h != nil {
+		return checkContentMD5(vr.wantMD5, vr.md5h.Sum(nil))
+	}
+	return nil
 }
 
 // lookupCurrent resolves a key's current version entry. The returned

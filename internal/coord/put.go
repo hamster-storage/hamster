@@ -75,6 +75,14 @@ func (c *Coordinator) PutChunkSize() int {
 	return chunkBytes
 }
 
+// PutMaxOutstanding is the most chunk requests the coordinator issues before a
+// Feed — the feeder sizes its want channel to it so the want callback never
+// blocks the loop.
+func (c *Coordinator) PutMaxOutstanding() int {
+	_, maxOut := c.putWindow()
+	return maxOut
+}
+
 // Put stores one whole in-memory object — the convenience entry point over the
 // streaming machinery for callers that already hold the body. It feeds the body
 // whole and closes; the loop-paced encode and the ack rule are identical to a
