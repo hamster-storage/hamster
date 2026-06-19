@@ -45,6 +45,10 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 		"hamster_object_versions 0",
 		"hamster_storage_profile_data_shards 1",
 		"hamster_layout_transition_open 0",
+		// Streaming-PUT load signals (ADR-0038), present at zero before any PUT.
+		"hamster_put_inflight 0",
+		"hamster_put_bytes_total 0",
+		"hamster_put_backpressure_waits_total 0",
 		// The S3 request counter, after the probe above.
 		`hamster_s3_requests_total{method="GET",code="403"} 1`,
 	}

@@ -90,6 +90,22 @@ func (n *Node) initMetrics() {
 	n.s3Requests = r.NewCounter("hamster_s3_requests_total",
 		"S3 requests served by this node, by method and HTTP status code.", "method", "code")
 
+	// Streaming-PUT load signals (ADR-0038): the headline questions for the
+	// data path under load — how many writes are in flight, how much they move,
+	// and how often the feeder is throttled by the shard streams (the
+	// backpressure stall is the "are we shard-bound?" signal a load test wants).
+	n.putInflight = r.NewGauge("hamster_put_inflight",
+		"Cluster PUT operations currently streaming through this node.")
+	n.putBytes = r.NewCounter("hamster_put_bytes_total",
+		"Object bytes accepted by completed cluster PUTs on this node.")
+	n.putBackpressureWaits = r.NewCounter("hamster_put_backpressure_waits_total",
+		"Times a streaming PUT feeder stalled waiting for the coordinator to accept the next chunk (shard-bound backpressure).")
+	// Materialize each series at zero so it is present from the first scrape —
+	// a load-test dashboard wants the line before the first PUT, not after.
+	n.putInflight.Set(0)
+	n.putBytes.Add(0)
+	n.putBackpressureWaits.Add(0)
+
 	// Durability posture (ADR-0035): cluster-wide signals any node derives from its
 	// own replica — the compliance-shaped store's headline question, "is my data
 	// safe and at what width." Refreshed at scrape time from one loop read.
