@@ -42,8 +42,9 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.7](https://github.com/hamster-storage/hamster/releases/tag/v0.7.0) | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | ✅ |
 | [v0.8](https://github.com/hamster-storage/hamster/releases/tag/v0.8.0) | Key and CA rotation: master-key rewrap and CA custody/rotation — both no-downtime, metadata- or trust-only | ✅ |
 | [v0.9](https://github.com/hamster-storage/hamster/releases/tag/v0.9.0) | Zero-downtime rolling upgrades: cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the [supported per-node roll](docs/UPGRADES.md) | ✅ |
-| v0.10 | Observability/Telemetry | 🚧 in progress |
-| v0.11 | Web console | planned |
+| [v0.10](https://github.com/hamster-storage/hamster/releases/tag/v0.10.0) | Observability — one metrics registry rendered many ways: a Prometheus `/metrics` endpoint, a typed snapshot for the CLI and web console, and a durability summary on `cluster status` | ✅ |
+| v0.11 | One clustered path — retire the single-node `serve` store, flatten the CLI, S3 on every node by default, proposal forwarding so any node accepts writes, and erasure-coded multipart/copy/streaming for full single-node parity | 🚧 in progress |
+| v0.12 | Web console | planned |
 | TBD | TBD prior to v1 | planning |
 | v1.0 | Software updates and migrations supported from v1 | planned |
 

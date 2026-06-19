@@ -11,52 +11,64 @@ completed item's record survives in git history, in its now-green test, and in
 the shipped ADR/doc. This file is not an archive and not a TODO graveyard: if a
 line here is done, delete it.
 
-## Now / next — v0.10 observability and telemetry
+## Now / next — v0.11: Hamster is one clustered path
 
-**Zero-downtime rolling upgrades shipped at v0.9.0** ([ADR-0034](adr/0034-rolling-upgrade-machinery.md)):
-version advertisement (`SetNodeVersion`, the leader's `versionMonitor`, etcd-style
-auto-roll), the health interlock (`cluster can-stop`), the end-to-end upgrade suite
-(`TestClusterRollingUpgrade`), and the supported operator-driven per-node procedure
-([UPGRADES.md](UPGRADES.md)). The binary swap is the deployment system's job, per
-node — Hamster owns the safety machinery and the proof, not the swap — so there is
-no in-cluster "upgrade driver" to build. The roadmap pulled forward a version: what
-was v0.11 is now the front line.
+**Observability shipped at v0.10.0** ([ADR-0035](adr/0035-observability-metrics.md)):
+one internal metrics registry rendered many ways — `internal/metrics` with a
+golden-pinned Prometheus `/metrics` exposition on the `-admin` listener, a
+hand-written-protobuf typed snapshot over `reqMetrics` that `cluster metrics` and the
+coming web console render, the durability posture each node derives from its replica,
+the `hamster_s3_requests_total{method,code}` counter, and the `cluster status`
+durability line (`TestClusterMetricsEndpoint`). Request-latency histograms remain the
+open additive increment (a Histogram type + `ServeS3` duration observation through the
+gateway clock); they can ride v0.11 or a later release.
 
-The front line is **v0.10: observability and telemetry**, designed in
-**[ADR-0035](adr/0035-observability-metrics.md)** (Accepted): one internal metrics
-registry as the single source of truth, rendered many ways — a hand-rolled
-Prometheus text exposition on the admin port, and a typed snapshot over the control
-channel that the CLI and the v0.11 web console both render. Durability/EC health is
-the headline signal; tracing deferred.
+The front line is **v0.11: one clustered path**, designed in
+**[ADR-0036](adr/0036-one-clustered-path.md)** (the keystone) with two technical
+enablers, **[ADR-0037](adr/0037-proposal-forwarding.md)** (proposal forwarding) and
+**[ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)** (EC multipart + parity).
+Hamster stops being two data paths and two command namespaces and becomes one product:
+a node is a one-node cluster, the CLI is flat, and S3 serves on every node by default.
+**This is one release** — dropping `serve` is only safe once the cluster path is a
+strict superset of it, so parity and forwarding land with the flatten, not after.
 
-All three passes have landed and are gated/pushed:
+All three ADRs are written (Proposed — an ADR ahead of code is normal). Execution
+passes, in dependency order:
 
-- **The registry + Prometheus `/metrics`** — `internal/metrics` (counters, gauges,
-  scrape-time collectors, golden-pinned exposition), the `-admin <addr>` listener on
-  `cluster run` and `serve`.
-- **The typed snapshot + CLI** — `metrics.Snapshot`/`Family` and the
-  hand-written-protobuf `MarshalSnapshot` codec, served over `reqMetrics`, rendered
-  by `cluster metrics` through the shared `RenderText` (the encoding the v0.11
-  console will consume).
-- **The real signals** — the durability posture any node derives from its replica
-  (object-version and bucket counts, the active auto profile's k/m,
-  layout-transition-open), the `hamster_s3_requests_total{method,code}` counter the
-  `ServeS3` middleware increments, and a durability summary line on `cluster status`.
-  `TestClusterMetricsEndpoint` proves the gauges, the counter (after an S3 request),
-  and the status line end to end.
-
-v0.10 is ready for a **release decision** (held until Nick signs off). The one
-additive increment left is **request-latency histograms** — the registry gains a
-Histogram type (Prometheus `_bucket`/`_sum`/`_count` exposition + snapshot encoding)
-and the `ServeS3` middleware observes request durations through the gateway clock.
-It is deliberately its own increment (a histogram with no latency signal is unused
-scaffolding); it can ship in v0.10 before release or as a fast-follow. Deeper
-durability signals sourced from the repair/scrub sweeps (objects below their floor,
-shards needing repair, scrub coverage) and Raft term/commit-lag are the natural
-next instrumentation, additive over this foundation.
+1. **Data-path parity** ([ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)) —
+   the prerequisite that lets `serve` retire without regressing the S3 surface:
+   - **Range-efficient GET** — plumb the HTTP Range through the gateway
+     `ObjectBackend.Get` into the existing `coord.Get(off,length)` (the engine already
+     prefetches only the covering shards; the gateway interface currently discards it).
+   - **Streaming PUT** — change `coord.Put`/`ObjectBackend.Put` to take `io.Reader`+size
+     end to end so large objects do not sit whole in RAM, restoring the bounded-memory
+     promise on the cluster path.
+   - **Server-side `CopyObject` / `UploadPartCopy`** — read-and-re-encode through the
+     coordinator, streaming.
+   - **Erasure-coded multipart** — each part EC'd independently and durable on upload
+     (keyed by `uploadId`+part under the existing `u/` metadata prefix), `Complete`
+     assembling the part list into a version entry, GET stitching parts and Range
+     mapping to the covering parts. No whole-object re-encode.
+2. **Proposal forwarding** ([ADR-0037](adr/0037-proposal-forwarding.md)) — a non-leader
+   does the leadership-independent data work locally, then forwards only the small
+   metadata commit to the leader and awaits it, replacing today's `503 SlowDown`. Only
+   the commit crosses the leader hop; object bytes never do (invariant 1). Proven under
+   simulated cluster schedules (leadership change mid-write, follower-coordinated PUT).
+3. **S3 on by default** — `hamster run` serves S3 on `127.0.0.1:9000` by default,
+   credentials required (refuse to boot without them, as `serve` did); `-no-s3` for a
+   headless storage node, `-s3 <addr>` to override the address.
+4. **Flatten the CLI + drop `serve`** — the fifteen `cluster <sub>` commands move to
+   top-level verbs; the `cluster` namespace and `serve`/`internal/blob` retire (hard
+   break, no aliases). README, CLAUDE.md, GLOSSARY, the demo Taskfile, and every
+   e2e/compat invocation move to the flat commands and the one-path model in the same
+   release.
+5. **One complete help + a drift guard** (the tail item) — a single top-level help that
+   lists every command (folding in the good descriptions from today's `clusterUsage`),
+   plus a test that iterates the dispatch table and asserts every verb appears in the
+   usage string, so help can never again drift from the implemented surface.
 
 ## Later versions
 
-The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.11
-web console (over v0.10's signals), then hardening toward v1.0. They are pulled into
-the section above as they become the front line.
+The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.12 web
+console (over v0.10's signals), then hardening toward v1.0. They are pulled into the
+section above as they become the front line.

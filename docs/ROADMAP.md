@@ -35,8 +35,9 @@ Each v0 minor release carries one headline feature, in roughly this order. The o
 | v0.8 | Key and CA rotation: KEK rewrap under a new master key (object bytes untouched), and CA custody and rotation ([ADR-0022](adr/0022-cluster-mtls.md), [ADR-0029](adr/0029-ca-custody-and-issuance.md)) |
 | v0.9 | Zero-downtime rolling upgrades: etcd-style cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the supported operator-driven roll ([ADR-0034](adr/0034-rolling-upgrade-machinery.md), [UPGRADES.md](UPGRADES.md)). The binary swap is the deployment system's job, per node; Hamster owns the safety machinery and the proof |
 | v0.10 | Observability and telemetry |
-| v0.11 | Web console ([ADR-0020](adr/0020-embedded-htmx-web-console.md): embedded, on the admin port, server-rendered with htmx) |
-| v0.12+ | Hardening and format finalization until v1.0 feels earned |
+| v0.11 | Hamster is one clustered path ([ADR-0036](adr/0036-one-clustered-path.md)): retire the single-node `serve` store, flatten the CLI (every command top-level), S3 on every node by default, proposal forwarding so any node accepts writes ([ADR-0037](adr/0037-proposal-forwarding.md)), and erasure-coded multipart/copy/streaming so the cluster path reaches single-node parity ([ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)) |
+| v0.12 | Web console ([ADR-0020](adr/0020-embedded-htmx-web-console.md): embedded, on the admin port, server-rendered with htmx) |
+| v0.13+ | Hardening and format finalization until v1.0 feels earned |
 
 The simulation harness is not a milestone of its own: it ships in v0.1 and grows with every release, because each new feature must arrive with its failure schedules.
 
