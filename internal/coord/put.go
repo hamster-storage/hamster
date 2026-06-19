@@ -44,13 +44,36 @@ type PutOptions struct {
 	LegalHold         bool
 }
 
-// feedChunk is the unit the streaming feeder pushes; maxOutstanding bounds how
-// many chunks may be requested-but-not-yet-encoded at once. Together they cap a
-// streaming PUT's body buffer at a few MiB regardless of object size.
+// defaultPutChunkBytes is the unit the streaming feeder pushes;
+// defaultPutMaxOutstanding bounds how many chunks may be requested-but-not-yet-
+// encoded at once. Together they cap a streaming PUT's body buffer at a few MiB
+// regardless of object size. Config.PutChunkBytes/PutMaxOutstanding override
+// them for load tuning.
 const (
-	feedChunk      = 1 << 20
-	maxOutstanding = 2
+	defaultPutChunkBytes     = 1 << 20
+	defaultPutMaxOutstanding = 2
 )
+
+// putWindow returns the backpressure window, applying the defaults when the
+// config leaves a knob at zero.
+func (c *Coordinator) putWindow() (chunkBytes, maxOut int) {
+	chunkBytes, maxOut = c.cfg.PutChunkBytes, c.cfg.PutMaxOutstanding
+	if chunkBytes <= 0 {
+		chunkBytes = defaultPutChunkBytes
+	}
+	if maxOut <= 0 {
+		maxOut = defaultPutMaxOutstanding
+	}
+	return chunkBytes, maxOut
+}
+
+// PutChunkSize is the chunk size the streaming feeder should read — the
+// configured window's unit. Exposed so the gateway feeder and the coordinator
+// agree on the chunk granularity.
+func (c *Coordinator) PutChunkSize() int {
+	chunkBytes, _ := c.putWindow()
+	return chunkBytes
+}
 
 // Put stores one whole in-memory object — the convenience entry point over the
 // streaming machinery for callers that already hold the body. It feeds the body
@@ -79,6 +102,11 @@ func (h *PutHandle) Feed(chunk []byte) { h.op.Feed(chunk) }
 // FeedEOF marks the body complete, triggering close and the metadata commit.
 // Call on the loop, once.
 func (h *PutHandle) FeedEOF() { h.op.FeedEOF() }
+
+// Abort cancels an in-flight streaming PUT — for a feeder that hit a read or
+// validation error. The staged shards are reclaimed and done fires with err.
+// Call on the loop.
+func (h *PutHandle) Abort(err error) { h.op.abort(err) }
 
 // PutStream begins a streaming PUT of size bytes. want fires on the loop each
 // time the coordinator can accept another chunk (the caller feeds via the
@@ -185,16 +213,18 @@ func (c *Coordinator) beginPut(bucket, key string, size int64, opts PutOptions, 
 		encAlg, dekBytes = meta.EncAES256GCM, dek.Bytes()
 	}
 
+	chunkBytes, maxOut := c.putWindow()
 	op := &putOp{
 		c: c, done: done, opts: opts, want: want,
 		bucket: bucket, key: key, atMS: now.UnixMilli(),
 		vid: vid, size: size, k: k, m: m,
-		floor:     floor,
-		partition: partition,
-		nodes:     nodes,
-		md5h:      md5.New(),
-		shah:      sha256.New(),
-		encAlg:    encAlg, wrappedDEK: wrappedDEK, kekFP: kekFP,
+		floor:      floor,
+		partition:  partition,
+		nodes:      nodes,
+		md5h:       md5.New(),
+		shah:       sha256.New(),
+		chunkBytes: chunkBytes, maxOut: maxOut,
+		encAlg: encAlg, wrappedDEK: wrappedDEK, kekFP: kekFP,
 		failed: make([]bool, k+m),
 	}
 
@@ -271,7 +301,7 @@ func (op *putOp) replenish() {
 	if op.want == nil || op.eofSeen {
 		return
 	}
-	for op.outstanding < maxOutstanding && len(op.pending) < maxOutstanding*feedChunk {
+	for op.outstanding < op.maxOut && len(op.pending) < op.maxOut*op.chunkBytes {
 		op.outstanding++
 		op.want()
 	}
@@ -325,6 +355,8 @@ type putOp struct {
 
 	pending     []byte // body fed but not yet paced into the encoder
 	outstanding int    // chunks requested from the feeder but not yet received
+	chunkBytes  int    // backpressure window: feeder chunk size
+	maxOut      int    // backpressure window: max chunks outstanding
 	eofSeen     bool
 	closed      bool
 	failed      []bool

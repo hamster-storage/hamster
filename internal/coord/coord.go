@@ -79,6 +79,15 @@ type Config struct {
 	// reports not-found — an unencrypted cluster, and the default in tests.
 	// Loop-safe — called on the loop.
 	Keyring func(fingerprint uint64) (keys.KEK, bool)
+
+	// PutChunkBytes and PutMaxOutstanding tune the streaming-PUT backpressure
+	// window: the feeder reads PutChunkBytes-sized chunks, and the coordinator
+	// keeps at most PutMaxOutstanding of them requested-but-not-yet-encoded, so
+	// a streaming PUT buffers at most their product in memory regardless of
+	// object size. Zero means the default (defaultPutChunkBytes /
+	// defaultPutMaxOutstanding). Exposed so load testing can tune the window.
+	PutChunkBytes     int
+	PutMaxOutstanding int
 }
 
 // Coordinator runs data-path operations for one node.
