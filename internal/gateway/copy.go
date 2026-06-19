@@ -92,15 +92,16 @@ type copyObjectResult struct {
 // MD5 of the bytes, even when the source was multipart (AWS does the
 // same: a copy is a new single-part object).
 func (g *Gateway) copyObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	if g.refuseOnCluster(w, r) {
-		return
-	}
 	directive := r.Header.Get("x-amz-metadata-directive")
 	if directive == "" {
 		directive = "COPY"
 	}
 	if directive != "COPY" && directive != "REPLACE" {
 		writeError(w, r, errInvalidArgument)
+		return
+	}
+	if g.cfg.Objects != nil {
+		g.copyObjectCluster(w, r, bucket, key, directive)
 		return
 	}
 
@@ -159,6 +160,73 @@ func (g *Gateway) copyObject(w http.ResponseWriter, r *http.Request, bucket, key
 	})
 }
 
+// copyObjectCluster is CopyObject on the erasure-coded path: a server-side
+// streaming read of the source straight into a destination PUT. The same
+// windowed reader the GET path uses (over GetRange) feeds the streaming Put, so
+// a copy of any size stays bounded in memory and never round-trips the bytes
+// through the client. The destination is an ordinary single-part object — its
+// ETag is the plain MD5 of the bytes, even when the source was multipart.
+func (g *Gateway) copyObjectCluster(w http.ResponseWriter, r *http.Request, bucket, key, directive string) {
+	if hasConditionalCopyHeaders(r.Header) {
+		writeError(w, r, errNotImplemented)
+		return
+	}
+	srcBucket, srcKey, err := parseCopySource(r.Header.Get("x-amz-copy-source"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	src, err := g.lookupCurrent(srcBucket, srcKey)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if src.Kind == meta.KindDeleteMarker {
+		writeError(w, r, errNoSuchKey) // the source's current version is a delete marker
+		return
+	}
+	// S3 rule: copying an object onto itself is only meaningful when it rewrites
+	// the metadata.
+	if srcBucket == bucket && srcKey == key && directive != "REPLACE" {
+		writeError(w, r, errInvalidRequest)
+		return
+	}
+
+	contentType := src.ContentType
+	userMeta := src.UserMetadata
+	if directive == "REPLACE" {
+		contentType = r.Header.Get("Content-Type")
+		userMeta = userMetadata(r.Header)
+	}
+
+	// Stream the source object's bytes straight into the destination PUT — the
+	// windowed reader pulls only the covering shards, the Put paces them through
+	// erasure coding, so neither side buffers the object whole.
+	srcReader := &rangeReader{
+		size: src.Size,
+		fetch: func(off, length int64) ([]byte, error) {
+			return g.cfg.Objects.GetRange(src, off, length)
+		},
+	}
+	etag, vid, err := g.cfg.Objects.Put(bucket, key, srcReader, src.Size, PutObjectOptions{
+		ContentType:  contentType,
+		UserMetadata: userMeta,
+	})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	var atMS int64
+	if committed, ok := g.cfg.Meta.GetVersion(bucket, key, vid); ok {
+		atMS = committed.CreatedUnixMS
+	}
+	writeXML(w, http.StatusOK, copyObjectResult{
+		Xmlns:        s3Xmlns,
+		LastModified: iso8601(atMS),
+		ETag:         quoteETag(etag),
+	})
+}
+
 type copyPartResult struct {
 	XMLName      xml.Name `xml:"CopyPartResult"`
 	Xmlns        string   `xml:"xmlns,attr"`
@@ -169,6 +237,9 @@ type copyPartResult struct {
 // uploadPartCopy is S3 UploadPartCopy: UploadPart whose bytes come from an
 // existing object, optionally narrowed by x-amz-copy-source-range.
 func (g *Gateway) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket, key string, uid meta.VersionID) {
+	if g.refuseOnCluster(w, r) {
+		return // UploadPartCopy writes a multipart part; the cluster path lands with EC multipart
+	}
 	n, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
 	if err != nil || n < 1 || n > meta.MaxPartNumber {
 		writeError(w, r, meta.ErrInvalidPartNumber)
