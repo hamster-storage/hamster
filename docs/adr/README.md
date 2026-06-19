@@ -46,6 +46,7 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0036](0036-one-clustered-path.md) | Hamster is one clustered path: retire the single-node store, flatten the CLI, S3 on by default (a node is a one-node cluster) |
 | [0037](0037-proposal-forwarding.md) | Proposal forwarding: any node accepts writes by forwarding only the metadata commit to the leader, never the object bytes |
 | [0038](0038-ec-multipart-and-data-path-parity.md) | Erasure-coded multipart and cluster data-path parity: streaming PUT, Range-efficient GET, server-side copy, EC multipart |
+| [0039](0039-adaptive-load-shedding.md) | Adaptive load shedding: latency-gradient concurrency limiting (429) and degradation detection, from in-flight depth and per-op latency — no OS primitives |
 
 ## Template
 

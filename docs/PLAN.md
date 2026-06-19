@@ -32,17 +32,12 @@ a node is a one-node cluster, the CLI is flat, and S3 serves on every node by de
 **This is one release** — dropping `serve` is only safe once the cluster path is a
 strict superset of it, so parity and forwarding land with the flatten, not after.
 
-All three ADRs are written (Proposed — an ADR ahead of code is normal). Execution
-passes, in dependency order:
+ADRs 0036/0037/0038 are accepted and committed. **Landed so far:** Range-efficient +
+streaming GET; streaming PUT end to end (the fed-with-backpressure coordinator, a
+tunable window, and the in-flight/throughput/backpressure-stall load metrics).
+Remaining passes, in dependency order:
 
-1. **Data-path parity** ([ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)) —
-   the prerequisite that lets `serve` retire without regressing the S3 surface:
-   - **Range-efficient GET** — plumb the HTTP Range through the gateway
-     `ObjectBackend.Get` into the existing `coord.Get(off,length)` (the engine already
-     prefetches only the covering shards; the gateway interface currently discards it).
-   - **Streaming PUT** — change `coord.Put`/`ObjectBackend.Put` to take `io.Reader`+size
-     end to end so large objects do not sit whole in RAM, restoring the bounded-memory
-     promise on the cluster path.
+1. **Data-path parity, remaining** ([ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)):
    - **Server-side `CopyObject` / `UploadPartCopy`** — read-and-re-encode through the
      coordinator, streaming.
    - **Erasure-coded multipart** — each part EC'd independently and durable on upload
@@ -69,6 +64,8 @@ passes, in dependency order:
 
 ## Later versions
 
-The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.12 web
-console (over v0.10's signals), then hardening toward v1.0. They are pulled into the
-section above as they become the front line.
+The headline feature of each later release is in [ROADMAP.md](ROADMAP.md): v0.12
+adaptive load shedding ([ADR-0039](adr/0039-adaptive-load-shedding.md): latency-gradient
+concurrency limiting with 429, request-latency histograms, and degradation detection —
+all from in-flight depth and per-op latency), then v0.13 the web console, then hardening
+toward v1.0. They are pulled into the section above as they become the front line.

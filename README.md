@@ -44,7 +44,8 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.9](https://github.com/hamster-storage/hamster/releases/tag/v0.9.0) | Zero-downtime rolling upgrades: cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the [supported per-node roll](docs/UPGRADES.md) | ✅ |
 | [v0.10](https://github.com/hamster-storage/hamster/releases/tag/v0.10.0) | Observability — one metrics registry rendered many ways: a Prometheus `/metrics` endpoint, a typed snapshot for the CLI and web console, and a durability summary on `cluster status` | ✅ |
 | v0.11 | One clustered path — retire the single-node `serve` store, flatten the CLI, S3 on every node by default, proposal forwarding so any node accepts writes, and erasure-coded multipart/copy/streaming for full single-node parity | 🚧 in progress |
-| v0.12 | Web console | planned |
+| v0.12 | Adaptive load shedding — latency-gradient concurrency limiting that sheds with 429 at the node's self-discovered capacity, request-latency histograms, and degradation (bad-drive) detection, with no OS primitives | planned |
+| v0.13 | Web console | planned |
 | TBD | TBD prior to v1 | planning |
 | v1.0 | Software updates and migrations supported from v1 | planned |
 
