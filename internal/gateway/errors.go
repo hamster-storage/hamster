@@ -47,6 +47,8 @@ var (
 		"The Content-MD5 you specified did not match what we received."}
 	errEntityTooLarge = &s3Error{"EntityTooLarge", http.StatusBadRequest,
 		"The payload exceeds the maximum size this operation allows."}
+	errMissingContentLength = &s3Error{"MissingContentLength", http.StatusLengthRequired,
+		"You must provide the Content-Length HTTP header."}
 	errObjectLockNotFound = &s3Error{"ObjectLockConfigurationNotFoundError", http.StatusNotFound,
 		"Object Lock configuration does not exist for this bucket."}
 	errObjectLockNotEnabled = &s3Error{"InvalidRequest", http.StatusBadRequest,

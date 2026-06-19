@@ -283,22 +283,78 @@ func (c *clusterMetadata) ApplyAbortMultipartUpload(p meta.AbortMultipartUpload)
 // clusterObjects is gateway.ObjectBackend over the coordinator.
 type clusterObjects struct{ n *Node }
 
-func (c *clusterObjects) Put(bucket, key string, body []byte, opts gateway.PutObjectOptions) ([]byte, meta.VersionID, error) {
+func (c *clusterObjects) Put(bucket, key string, body io.Reader, size int64, opts gateway.PutObjectOptions) ([]byte, meta.VersionID, error) {
 	type outcome struct {
 		res coord.PutResult
 		err error
 	}
-	ch := make(chan outcome, 1)
+	resCh := make(chan outcome, 1)
+	finished := make(chan struct{})
+	// want signals from the coordinator, sent on the loop — buffered to the
+	// backpressure window so the want callback never blocks the loop.
+	wantCh := make(chan struct{}, c.n.coord.PutMaxOutstanding()+1)
+	startCh := make(chan *coord.PutHandle, 1)
+	coordOpts := coord.PutOptions{
+		ContentType:       opts.ContentType,
+		UserMetadata:      opts.UserMetadata,
+		RetentionMode:     opts.RetentionMode,
+		RetainUntilUnixMS: opts.RetainUntilUnixMS,
+		LegalHold:         opts.LegalHold,
+	}
 	c.n.loop.Post(func() {
-		c.n.coord.Put(bucket, key, body, coord.PutOptions{
-			ContentType:       opts.ContentType,
-			UserMetadata:      opts.UserMetadata,
-			RetentionMode:     opts.RetentionMode,
-			RetainUntilUnixMS: opts.RetainUntilUnixMS,
-			LegalHold:         opts.LegalHold,
-		}, func(res coord.PutResult, err error) { ch <- outcome{res, err} })
+		h := c.n.coord.PutStream(bucket, key, size, coordOpts,
+			func() { wantCh <- struct{}{} },
+			func(res coord.PutResult, err error) {
+				resCh <- outcome{res, err}
+				close(finished)
+			})
+		startCh <- h
 	})
-	out := <-ch
+	h := <-startCh
+	if h == nil {
+		out := <-resCh // setup failed; done already fired
+		return nil, meta.VersionID{}, mapCoordErr(out.err)
+	}
+
+	// The feeder: read the body off-loop in window-sized chunks and hand each to
+	// the coordinator on the loop, but only when it asks (the want signal) — so
+	// the body is never buffered beyond the backpressure window regardless of
+	// object size. A read error (a truncation or a validation failure surfaced
+	// at EOF) aborts the in-flight write; a coordinator-side completion (the
+	// ack-rule refusal) ends the feeder via finished, so it never blocks forever
+	// waiting for a want that will not come.
+	chunkSize := c.n.coord.PutChunkSize()
+	var feedErr error
+feedLoop:
+	for {
+		select {
+		case <-finished:
+			break feedLoop
+		case <-wantCh:
+			buf := make([]byte, chunkSize)
+			n, rerr := io.ReadFull(body, buf)
+			switch {
+			case rerr == nil:
+				chunk := buf[:n]
+				c.n.loop.Post(func() { h.Feed(chunk) })
+			case rerr == io.EOF || rerr == io.ErrUnexpectedEOF:
+				if n > 0 {
+					chunk := buf[:n]
+					c.n.loop.Post(func() { h.Feed(chunk) })
+				}
+				c.n.loop.Post(func() { h.FeedEOF() })
+				break feedLoop
+			default:
+				feedErr = rerr
+				c.n.loop.Post(func() { h.Abort(rerr) })
+				break feedLoop
+			}
+		}
+	}
+	out := <-resCh
+	if feedErr != nil {
+		return nil, meta.VersionID{}, feedErr // raw, so the gateway classifies auth vs other
+	}
 	if out.err != nil {
 		return nil, meta.VersionID{}, mapCoordErr(out.err)
 	}

@@ -152,7 +152,12 @@ type PutObjectOptions struct {
 // serves its bytes through GetRange pinned to that entry — so the response
 // headers and the body always describe the same version.
 type ObjectBackend interface {
-	Put(bucket, key string, body []byte, opts PutObjectOptions) (etag []byte, versionID meta.VersionID, err error)
+	// Put streams an object of size bytes from body — read in bounded chunks
+	// under backpressure, never buffered whole — places and erasure-codes it,
+	// and commits the metadata. A read error from body (a truncation or a
+	// failed SigV4/Content-MD5 validation surfaced at EOF) aborts the write and
+	// is returned for the caller to classify; no partial object is committed.
+	Put(bucket, key string, body io.Reader, size int64, opts PutObjectOptions) (etag []byte, versionID meta.VersionID, err error)
 	// GetRange serves the plaintext range [off, off+length) of a stored
 	// version entry; a negative length means to the end of the object. It
 	// fetches only the covering shards, so a Range read and a windowed
