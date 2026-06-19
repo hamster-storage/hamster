@@ -4,6 +4,7 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"fmt"
+	"hash"
 	"io"
 
 	"github.com/hamster-storage/hamster/internal/datapath"
@@ -43,21 +44,71 @@ type PutOptions struct {
 	LegalHold         bool
 }
 
-// Put stores one object: erasure-code the body onto the partition's
-// nodes, enforce the ack rule, commit the metadata through Raft, and call
-// done exactly once on the loop. The body slice must not be mutated until
-// done fires.
+// feedChunk is the unit the streaming feeder pushes; maxOutstanding bounds how
+// many chunks may be requested-but-not-yet-encoded at once. Together they cap a
+// streaming PUT's body buffer at a few MiB regardless of object size.
+const (
+	feedChunk      = 1 << 20
+	maxOutstanding = 2
+)
+
+// Put stores one whole in-memory object — the convenience entry point over the
+// streaming machinery for callers that already hold the body. It feeds the body
+// whole and closes; the loop-paced encode and the ack rule are identical to a
+// streamed PUT. The body slice must not be mutated until done fires. done fires
+// exactly once on the loop.
 func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done func(PutResult, error)) {
+	op := c.beginPut(bucket, key, int64(len(body)), opts, nil, done)
+	if op == nil {
+		return
+	}
+	op.Feed(body)
+	op.FeedEOF()
+}
+
+// PutHandle drives a streaming PUT: the caller feeds body chunks as they arrive
+// and closes at EOF. Feed and FeedEOF run on the loop (the caller posts them);
+// the coordinator calls the want callback on the loop when it has room for
+// another chunk, so the caller reads the next chunk off-loop only when asked —
+// bounded memory with end-to-end backpressure.
+type PutHandle struct{ op *putOp }
+
+// Feed appends a body chunk. Call on the loop.
+func (h *PutHandle) Feed(chunk []byte) { h.op.Feed(chunk) }
+
+// FeedEOF marks the body complete, triggering close and the metadata commit.
+// Call on the loop, once.
+func (h *PutHandle) FeedEOF() { h.op.FeedEOF() }
+
+// PutStream begins a streaming PUT of size bytes. want fires on the loop each
+// time the coordinator can accept another chunk (the caller feeds via the
+// handle). done fires exactly once on the loop. A nil handle means setup failed
+// and done has already fired.
+func (c *Coordinator) PutStream(bucket, key string, size int64, opts PutOptions, want func(), done func(PutResult, error)) *PutHandle {
+	op := c.beginPut(bucket, key, size, opts, want, done)
+	if op == nil {
+		return nil
+	}
+	op.replenish()
+	return &PutHandle{op}
+}
+
+// beginPut resolves placement, the storage profile, and the encryption posture,
+// then opens the k+m shard write streams and the encoder for an object of size
+// bytes. It returns the in-flight op, or nil after firing done on a setup
+// failure. The caller feeds the body next: Put feeds it whole, PutStream feeds
+// it in chunks under backpressure. The body's plaintext MD5 (ETag) and SHA-256
+// (object checksum) are accumulated as it is fed and finalized at close.
+func (c *Coordinator) beginPut(bucket, key string, size int64, opts PutOptions, want func(), done func(PutResult, error)) *putOp {
 	now := c.cfg.Clock.Now()
 	vid := meta.NewVersionID(now, c.cfg.Rand)
-	size := int64(len(body))
 
 	layout, ok := c.cfg.Layout()
 	if !ok {
 		// No layout installed yet — the cluster is still forming. Refuse
 		// transiently, the same SlowDown a write below the floor gets.
 		done(PutResult{}, fmt.Errorf("coord: no cluster layout yet: %w", ErrRefused))
-		return
+		return nil
 	}
 	// The profile follows the active (non-draining) node count, so a write
 	// during a downsize already lands at the target profile the shrink converges
@@ -69,7 +120,7 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 	nodes, err := layout.Nodes(partition, k+m)
 	if err != nil {
 		done(PutResult{}, fmt.Errorf("coord: placing %d shards: %w", k+m, err))
-		return
+		return nil
 	}
 	floor := min(k+1, k+m)
 
@@ -108,7 +159,7 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 	if encOn {
 		if !kek.Loaded() {
 			done(PutResult{}, fmt.Errorf("coord: encryption enabled but no KEK loaded: %w", ErrRefused))
-			return
+			return nil
 		}
 		kekFP = kek.Fingerprint().Uint64()
 		// Write-time KEK guard (ADR-0032): once the cluster has established its
@@ -120,31 +171,30 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 		if post.CurrentKEKFingerprint != 0 &&
 			kekFP != post.CurrentKEKFingerprint && kekFP != post.RotatingToKEKFingerprint {
 			done(PutResult{}, fmt.Errorf("coord: loaded KEK %016x is not the cluster key: %w", kekFP, ErrRefused))
-			return
+			return nil
 		}
 		dek, err := keys.NewDEK(c.cfg.Entropy)
 		if err != nil {
 			done(PutResult{}, fmt.Errorf("coord: minting DEK: %w", err))
-			return
+			return nil
 		}
 		if wrappedDEK, err = kek.Wrap(dek, wrapNonce(vid)); err != nil {
 			done(PutResult{}, fmt.Errorf("coord: wrapping DEK: %w", err))
-			return
+			return nil
 		}
 		encAlg, dekBytes = meta.EncAES256GCM, dek.Bytes()
 	}
 
-	etag := md5.Sum(body)
-	objSum := sha256.Sum256(body)
 	op := &putOp{
-		c: c, done: done, opts: opts,
+		c: c, done: done, opts: opts, want: want,
 		bucket: bucket, key: key, atMS: now.UnixMilli(),
-		vid: vid, body: body, k: k, m: m,
+		vid: vid, size: size, k: k, m: m,
 		floor:     floor,
 		partition: partition,
 		nodes:     nodes,
-		etag:      etag[:], objSum: objSum[:],
-		encAlg: encAlg, wrappedDEK: wrappedDEK, kekFP: kekFP,
+		md5h:      md5.New(),
+		shah:      sha256.New(),
+		encAlg:    encAlg, wrappedDEK: wrappedDEK, kekFP: kekFP,
 		failed: make([]bool, k+m),
 	}
 
@@ -176,15 +226,55 @@ func (c *Coordinator) Put(bucket, key string, body []byte, opts PutOptions, done
 	ecw, err := ec.NewWriter(vid, k, m, frameSize, sinks)
 	if err != nil {
 		op.abort(fmt.Errorf("coord: encoder: %w", err))
-		return
+		return nil
 	}
 	sw, err := stream.NewWriter(ecw, size, stream.DefaultChunkSize, dekBytes)
 	if err != nil {
 		op.abort(fmt.Errorf("coord: framing: %w", err))
-		return
+		return nil
 	}
 	op.ecw, op.sw = ecw, sw
+	return op
+}
+
+// Feed appends a plaintext body chunk: hash it for the ETag and the object
+// checksum, buffer it, and pace what the stream windows allow into the encoder.
+// Call on the loop.
+func (op *putOp) Feed(chunk []byte) {
+	if op.finished {
+		return
+	}
+	op.md5h.Write(chunk)
+	op.shah.Write(chunk)
+	op.pending = append(op.pending, chunk...)
+	if op.outstanding > 0 {
+		op.outstanding--
+	}
 	op.step()
+}
+
+// FeedEOF marks the body complete; step closes the frame and commits once the
+// buffered tail has drained into the encoder. Call on the loop, once.
+func (op *putOp) FeedEOF() {
+	if op.finished {
+		return
+	}
+	op.eofSeen = true
+	op.step()
+}
+
+// replenish asks the feeder for more chunks while the buffer has room and the
+// body is not yet complete — the backpressure that bounds memory. A nil want
+// (the in-memory Put) supplies the whole body up front, so there is nothing to
+// request.
+func (op *putOp) replenish() {
+	if op.want == nil || op.eofSeen {
+		return
+	}
+	for op.outstanding < maxOutstanding && len(op.pending) < maxOutstanding*feedChunk {
+		op.outstanding++
+		op.want()
+	}
 }
 
 // sink adapts a WriteStream to the io.Writer the erasure coder pushes
@@ -209,16 +299,19 @@ func (s *sink) Write(p []byte) (int, error) {
 type putOp struct {
 	c    *Coordinator
 	done func(PutResult, error)
+	want func() // backpressure: ask the feeder for another chunk (nil for in-memory Put)
 
 	bucket, key string
 	opts        PutOptions
 	atMS        int64
 	vid         meta.VersionID
-	body        []byte
+	size        int64
 	k, m        int
 	floor       int
 	partition   uint64
 	nodes       []seam.NodeID
+	md5h        hash.Hash // plaintext MD5 → ETag, finalized at close
+	shah        hash.Hash // plaintext SHA-256 → object checksum, finalized at close
 	etag        []byte
 	objSum      []byte
 	encAlg      meta.EncAlgorithm
@@ -230,17 +323,20 @@ type putOp struct {
 	ecw     *ec.Writer
 	sw      *stream.Writer
 
-	fed       int
-	closed    bool
-	failed    []bool
-	failures  int
-	successes int
-	finished  bool
+	pending     []byte // body fed but not yet paced into the encoder
+	outstanding int    // chunks requested from the feeder but not yet received
+	eofSeen     bool
+	closed      bool
+	failed      []bool
+	failures    int
+	successes   int
+	finished    bool
 }
 
-// step advances the feed whenever window opens: write the next stripe's
-// worth of body when every live stream can absorb its slice burst, then
-// close and commit when the body is fully fed.
+// step paces buffered body into the encoder whenever window opens: write the
+// next stripe's worth when every live stream can absorb its slice burst. When
+// the buffer drains and more body is coming, ask the feeder for it; when the
+// buffer drains and the body is complete, close and commit.
 func (op *putOp) step() {
 	if op.finished || op.closed {
 		return
@@ -248,21 +344,30 @@ func (op *putOp) step() {
 	stripeBytes := op.k * ec.DefaultSliceSize
 	stepBytes := max(stripeBytes-4096, 1)
 
-	for op.fed < len(op.body) {
+	for len(op.pending) > 0 {
 		if !op.windowsAllow(stepNeed) {
 			return // an ack or a stream failure will call step again
 		}
-		n := min(stepBytes, len(op.body)-op.fed)
-		if _, err := op.sw.Write(op.body[op.fed : op.fed+n]); err != nil {
+		n := min(stepBytes, len(op.pending))
+		if _, err := op.sw.Write(op.pending[:n]); err != nil {
 			op.abort(fmt.Errorf("coord: framing body: %w", err))
 			return
 		}
-		op.fed += n
+		op.pending = op.pending[n:]
+	}
+
+	// The buffer is drained. If more body is coming, ask for it and wait for
+	// the next Feed; the close can only run once the whole body is in.
+	if !op.eofSeen {
+		op.replenish()
+		return
 	}
 
 	if !op.windowsAllow(closeNeed) {
 		return
 	}
+	op.etag = op.md5h.Sum(nil)
+	op.objSum = op.shah.Sum(nil)
 	if err := op.sw.Close(); err != nil {
 		op.abort(fmt.Errorf("coord: closing frame: %w", err))
 		return
@@ -337,7 +442,7 @@ func (op *putOp) evaluate(lastErr error) {
 		Bucket:            op.bucket,
 		Key:               op.key,
 		VersionID:         op.vid,
-		Size:              int64(len(op.body)),
+		Size:              op.size,
 		ETag:              op.etag,
 		ContentType:       op.opts.ContentType,
 		UserMetadata:      op.opts.UserMetadata,
