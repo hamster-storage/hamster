@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -179,43 +180,50 @@ func (g *Gateway) readObjectData(entry meta.VersionEntry) ([]byte, error) {
 	return data, nil
 }
 
-// getObject serves GET and HEAD. Range and conditional headers are handled
-// by http.ServeContent over the in-memory blob. ?versionId selects a specific
-// version; without it, the current version is served.
+// getObject serves GET and HEAD. Range and conditional headers are handled by
+// http.ServeContent — over the in-memory blob on the single-node path, and over
+// a windowed reader on the cluster path so a Range read touches only the
+// covering shards. ?versionId selects a specific version; without it, the
+// current version is served.
 func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	versionID := r.URL.Query().Get("versionId")
 
 	if g.cfg.Objects != nil {
 		state := g.bucketVersioning(bucket)
+		var entry meta.VersionEntry
+		var err error
 		if versionID != "" {
-			entry, err := g.resolveVersion(bucket, key, versionID)
-			if err != nil {
-				writeError(w, r, err)
-				return
-			}
-			if entry.Kind == meta.KindDeleteMarker {
-				w.Header().Set("x-amz-delete-marker", "true")
-				setVersionID(w, state, entry)
-				w.Header().Set("Last-Modified", time.UnixMilli(entry.CreatedUnixMS).UTC().Format(http.TimeFormat))
-				writeError(w, r, errMethodNotAllowed)
-				return
-			}
-			data, err := g.cfg.Objects.GetVersion(bucket, key, entry.VersionID)
-			if err != nil {
-				writeError(w, r, err)
-				return
-			}
-			setVersionID(w, state, entry)
-			g.serveEntry(w, r, entry, data)
-			return
+			entry, err = g.resolveVersion(bucket, key, versionID)
+		} else {
+			entry, err = g.lookupCurrent(bucket, key)
 		}
-		data, entry, err := g.cfg.Objects.Get(bucket, key)
 		if err != nil {
 			writeError(w, r, err)
 			return
 		}
+		if entry.Kind == meta.KindDeleteMarker {
+			w.Header().Set("x-amz-delete-marker", "true")
+			setVersionID(w, state, entry)
+			w.Header().Set("Last-Modified", time.UnixMilli(entry.CreatedUnixMS).UTC().Format(http.TimeFormat))
+			writeError(w, r, errMethodNotAllowed)
+			return
+		}
 		setVersionID(w, state, entry)
-		g.serveEntry(w, r, entry, data)
+		// Serve through a windowed reader over the erasure-coded data path: a
+		// Range read touches only the covering shards (the coordinator
+		// prefetches the covering slice), and a whole-object read streams in
+		// bounded windows rather than buffering the object whole. The version
+		// is pinned by the resolved entry, so the headers and the body always
+		// describe the same version, and http.ServeContent handles Range and
+		// the conditional headers over it.
+		ent := entry
+		content := &rangeReader{
+			size: entry.Size,
+			fetch: func(off, length int64) ([]byte, error) {
+				return g.cfg.Objects.GetRange(ent, off, length)
+			},
+		}
+		g.serveEntryReader(w, r, entry, content)
 		return
 	}
 
@@ -249,9 +257,18 @@ func (g *Gateway) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	g.serveEntry(w, r, entry, data)
 }
 
-// serveEntry writes an object version's headers and body. The caller sets any
-// version-id header first (the cluster path does not yet, single-node does).
+// serveEntry writes an object version's headers and body from an in-memory
+// buffer. The caller sets any version-id header first.
 func (g *Gateway) serveEntry(w http.ResponseWriter, r *http.Request, entry meta.VersionEntry, data []byte) {
+	g.serveEntryReader(w, r, entry, bytes.NewReader(data))
+}
+
+// serveEntryReader writes an object version's headers and serves its body from
+// a ReadSeeker, so the cluster path can stream from the erasure-coded data path
+// without buffering the object whole. http.ServeContent reads only the bytes a
+// Range request covers, and handles the conditional headers (If-Range,
+// If-Modified-Since) over the reader.
+func (g *Gateway) serveEntryReader(w http.ResponseWriter, r *http.Request, entry meta.VersionEntry, content io.ReadSeeker) {
 	w.Header().Set("ETag", objectETag(entry.ETag, len(entry.Parts)))
 	if entry.ContentType != "" {
 		w.Header().Set("Content-Type", entry.ContentType)
@@ -264,7 +281,64 @@ func (g *Gateway) serveEntry(w http.ResponseWriter, r *http.Request, entry meta.
 	setLockHeaders(w, entry)
 	setSSEHeader(w, entry)
 	w.Header().Set("Accept-Ranges", "bytes")
-	http.ServeContent(w, r, "", time.UnixMilli(entry.CreatedUnixMS).UTC(), bytes.NewReader(data))
+	http.ServeContent(w, r, "", time.UnixMilli(entry.CreatedUnixMS).UTC(), content)
+}
+
+// rangeReader is an io.ReadSeeker over an object's plaintext that fetches bytes
+// lazily from the erasure-coded data path in bounded windows. A Range read
+// touches only the covering shards; a whole-object read streams in fixed-memory
+// windows rather than buffering the object whole. Seek never fetches (the size
+// is known up front), so a HEAD request reads no object bytes.
+type rangeReader struct {
+	fetch  func(off, length int64) ([]byte, error)
+	size   int64
+	pos    int64
+	buf    []byte // the currently buffered window
+	bufOff int64  // object offset of buf[0]
+}
+
+// rangeWindow bounds how many object bytes a single fetch pulls into memory, so
+// a whole-object GET streams rather than materializing the object at once.
+const rangeWindow = 4 << 20
+
+func (r *rangeReader) Read(p []byte) (int, error) {
+	if r.pos >= r.size {
+		return 0, io.EOF
+	}
+	if r.pos < r.bufOff || r.pos >= r.bufOff+int64(len(r.buf)) {
+		n := int64(rangeWindow)
+		if r.pos+n > r.size {
+			n = r.size - r.pos
+		}
+		b, err := r.fetch(r.pos, n)
+		if err != nil {
+			return 0, err
+		}
+		r.buf = b
+		r.bufOff = r.pos
+	}
+	nn := copy(p, r.buf[r.pos-r.bufOff:])
+	r.pos += int64(nn)
+	return nn, nil
+}
+
+func (r *rangeReader) Seek(offset int64, whence int) (int64, error) {
+	var abs int64
+	switch whence {
+	case io.SeekStart:
+		abs = offset
+	case io.SeekCurrent:
+		abs = r.pos + offset
+	case io.SeekEnd:
+		abs = r.size + offset
+	default:
+		return 0, errors.New("rangeReader: invalid whence")
+	}
+	if abs < 0 {
+		return 0, errors.New("rangeReader: negative position")
+	}
+	r.pos = abs
+	return abs, nil
 }
 
 // deleteObject is S3 DeleteObject. With ?versionId it permanently destroys that

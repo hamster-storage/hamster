@@ -148,14 +148,17 @@ type PutObjectOptions struct {
 
 // ObjectBackend is the cluster data path's face (internal/coord behind a
 // cluster composition). Implementations own their synchronization, like
-// Metadata. Get returns the served version's entry alongside its bytes —
-// one consistent read, so response headers can never describe a different
-// version than the body.
+// Metadata. The gateway resolves a version entry through Metadata first, then
+// serves its bytes through GetRange pinned to that entry — so the response
+// headers and the body always describe the same version.
 type ObjectBackend interface {
 	Put(bucket, key string, body []byte, opts PutObjectOptions) (etag []byte, versionID meta.VersionID, err error)
-	Get(bucket, key string) (data []byte, entry meta.VersionEntry, err error)
-	// GetVersion serves a specific version's bytes (the ?versionId read).
-	GetVersion(bucket, key string, vid meta.VersionID) (data []byte, err error)
+	// GetRange serves the plaintext range [off, off+length) of a stored
+	// version entry; a negative length means to the end of the object. It
+	// fetches only the covering shards, so a Range read and a windowed
+	// whole-object read both stay bounded in memory. The entry must be a
+	// stored object — a delete marker holds no shards.
+	GetRange(entry meta.VersionEntry, off, length int64) (data []byte, err error)
 	// DeleteShards best-effort reclaims a displaced version's shards.
 	DeleteShards(e meta.VersionEntry)
 }
