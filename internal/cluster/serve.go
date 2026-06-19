@@ -305,63 +305,20 @@ func (c *clusterObjects) Put(bucket, key string, body []byte, opts gateway.PutOb
 	return out.res.ETag, out.res.VersionID, nil
 }
 
-func (c *clusterObjects) GetVersion(bucket, key string, vid meta.VersionID) ([]byte, error) {
+func (c *clusterObjects) GetRange(entry meta.VersionEntry, off, length int64) ([]byte, error) {
 	type outcome struct {
 		data []byte
 		err  error
 	}
 	ch := make(chan outcome, 1)
-	var found bool
 	c.n.loop.Post(func() {
-		entry, ok := c.n.raft.Store().GetVersion(bucket, key, vid)
-		if !ok {
-			ch <- outcome{nil, nil}
-			return
-		}
-		found = true
-		c.n.coord.GetEntry(entry, 0, -1, func(b []byte, err error) { ch <- outcome{b, err} })
+		c.n.coord.GetEntry(entry, off, length, func(b []byte, err error) { ch <- outcome{b, err} })
 	})
 	out := <-ch
-	if !found {
-		return nil, gateway.ErrNoSuchKey
-	}
 	if out.err != nil {
 		return nil, mapCoordErr(out.err)
 	}
 	return out.data, nil
-}
-
-func (c *clusterObjects) Get(bucket, key string) (data []byte, entry meta.VersionEntry, err error) {
-	type outcome struct {
-		data []byte
-		err  error
-	}
-	ch := make(chan outcome, 1)
-	var found bool
-	c.n.loop.Post(func() {
-		// Entry and bytes from one loop turn: the coordinator's own
-		// lookup runs before any other apply can interleave.
-		store := c.n.raft.Store()
-		cur, ok := store.Current(bucket, key)
-		if !ok {
-			ch <- outcome{nil, nil}
-			return
-		}
-		entry, found = store.GetVersion(bucket, key, cur.VersionID)
-		if !found {
-			ch <- outcome{nil, nil}
-			return
-		}
-		c.n.coord.Get(bucket, key, 0, -1, func(b []byte, err error) { ch <- outcome{b, err} })
-	})
-	out := <-ch
-	if !found {
-		return nil, meta.VersionEntry{}, gateway.ErrNoSuchKey
-	}
-	if out.err != nil {
-		return nil, meta.VersionEntry{}, mapCoordErr(out.err)
-	}
-	return out.data, entry, nil
 }
 
 func (c *clusterObjects) DeleteShards(e meta.VersionEntry) {
