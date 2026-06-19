@@ -43,6 +43,9 @@ ADRs are numbered in order of creation and never renumbered. New decisions get t
 | [0033](0033-ca-rotation.md) | CA rotation: dual-trust rollover over a replicated multi-CA trust bundle; planned rotation and lost-key recovery are one flow |
 | [0034](0034-rolling-upgrade-machinery.md) | Rolling-upgrade machinery: etcd-style auto-rolled cluster version, the health interlock, the upgrade test suite (partially supersedes ADR-0008 dec. 6) |
 | [0035](0035-observability-metrics.md) | Observability: one internal metrics registry, hand-rolled Prometheus exposition, a typed snapshot for the CLI and web console |
+| [0036](0036-one-clustered-path.md) | Hamster is one clustered path: retire the single-node store, flatten the CLI, S3 on by default (a node is a one-node cluster) |
+| [0037](0037-proposal-forwarding.md) | Proposal forwarding: any node accepts writes by forwarding only the metadata commit to the leader, never the object bytes |
+| [0038](0038-ec-multipart-and-data-path-parity.md) | Erasure-coded multipart and cluster data-path parity: streaming PUT, Range-efficient GET, server-side copy, EC multipart |
 
 ## Template
 
