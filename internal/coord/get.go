@@ -62,6 +62,15 @@ func (c *Coordinator) GetEntry(entry meta.VersionEntry, off, length int64, done 
 		off = end
 	}
 
+	// A multipart object (ADR-0038) is stored as independently erasure-coded
+	// parts, each with its own placement, geometry, and DEK. Map the requested
+	// plaintext range onto the covering parts and read each as its own object,
+	// stitching the results — a Range touches only the parts it overlaps.
+	if len(entry.Parts) > 0 {
+		c.getMultipart(entry, off, end, done)
+		return
+	}
+
 	width := int(entry.ECDataShards + entry.ECParityShards)
 	layout, ok := c.cfg.Layout()
 	if !ok {

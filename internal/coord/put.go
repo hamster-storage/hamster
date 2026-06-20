@@ -235,6 +235,11 @@ func (c *Coordinator) beginPut(bucket, key string, size int64, opts PutOptions, 
 		encAlg: encAlg, wrappedDEK: wrappedDEK, kekFP: kekFP,
 		failed: make([]bool, k+m),
 	}
+	// The whole-object commit by default; PutPart swaps in the part commit
+	// before feeding. Either way the streaming, pacing, and ack machinery below
+	// is identical — only the metadata proposal at the linearization point and
+	// the acknowledged result differ.
+	op.commit = op.commitPutObject
 
 	op.streams = make([]*datapath.WriteStream, k+m)
 	op.sinks = make([]*sink, k+m)
@@ -335,9 +340,10 @@ func (s *sink) Write(p []byte) (int, error) {
 // putOp is one in-flight PUT: feed the body as windows allow, close and
 // commit, gather stream outcomes, apply the ack rule, propose.
 type putOp struct {
-	c    *Coordinator
-	done func(PutResult, error)
-	want func() // backpressure: ask the feeder for another chunk (nil for in-memory Put)
+	c      *Coordinator
+	done   func(PutResult, error)
+	commit func() // the success path: build the metadata proposal and ack (PutObject, or UploadPart for a part)
+	want   func() // backpressure: ask the feeder for another chunk (nil for in-memory Put)
 
 	bucket, key string
 	opts        PutOptions
@@ -469,7 +475,8 @@ func (op *putOp) streamDone(i int, err error) {
 }
 
 // evaluate applies the ack rule after every stream reported, then makes
-// the metadata commit — the linearization point — and acknowledges.
+// the metadata commit — the linearization point — and acknowledges via the
+// op's commit strategy (a whole PutObject, or an UploadPart for a part).
 func (op *putOp) evaluate(lastErr error) {
 	if op.successes < op.floor || !op.closed {
 		op.fail(fmt.Errorf("%w (%d of %d shards durable, floor %d): %v",
@@ -477,6 +484,13 @@ func (op *putOp) evaluate(lastErr error) {
 		return
 	}
 	op.finished = true
+	op.commit()
+}
+
+// commitPutObject proposes the whole-object PutObject and acknowledges — the
+// default commit strategy. The committed shards become readable only when this
+// proposal applies; a commit failure leaves them as reclaimable orphans.
+func (op *putOp) commitPutObject() {
 	op.c.cfg.Raft.Propose(meta.PutObject{
 		ProposedAtUnixMS:  op.atMS,
 		Bucket:            op.bucket,

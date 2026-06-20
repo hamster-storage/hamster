@@ -333,3 +333,65 @@ func TestEncryptedCrashMidPut(t *testing.T) {
 		t.Errorf("retry object not encrypted: alg=%d", e.EncAlgorithm)
 	}
 }
+
+// TestEncryptedMultipart: the multipart path with encryption on (ADR-0038 +
+// ADR-0021). Each part mints its own DEK wrapped under the cluster KEK with the
+// part's own DataID as the nonce, so parts stay independent: the completed
+// version carries a distinct WrappedDEK per part, and a GET resolves and
+// decrypts each part from its own PartRef. The whole object and a cross-boundary
+// range both read back plaintext.
+func TestEncryptedMultipart(t *testing.T) {
+	c := newCluster(t, 52, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.encryptCluster()
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	const key = "enc-big.bin"
+	uploadID := meta.VersionID{0xE0, 0x01, 0x02, 0x03}
+	c.propose(meta.CreateMultipartUpload{ProposedAtUnixMS: 2, Bucket: bucket, Key: key, UploadID: uploadID})
+
+	p1 := randomBody(520, meta.MinPartSize)
+	p2 := randomBody(521, 256<<10)
+	whole := append(append([]byte{}, p1...), p2...)
+
+	r1, err := c.putPart(uploadID, key, 1, p1)
+	if err != nil {
+		t.Fatalf("upload part 1: %v", err)
+	}
+	r2, err := c.putPart(uploadID, key, 2, p2)
+	if err != nil {
+		t.Fatalf("upload part 2: %v", err)
+	}
+	c.propose(meta.CompleteMultipartUpload{
+		ProposedAtUnixMS: 3, Bucket: bucket, Key: key, UploadID: uploadID,
+		VersionID: meta.VersionID{0xE0, 0x10},
+		ETag:      []byte{0xAA, 0xBB},
+		Parts:     []meta.CompletedPart{{PartNumber: 1, ETag: r1.ETag}, {PartNumber: 2, ETag: r2.ETag}},
+	})
+
+	e, ok := c.entry(key)
+	if !ok || len(e.Parts) != 2 {
+		t.Fatalf("completed entry: parts=%d ok=%v", len(e.Parts), ok)
+	}
+	// Each part is encrypted with its own DEK: both carry a wrapped key, and the
+	// two wrapped keys differ (distinct DEKs, distinct nonces).
+	for i, p := range e.Parts {
+		if p.EncAlgorithm != meta.EncAES256GCM || len(p.WrappedDEK) != keys.WrappedLen {
+			t.Fatalf("part %d: alg=%d wrapped=%d, want AES256GCM + wrapped DEK", i, p.EncAlgorithm, len(p.WrappedDEK))
+		}
+	}
+	if bytes.Equal(e.Parts[0].WrappedDEK, e.Parts[1].WrappedDEK) {
+		t.Fatal("parts share a wrapped DEK; each part must mint its own key")
+	}
+
+	// The whole object decrypts and stitches.
+	got, err := c.get(key, 0, -1)
+	if err != nil || !bytes.Equal(got, whole) {
+		t.Fatalf("encrypted whole multipart GET: equal=%v err=%v", bytes.Equal(got, whole), err)
+	}
+	// A range crossing the part boundary decrypts both parts.
+	off := int64(meta.MinPartSize) - 500
+	got, err = c.get(key, off, 1000)
+	if err != nil || !bytes.Equal(got, whole[off:off+1000]) {
+		t.Fatalf("encrypted cross-boundary range: equal=%v err=%v", bytes.Equal(got, whole[off:off+1000]), err)
+	}
+}
