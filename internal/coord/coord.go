@@ -175,3 +175,14 @@ type PutResult struct {
 	ETag      []byte
 	Durable   int
 }
+
+// PartResult is an acknowledged multipart UploadPart (ADR-0038): the part's
+// data address (its minted DataID, where the k+m shards live), the part's
+// MD5 ETag, and the durable shard count at ack. The gateway returns the ETag
+// to the client and, at CompleteMultipartUpload, matches the client's part
+// list against it.
+type PartResult struct {
+	DataID  meta.VersionID
+	ETag    []byte
+	Durable int
+}

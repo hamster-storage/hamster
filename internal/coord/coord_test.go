@@ -1655,3 +1655,110 @@ func TestScrubYieldsDuringTransition(t *testing.T) {
 		t.Fatal("scrubber did not resume after the transition closed")
 	}
 }
+
+// putPart drives one UploadPart through the leader's coordinator to completion.
+func (c *cluster) putPart(uploadID meta.VersionID, key string, partNumber uint32, body []byte) (coord.PartResult, error) {
+	c.t.Helper()
+	id := c.leader()
+	var res coord.PartResult
+	var perr error
+	done := false
+	c.worlds[id].Loop.Post(func() {
+		c.nodes[id].co.PutPart(bucket, key, uploadID, partNumber, body, func(r coord.PartResult, e error) {
+			res, perr, done = r, e, true
+		})
+	})
+	for range 5000 {
+		c.s.Run(tick)
+		if done {
+			return res, perr
+		}
+	}
+	c.t.Fatal("putPart never finished")
+	return res, perr
+}
+
+// TestCoordinatorMultipart: the erasure-coded multipart path (ADR-0038). Each
+// part is independently EC'd and durable on UploadPart; CompleteMultipartUpload
+// assembles them; a whole GET stitches the parts back to the concatenated bytes,
+// and a Range crossing a part boundary touches both parts and returns exactly
+// the requested slice. Proven over the real network read path, including a
+// degraded read that reconstructs a part through a crashed holder.
+func TestCoordinatorMultipart(t *testing.T) {
+	c := newCluster(t, 51, sim.NetConfig{}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+
+	const key = "big.bin"
+	uploadID := meta.VersionID{0xC0, 0x01, 0x02, 0x03}
+	c.propose(meta.CreateMultipartUpload{ProposedAtUnixMS: 2, Bucket: bucket, Key: key, UploadID: uploadID})
+
+	// Two parts: a full-size first part (>= MinPartSize) and a small tail.
+	p1 := randomBody(510, meta.MinPartSize)
+	p2 := randomBody(511, 300<<10)
+	whole := append(append([]byte{}, p1...), p2...)
+
+	r1, err := c.putPart(uploadID, key, 1, p1)
+	if err != nil {
+		t.Fatalf("upload part 1: %v", err)
+	}
+	r2, err := c.putPart(uploadID, key, 2, p2)
+	if err != nil {
+		t.Fatalf("upload part 2: %v", err)
+	}
+	if r1.Durable != 6 || r2.Durable != 6 {
+		t.Fatalf("part durability: p1=%d p2=%d, want 6 each", r1.Durable, r2.Durable)
+	}
+	if r1.DataID == r2.DataID {
+		t.Fatal("parts share a data address; each must be placed independently")
+	}
+
+	// Assemble. ETags are the per-part MD5s the coordinator returned.
+	c.propose(meta.CompleteMultipartUpload{
+		ProposedAtUnixMS: 3, Bucket: bucket, Key: key, UploadID: uploadID,
+		VersionID: meta.VersionID{0xC0, 0x10},
+		ETag:      []byte{0xAA, 0xBB}, // composite ETag; opaque to the read path
+		Parts:     []meta.CompletedPart{{PartNumber: 1, ETag: r1.ETag}, {PartNumber: 2, ETag: r2.ETag}},
+	})
+
+	e, ok := c.entry(key)
+	if !ok || len(e.Parts) != 2 {
+		t.Fatalf("completed entry: parts=%d ok=%v", len(e.Parts), ok)
+	}
+	if e.Size != int64(len(whole)) {
+		t.Fatalf("entry size %d, want %d", e.Size, len(whole))
+	}
+	if e.Parts[0].ECDataShards != 4 || e.Parts[0].ECParityShards != 2 {
+		t.Fatalf("part 0 geometry %d+%d, want 4+2", e.Parts[0].ECDataShards, e.Parts[0].ECParityShards)
+	}
+
+	// Whole-object GET stitches the parts.
+	got, err := c.get(key, 0, -1)
+	if err != nil || !bytes.Equal(got, whole) {
+		t.Fatalf("whole multipart GET: equal=%v err=%v", bytes.Equal(got, whole), err)
+	}
+
+	// A Range crossing the part-1/part-2 boundary touches both parts.
+	off := int64(meta.MinPartSize) - 1000
+	got, err = c.get(key, off, 2000)
+	if err != nil || !bytes.Equal(got, whole[off:off+2000]) {
+		t.Fatalf("cross-boundary range: equal=%v err=%v", bytes.Equal(got, whole[off:off+2000]), err)
+	}
+
+	// Degraded: crash two non-quorum holders of part 1 and prove it still
+	// reconstructs. Part 1's holders come from its own DataID/partition.
+	holders, err := place.Nodes(e.Parts[0].Partition, c.members, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := 0
+	for _, h := range holders {
+		if h != "n1" && h != "n2" && crashed < 2 {
+			c.crash(h)
+			crashed++
+		}
+	}
+	got, err = c.get(key, 0, int64(len(p1)))
+	if err != nil || !bytes.Equal(got, p1) {
+		t.Fatalf("degraded multipart GET of part 1: equal=%v err=%v", bytes.Equal(got, p1), err)
+	}
+}
