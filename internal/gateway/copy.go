@@ -237,12 +237,13 @@ type copyPartResult struct {
 // uploadPartCopy is S3 UploadPartCopy: UploadPart whose bytes come from an
 // existing object, optionally narrowed by x-amz-copy-source-range.
 func (g *Gateway) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket, key string, uid meta.VersionID) {
-	if g.refuseOnCluster(w, r) {
-		return // UploadPartCopy writes a multipart part; the cluster path lands with EC multipart
-	}
 	n, err := strconv.Atoi(r.URL.Query().Get("partNumber"))
 	if err != nil || n < 1 || n > meta.MaxPartNumber {
 		writeError(w, r, meta.ErrInvalidPartNumber)
+		return
+	}
+	if g.cfg.Objects != nil {
+		g.uploadPartCopyCluster(w, r, bucket, key, uid, uint32(n))
 		return
 	}
 
@@ -297,6 +298,71 @@ func (g *Gateway) uploadPartCopy(w http.ResponseWriter, r *http.Request, bucket,
 		Xmlns:        s3Xmlns,
 		LastModified: iso8601(atMS),
 		ETag:         quoteETag(etag[:]),
+	})
+}
+
+// uploadPartCopyCluster is UploadPartCopy on the erasure-coded path: the part
+// bytes come from an existing object's range, read through the data path and
+// re-encoded straight into the part — streamed, never buffered whole, the same
+// windowed reader the GET and CopyObject paths use. The coordinator commits the
+// part row itself.
+func (g *Gateway) uploadPartCopyCluster(w http.ResponseWriter, r *http.Request, bucket, key string, uid meta.VersionID, partNumber uint32) {
+	if hasConditionalCopyHeaders(r.Header) {
+		writeError(w, r, errNotImplemented)
+		return
+	}
+	srcBucket, srcKey, err := parseCopySource(r.Header.Get("x-amz-copy-source"))
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	src, err := g.lookupCurrent(srcBucket, srcKey)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	if src.Kind == meta.KindDeleteMarker {
+		writeError(w, r, errNoSuchKey)
+		return
+	}
+	if _, exists := g.cfg.Meta.GetUpload(bucket, key, uid); !exists {
+		writeError(w, r, meta.ErrNoSuchUpload)
+		return
+	}
+
+	// The copied span: the whole source, or the inclusive byte range the
+	// x-amz-copy-source-range header narrows it to.
+	first, length := int64(0), src.Size
+	if rangeHdr := r.Header.Get("x-amz-copy-source-range"); rangeHdr != "" {
+		lo, hi, ok := parseCopyRange(rangeHdr, src.Size)
+		if !ok {
+			writeError(w, r, errInvalidArgument)
+			return
+		}
+		first, length = lo, hi-lo+1
+	}
+
+	// Stream the source span straight into the part PUT: the windowed reader
+	// pulls only the covering shards, the part is erasure-coded as it arrives.
+	srcReader := &rangeReader{
+		size: length,
+		fetch: func(off, n int64) ([]byte, error) {
+			return g.cfg.Objects.GetRange(src, first+off, n)
+		},
+	}
+	etag, err := g.cfg.Objects.PutPart(bucket, key, uid, partNumber, srcReader, length)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	var atMS int64
+	if up, ok := g.cfg.Meta.GetUpload(bucket, key, uid); ok {
+		atMS = up.CreatedUnixMS
+	}
+	writeXML(w, http.StatusOK, copyPartResult{
+		Xmlns:        s3Xmlns,
+		LastModified: iso8601(atMS),
+		ETag:         quoteETag(etag),
 	})
 }
 

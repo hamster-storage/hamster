@@ -158,6 +158,12 @@ type ObjectBackend interface {
 	// failed SigV4/Content-MD5 validation surfaced at EOF) aborts the write and
 	// is returned for the caller to classify; no partial object is committed.
 	Put(bucket, key string, body io.Reader, size int64, opts PutObjectOptions) (etag []byte, versionID meta.VersionID, err error)
+	// PutPart streams one multipart part of size bytes from body — placed and
+	// erasure-coded independently like a whole object (ADR-0038) — and commits
+	// the part row under (uploadID, partNumber). It returns the part's MD5 ETag.
+	// A body read error (truncation or failed validation at EOF) aborts the part
+	// and is returned raw for the caller to classify; no part row is committed.
+	PutPart(bucket, key string, uploadID meta.VersionID, partNumber uint32, body io.Reader, size int64) (etag []byte, err error)
 	// GetRange serves the plaintext range [off, off+length) of a stored
 	// version entry; a negative length means to the end of the object. It
 	// fetches only the covering shards, so a Range read and a windowed

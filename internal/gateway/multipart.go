@@ -42,9 +42,6 @@ type initiateMultipartUploadResult struct {
 }
 
 func (g *Gateway) createMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	if g.refuseOnCluster(w, r) {
-		return
-	}
 	uid, now := g.cfg.Meta.MintVersionID()
 	applyErr := g.cfg.Meta.ApplyCreateMultipartUpload(meta.CreateMultipartUpload{
 		ProposedAtUnixMS: now.UnixMilli(),
@@ -80,13 +77,19 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 		return
 	}
 
-	// Check the upload before paying for the blob write — a part aimed at
+	// Check the upload before paying for the data write — a part aimed at
 	// a nonexistent upload writes nothing. The authoritative check is the
 	// apply; this one just saves the work.
 	if _, exists := g.cfg.Meta.GetUpload(bucket, key, uid); !exists {
 		writeError(w, r, meta.ErrNoSuchUpload)
 		return
 	}
+
+	if g.cfg.Objects != nil {
+		g.uploadPartCluster(w, r, id, bucket, key, uid, partNumber)
+		return
+	}
+
 	dataID, now := g.cfg.Meta.MintVersionID()
 	atMS := now.UnixMilli()
 
@@ -118,6 +121,37 @@ func (g *Gateway) uploadPart(w http.ResponseWriter, r *http.Request, id *sigv4.I
 	}
 	if !res.ReplacedDataID.IsZero() {
 		_ = g.cfg.Blobs.Remove(res.ReplacedDataID) // best effort; otherwise an orphan for GC
+	}
+	w.Header().Set("ETag", quoteETag(etag))
+	w.WriteHeader(http.StatusOK)
+}
+
+// uploadPartCluster is UploadPart on the erasure-coded path: the part body
+// streams through the coordinator, which erasure-codes it independently and
+// commits the part row itself (the metadata commit is the coordinator's
+// linearization point, exactly as for a whole PUT). The size is resolved from
+// the headers up front and the body validates as it streams, identical to
+// putObjectCluster.
+func (g *Gateway) uploadPartCluster(w http.ResponseWriter, r *http.Request, id *sigv4.Identity, bucket, key string, uid meta.VersionID, partNumber uint32) {
+	size, serr := putBodySize(r, id)
+	if serr != nil {
+		writeError(w, r, serr)
+		return
+	}
+	if size > maxObjectSize {
+		writeError(w, r, errEntityTooLarge)
+		return
+	}
+	etag, err := g.cfg.Objects.PutPart(bucket, key, uid, partNumber, validatingBody(r, id), size)
+	if err != nil {
+		// A tampered chunk stream or a failed payload validation surfaces here as
+		// the read error the feeder aborted on — an authentication failure.
+		if errors.Is(err, sigv4.ErrSignatureMismatch) || errors.Is(err, sigv4.ErrMalformed) {
+			writeAuthError(w, r, err)
+		} else {
+			writeError(w, r, err)
+		}
+		return
 	}
 	w.Header().Set("ETag", quoteETag(etag))
 	w.WriteHeader(http.StatusOK)
@@ -192,9 +226,14 @@ func (g *Gateway) completeMultipartUpload(w http.ResponseWriter, r *http.Request
 		writeError(w, r, applyErr)
 		return
 	}
-	// DiscardedDataIDs carries unused parts and any replaced null version.
-	for _, dataID := range res.DiscardedDataIDs {
-		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+	// DiscardedDataIDs carries unused parts and any replaced null version. On the
+	// single-node path each is a blob to remove; on the cluster path the discard
+	// IDs carry no shard geometry here, so their shards become orphans a future
+	// scan reclaims — the same posture as a cluster overwrite's displaced version.
+	if g.cfg.Blobs != nil {
+		for _, dataID := range res.DiscardedDataIDs {
+			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+		}
 	}
 	writeXML(w, http.StatusOK, completeMultipartUploadResult{
 		Xmlns:    s3Xmlns,
@@ -206,6 +245,13 @@ func (g *Gateway) completeMultipartUpload(w http.ResponseWriter, r *http.Request
 }
 
 func (g *Gateway) abortMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string, uid meta.VersionID) {
+	// On the cluster path the parts' shards are reclaimed by geometry, so capture
+	// each part's placement before the abort drops the rows. (On the single-node
+	// path the AbortResult's blob IDs are enough.)
+	var partShards []meta.PartRecord
+	if g.cfg.Objects != nil {
+		partShards, _ = g.cfg.Meta.ListUploadParts(bucket, key, uid, 0, meta.MaxPartNumber+1)
+	}
 	res, applyErr := g.cfg.Meta.ApplyAbortMultipartUpload(meta.AbortMultipartUpload{
 		ProposedAtUnixMS: g.cfg.Clock.Now().UnixMilli(),
 		Bucket:           bucket,
@@ -216,10 +262,33 @@ func (g *Gateway) abortMultipartUpload(w http.ResponseWriter, r *http.Request, b
 		writeError(w, r, applyErr)
 		return
 	}
-	for _, dataID := range res.PartDataIDs {
-		_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+	if g.cfg.Objects != nil {
+		// Reclaim each part's shards at its own placement. A synthetic entry
+		// carrying the parts lets DeleteShards walk every part's geometry.
+		if len(partShards) > 0 {
+			g.cfg.Objects.DeleteShards(meta.VersionEntry{Parts: partRefsOf(partShards)})
+		}
+	} else {
+		for _, dataID := range res.PartDataIDs {
+			_ = g.cfg.Blobs.Remove(dataID) // best effort; otherwise an orphan for GC
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// partRefsOf projects stored part records onto the PartRefs DeleteShards needs:
+// the data address and the shard geometry to locate each part's shards.
+func partRefsOf(parts []meta.PartRecord) []meta.PartRef {
+	refs := make([]meta.PartRef, len(parts))
+	for i, p := range parts {
+		refs[i] = meta.PartRef{
+			DataID:         p.DataID,
+			Partition:      p.Partition,
+			ECDataShards:   p.ECDataShards,
+			ECParityShards: p.ECParityShards,
+		}
+	}
+	return refs
 }
 
 type partEntry struct {

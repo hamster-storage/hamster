@@ -417,23 +417,32 @@ func (s *sparse) ReadAt(p []byte, off int64) (int, error) {
 // DeleteShards best-effort removes a version's shards from its holders —
 // the reclaim after a metadata delete displaced the version. Outcomes are
 // ignored: anything that survives is an orphan a future scan collects,
-// unreadable as an object because no metadata names it.
+// unreadable as an object because no metadata names it. A multipart object
+// (ADR-0038) is reclaimed part by part, each at its own placement and geometry
+// — the version-level geometry is empty for a multipart entry, so a single
+// partition/width would not address any part's shards.
 func (c *Coordinator) DeleteShards(e meta.VersionEntry) {
-	width := int(e.ECDataShards + e.ECParityShards)
-	if width == 0 {
-		return // a v0.1 whole-blob entry; not this data path's to reclaim
-	}
 	layout, ok := c.cfg.Layout()
 	if !ok {
 		return // no layout to resolve holders against; orphans await GC
 	}
-	nodes, err := layout.Nodes(e.Partition, width)
-	if err != nil {
-		return
-	}
-	for _, id := range e.DataIDs() {
+	del := func(dataID meta.VersionID, partition uint64, width int) {
+		if width == 0 {
+			return // a v0.1 whole-blob entry; not this data path's to reclaim
+		}
+		nodes, err := layout.Nodes(partition, width)
+		if err != nil {
+			return
+		}
 		for i, n := range nodes {
-			c.cfg.Data.Delete(n, id, uint32(i), func(error) {})
+			c.cfg.Data.Delete(n, dataID, uint32(i), func(error) {})
 		}
 	}
+	if len(e.Parts) > 0 {
+		for _, p := range e.Parts {
+			del(p.DataID, p.Partition, int(p.ECDataShards+p.ECParityShards))
+		}
+		return
+	}
+	del(e.DataID, e.Partition, int(e.ECDataShards+e.ECParityShards))
 }
