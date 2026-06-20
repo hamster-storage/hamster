@@ -318,13 +318,27 @@ func (c *clusterObjects) Put(bucket, key string, body io.Reader, size int64, opt
 		return nil, meta.VersionID{}, mapCoordErr(out.err)
 	}
 
-	// The feeder: read the body off-loop in window-sized chunks and hand each to
-	// the coordinator on the loop, but only when it asks (the want signal) — so
-	// the body is never buffered beyond the backpressure window regardless of
-	// object size. A read error (a truncation or a validation failure surfaced
-	// at EOF) aborts the in-flight write; a coordinator-side completion (the
-	// ack-rule refusal) ends the feeder via finished, so it never blocks forever
-	// waiting for a want that will not come.
+	feedErr := c.runFeeder(body, h, wantCh, finished)
+	out := <-resCh
+	if feedErr != nil {
+		return nil, meta.VersionID{}, feedErr // raw, so the gateway classifies auth vs other
+	}
+	if out.err != nil {
+		return nil, meta.VersionID{}, mapCoordErr(out.err)
+	}
+	c.n.putBytes.Add(float64(size))
+	return out.res.ETag, out.res.VersionID, nil
+}
+
+// runFeeder reads body off-loop in window-sized chunks and hands each to the
+// coordinator on the loop, but only when it asks (the want signal) — so the
+// body is never buffered beyond the backpressure window regardless of object
+// size. A read error (a truncation or a validation failure surfaced at EOF)
+// aborts the in-flight write and is returned raw; a coordinator-side completion
+// (the ack-rule refusal) ends the feeder via finished, so it never blocks
+// forever waiting for a want that will not come. Shared by whole-object Put and
+// multipart PutPart — the part stream is fed identically.
+func (c *clusterObjects) runFeeder(body io.Reader, h *coord.PutHandle, wantCh, finished chan struct{}) error {
 	chunkSize := c.n.coord.PutChunkSize()
 	var feedErr error
 feedLoop:
@@ -363,15 +377,47 @@ feedLoop:
 			break feedLoop
 		}
 	}
+	return feedErr
+}
+
+// PutPart streams one multipart part through the coordinator's PutPartStream,
+// which erasure-codes the part independently and commits its UploadPart row —
+// the same fed-with-backpressure machinery as a whole PUT.
+func (c *clusterObjects) PutPart(bucket, key string, uploadID meta.VersionID, partNumber uint32, body io.Reader, size int64) ([]byte, error) {
+	c.n.putInflight.Add(1)
+	defer c.n.putInflight.Add(-1)
+	type outcome struct {
+		res coord.PartResult
+		err error
+	}
+	resCh := make(chan outcome, 1)
+	finished := make(chan struct{})
+	wantCh := make(chan struct{}, c.n.coord.PutMaxOutstanding()+1)
+	startCh := make(chan *coord.PutHandle, 1)
+	c.n.loop.Post(func() {
+		h := c.n.coord.PutPartStream(bucket, key, uploadID, partNumber, size,
+			func() { wantCh <- struct{}{} },
+			func(res coord.PartResult, err error) {
+				resCh <- outcome{res, err}
+				close(finished)
+			})
+		startCh <- h
+	})
+	h := <-startCh
+	if h == nil {
+		out := <-resCh // setup failed; done already fired
+		return nil, mapCoordErr(out.err)
+	}
+	feedErr := c.runFeeder(body, h, wantCh, finished)
 	out := <-resCh
 	if feedErr != nil {
-		return nil, meta.VersionID{}, feedErr // raw, so the gateway classifies auth vs other
+		return nil, feedErr // raw, so the gateway classifies auth vs other
 	}
 	if out.err != nil {
-		return nil, meta.VersionID{}, mapCoordErr(out.err)
+		return nil, mapCoordErr(out.err)
 	}
 	c.n.putBytes.Add(float64(size))
-	return out.res.ETag, out.res.VersionID, nil
+	return out.res.ETag, nil
 }
 
 func (c *clusterObjects) GetRange(entry meta.VersionEntry, off, length int64) ([]byte, error) {

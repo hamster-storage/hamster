@@ -11,8 +11,10 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +181,7 @@ func (c *s3Client) sign(req *http.Request, payload []byte) {
 		"x-amz-date:" + amzDate + "\n"
 	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
 	canonical := strings.Join([]string{
-		req.Method, req.URL.EscapedPath(), req.URL.RawQuery,
+		req.Method, req.URL.EscapedPath(), canonicalizeQuery(req.URL.RawQuery),
 		canonicalHeaders, signedHeaders, hexPayload,
 	}, "\n")
 	scope := dateScope + "/" + c.region + "/s3/aws4_request"
@@ -202,6 +204,29 @@ func (c *s3Client) sign(req *http.Request, payload []byte) {
 	req.Header.Set("Authorization", fmt.Sprintf(
 		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
 		c.akid, scope, signedHeaders, sig))
+}
+
+// canonicalizeQuery re-encodes a raw query string the way SigV4 requires (and
+// the server's verifier does): each parameter as key=value (a valueless key
+// like "uploads" becomes "uploads="), URL-encoded, sorted. Without this a
+// subresource query such as ?uploads would sign as "uploads" yet verify as
+// "uploads=", a guaranteed signature mismatch.
+func canonicalizeQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return raw
+	}
+	var pairs []string
+	for name, vals := range values {
+		for _, val := range vals {
+			pairs = append(pairs, url.QueryEscape(name)+"="+url.QueryEscape(val))
+		}
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, "&")
 }
 
 // do sends one signed request to one node.
