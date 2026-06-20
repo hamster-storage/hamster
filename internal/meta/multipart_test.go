@@ -87,6 +87,63 @@ func TestMultipartLifecycle(t *testing.T) {
 	}
 }
 
+// TestMultipartCarriesECFields proves the per-part erasure-coding facts
+// (ADR-0038) survive UploadPart → CompleteMultipartUpload: each part is
+// encoded independently, so its partition, k+m geometry, per-shard
+// checksums, and wrapped DEK must land intact in the completed version's
+// PartRefs — that is what a GET needs to fetch and decrypt each part.
+func TestMultipartCarriesECFields(t *testing.T) {
+	e := newEnv(t)
+	e.mustCreateBucket("docs", false)
+	uid := e.createUpload("docs", "enc.bin")
+
+	at := e.tick()
+	d1 := mintAt(at, e.rng)
+	if _, err := e.s.ApplyUploadPart(UploadPart{
+		ProposedAtUnixMS: at, Bucket: "docs", Key: "enc.bin", UploadID: uid,
+		PartNumber: 1, DataID: d1, Size: MinPartSize, ETag: []byte{0xE1}, Checksum: []byte{0xC1},
+		Partition: 1234, ECDataShards: 4, ECParityShards: 2,
+		ShardChecksums: [][]byte{{0xA1}, {0xA2}, {0xA3}, {0xA4}, {0xA5}, {0xA6}},
+		EncAlgorithm:   EncAES256GCM, WrappedDEK: []byte{0xDE, 0xAD}, KEKFingerprint: 0xBEEF,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	at = e.tick()
+	d2 := mintAt(at, e.rng)
+	if _, err := e.s.ApplyUploadPart(UploadPart{
+		ProposedAtUnixMS: at, Bucket: "docs", Key: "enc.bin", UploadID: uid,
+		PartNumber: 2, DataID: d2, Size: 99, ETag: []byte{0xE2}, Checksum: []byte{0xC2},
+		Partition: 5678, ECDataShards: 4, ECParityShards: 2,
+		ShardChecksums: [][]byte{{0xB1}, {0xB2}, {0xB3}, {0xB4}, {0xB5}, {0xB6}},
+		EncAlgorithm:   EncAES256GCM, WrappedDEK: []byte{0xC0, 0xDE}, KEKFingerprint: 0xBEEF,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	at = e.tick()
+	res, err := e.s.ApplyCompleteMultipartUpload(CompleteMultipartUpload{
+		ProposedAtUnixMS: at, Bucket: "docs", Key: "enc.bin", UploadID: uid,
+		VersionID: mintAt(at, e.rng), ETag: []byte{0xAA},
+		Parts: []CompletedPart{{1, []byte{0xE1}}, {2, []byte{0xE2}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := e.s.GetVersion("docs", "enc.bin", res.VersionID)
+	if !ok || len(entry.Parts) != 2 {
+		t.Fatalf("completed version: %+v, ok=%v", entry, ok)
+	}
+	p1 := entry.Parts[0]
+	if p1.Partition != 1234 || p1.ECDataShards != 4 || p1.ECParityShards != 2 ||
+		len(p1.ShardChecksums) != 6 || p1.EncAlgorithm != EncAES256GCM ||
+		string(p1.WrappedDEK) != "\xDE\xAD" || p1.KEKFingerprint != 0xBEEF {
+		t.Fatalf("part 1 EC fields not carried through: %+v", p1)
+	}
+	if entry.Parts[1].Partition != 5678 || string(entry.Parts[1].WrappedDEK) != "\xC0\xDE" {
+		t.Fatalf("part 2 EC fields not carried through: %+v", entry.Parts[1])
+	}
+}
+
 func TestCompleteValidation(t *testing.T) {
 	e := newEnv(t)
 	e.mustCreateBucket("docs", false)

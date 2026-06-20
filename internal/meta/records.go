@@ -130,13 +130,55 @@ type VersionEntry struct {
 }
 
 // PartRef is one slice of a multipart object's data: the address it was
-// written under and the facts a read needs to fetch and verify it.
+// written under and the facts a read needs to fetch and verify it. On the
+// erasure-coded path each part is encoded independently (ADR-0038), so a
+// PartRef carries its own shard geometry and per-part checksums — the same
+// data-plane facts a whole-object VersionEntry carries, scoped to the part.
 type PartRef struct {
 	DataID   VersionID
 	Size     int64
 	Checksum []byte // SHA-256 of the part's bytes
 
+	// Shard addressing for the EC path, mirroring VersionEntry: the part's
+	// partition, its k+m geometry, and the per-shard checksums. All zero/empty
+	// on the single-node blob path (the part is one blob at DataID) and on a
+	// record written before EC multipart existed — additive (invariant 2),
+	// encoded only when nonzero.
+	Partition      uint64
+	ECDataShards   uint32
+	ECParityShards uint32
+	ShardChecksums [][]byte
+
+	// Encryption at rest (ADR-0021), per part: each part mints its own DEK at
+	// upload time, wrapped under the cluster KEK with the part's DataID as the
+	// nonce, so parts stay independent and a GET decrypts each from its own
+	// PartRef. EncNone leaves WrappedDEK empty. Additive (invariant 2).
+	EncAlgorithm   EncAlgorithm
+	WrappedDEK     []byte
+	KEKFingerprint uint64
+
 	unknown []byte
+}
+
+// cloneShardChecksums deep-copies a per-shard checksum list, returning nil
+// for a nil input so an empty record stays byte-identical.
+func cloneShardChecksums(in [][]byte) [][]byte {
+	if in == nil {
+		return nil
+	}
+	out := make([][]byte, len(in))
+	for i, s := range in {
+		out[i] = slices.Clone(s)
+	}
+	return out
+}
+
+// clone returns a copy of the PartRef sharing no mutable state.
+func (p PartRef) clone() PartRef {
+	p.Checksum = slices.Clone(p.Checksum)
+	p.WrappedDEK = slices.Clone(p.WrappedDEK)
+	p.ShardChecksums = cloneShardChecksums(p.ShardChecksums)
+	return p
 }
 
 // DataIDs returns every data-plane address the entry's bytes live at:
@@ -164,18 +206,11 @@ func (e VersionEntry) clone() VersionEntry {
 	e.WrappedDEK = slices.Clone(e.WrappedDEK)
 	e.UserMetadata = maps.Clone(e.UserMetadata)
 	e.unknown = slices.Clone(e.unknown)
-	if e.ShardChecksums != nil {
-		sc := make([][]byte, len(e.ShardChecksums))
-		for i, s := range e.ShardChecksums {
-			sc[i] = slices.Clone(s)
-		}
-		e.ShardChecksums = sc
-	}
+	e.ShardChecksums = cloneShardChecksums(e.ShardChecksums)
 	if e.Parts != nil {
 		ps := make([]PartRef, len(e.Parts))
 		for i, p := range e.Parts {
-			p.Checksum = slices.Clone(p.Checksum)
-			ps[i] = p
+			ps[i] = p.clone()
 		}
 		e.Parts = ps
 	}
@@ -285,6 +320,18 @@ type PartRecord struct {
 	ETag           []byte // MD5, matched against CompleteMultipartUpload's part list
 	Checksum       []byte // SHA-256 of the part's bytes
 	UploadedUnixMS int64
+
+	// EC-path shard geometry and per-part encryption, the same facts the
+	// completed PartRef carries (above): the part's bytes are already durable
+	// as k+m shards under DataID when this row commits. Zero/empty on the
+	// single-node blob path. Additive (invariant 2).
+	Partition      uint64
+	ECDataShards   uint32
+	ECParityShards uint32
+	ShardChecksums [][]byte
+	EncAlgorithm   EncAlgorithm
+	WrappedDEK     []byte
+	KEKFingerprint uint64
 
 	unknown []byte
 }

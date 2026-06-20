@@ -356,6 +356,16 @@ func marshalPartRef(p PartRef) []byte {
 	b = putID(b, 1, p.DataID)
 	b = putUvarint(b, 2, uint64(p.Size))
 	b = putBytes(b, 3, p.Checksum)
+	b = putUvarint(b, 4, p.Partition)
+	b = putUvarint(b, 5, uint64(p.ECDataShards))
+	b = putUvarint(b, 6, uint64(p.ECParityShards))
+	for _, sc := range p.ShardChecksums {
+		b = protowire.AppendTag(b, 7, protowire.BytesType)
+		b = protowire.AppendBytes(b, sc)
+	}
+	b = putUvarint(b, 8, uint64(p.EncAlgorithm))
+	b = putBytes(b, 9, p.WrappedDEK)
+	b = putUvarint(b, 10, p.KEKFingerprint)
 	return append(b, p.unknown...)
 }
 
@@ -370,6 +380,20 @@ func unmarshalPartRef(b []byte) (PartRef, error) {
 			p.Size = d.int64()
 		case 3:
 			p.Checksum = d.bytes()
+		case 4:
+			p.Partition = d.uvarint()
+		case 5:
+			p.ECDataShards = d.uint32()
+		case 6:
+			p.ECParityShards = d.uint32()
+		case 7:
+			p.ShardChecksums = append(p.ShardChecksums, d.bytes())
+		case 8:
+			p.EncAlgorithm = EncAlgorithm(d.enum8())
+		case 9:
+			p.WrappedDEK = d.bytes()
+		case 10:
+			p.KEKFingerprint = d.uvarint()
 		default:
 			d.skipUnknown(&p.unknown)
 		}
@@ -453,6 +477,16 @@ func marshalPartRecord(p PartRecord) []byte {
 	b = putBytes(b, 5, p.ETag)
 	b = putBytes(b, 6, p.Checksum)
 	b = putUvarint(b, 7, uint64(p.UploadedUnixMS))
+	b = putUvarint(b, 8, p.Partition)
+	b = putUvarint(b, 9, uint64(p.ECDataShards))
+	b = putUvarint(b, 10, uint64(p.ECParityShards))
+	for _, sc := range p.ShardChecksums {
+		b = protowire.AppendTag(b, 11, protowire.BytesType)
+		b = protowire.AppendBytes(b, sc)
+	}
+	b = putUvarint(b, 12, uint64(p.EncAlgorithm))
+	b = putBytes(b, 13, p.WrappedDEK)
+	b = putUvarint(b, 14, p.KEKFingerprint)
 	return append(b, p.unknown...)
 }
 
@@ -475,6 +509,20 @@ func unmarshalPartRecord(b []byte) (PartRecord, error) {
 			p.Checksum = d.bytes()
 		case 7:
 			p.UploadedUnixMS = d.int64()
+		case 8:
+			p.Partition = d.uvarint()
+		case 9:
+			p.ECDataShards = d.uint32()
+		case 10:
+			p.ECParityShards = d.uint32()
+		case 11:
+			p.ShardChecksums = append(p.ShardChecksums, d.bytes())
+		case 12:
+			p.EncAlgorithm = EncAlgorithm(d.enum8())
+		case 13:
+			p.WrappedDEK = d.bytes()
+		case 14:
+			p.KEKFingerprint = d.uvarint()
 		default:
 			d.skipUnknown(&p.unknown)
 		}

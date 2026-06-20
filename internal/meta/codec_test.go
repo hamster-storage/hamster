@@ -34,7 +34,12 @@ func fullVersionEntry() VersionEntry {
 		KEKFingerprint:    0xA1A2A3A4A5A6A7A8,
 		NullVersion:       true,
 		Parts: []PartRef{
-			{DataID: VersionID{0x01}, Size: 5 << 20, Checksum: []byte{0xCA, 0xFE}},
+			{
+				DataID: VersionID{0x01}, Size: 5 << 20, Checksum: []byte{0xCA, 0xFE},
+				Partition: 1234, ECDataShards: 4, ECParityShards: 2,
+				ShardChecksums: [][]byte{{0xA1}, {0xA2}, {0xA3}, {0xA4}, {0xA5}, {0xA6}},
+				EncAlgorithm:   EncAES256GCM, WrappedDEK: []byte{0xDE, 0xAD}, KEKFingerprint: 0xBEEF,
+			},
 			{DataID: VersionID{0x02}, Size: 7, Checksum: []byte{0xF0}},
 		},
 	}
@@ -85,7 +90,21 @@ func TestCodecRoundTrip(t *testing.T) {
 		}
 	})
 	t.Run("PartRecord", func(t *testing.T) {
-		in := PartRecord{FormatVersion: 1, PartNumber: 10000, DataID: VersionID{1}, Size: 5 << 20, ETag: []byte{3}, Checksum: []byte{4}, UploadedUnixMS: 99}
+		in := PartRecord{
+			FormatVersion: 1, PartNumber: 10000, DataID: VersionID{1}, Size: 5 << 20,
+			ETag: []byte{3}, Checksum: []byte{4}, UploadedUnixMS: 99,
+			Partition: 99, ECDataShards: 3, ECParityShards: 2,
+			ShardChecksums: [][]byte{{0x11}, {0x22}, {0x33}, {0x44}, {0x55}},
+			EncAlgorithm:   EncAES256GCM, WrappedDEK: []byte{0xC0, 0xDE}, KEKFingerprint: 0x1234,
+		}
+		out, err := unmarshalPartRecord(marshalPartRecord(in))
+		if err != nil || !reflect.DeepEqual(in, out) {
+			t.Fatalf("round trip: %+v, %v", out, err)
+		}
+	})
+	t.Run("PartRecord_bare", func(t *testing.T) {
+		// A part written before EC fields existed decodes to zero geometry.
+		in := PartRecord{FormatVersion: 1, PartNumber: 1, DataID: VersionID{1}, Size: 7, ETag: []byte{3}, Checksum: []byte{4}, UploadedUnixMS: 9}
 		out, err := unmarshalPartRecord(marshalPartRecord(in))
 		if err != nil || !reflect.DeepEqual(in, out) {
 			t.Fatalf("round trip: %+v, %v", out, err)
@@ -136,7 +155,7 @@ func TestCodecGolden(t *testing.T) {
 		{"CurrentRecord", marshalCurrentRecord(CurrentRecord{FormatVersion: 1, VersionID: VersionID{9}, Size: 3, ETag: []byte{1, 2}, CreatedUnixMS: 5, PartCount: 4}),
 			"080112100900000000000000000000000000000018032202010228053004"},
 		{"VersionEntry", marshalVersionEntry(fullVersionEntry()),
-			"08011210010203ff00100000000000000000000020808080801428f292d0dfb0333204deadbeef3a186170706c69636174696f6e2f6f637465742d73747265616d420c0a05612d6b657912036f6e65420c0a05622d6b6579120374776f42070a05656d707479482a50045802620211226a01016a01026a0103700278ffefcc86a637800101880101920110aa00bb000000000000000000000000009a011b0a1001000000000000000000000000000000108080c0021a02cafe9a01170a100200000000000000000000000000000010071a01f0a00101aa0104778899abb001a8cf9aadcaf4a8d1a101"},
+			"08011210010203ff00100000000000000000000020808080801428f292d0dfb0333204deadbeef3a186170706c69636174696f6e2f6f637465742d73747265616d420c0a05612d6b657912036f6e65420c0a05622d6b6579120374776f42070a05656d707479482a50045802620211226a01016a01026a0103700278ffefcc86a637800101880101920110aa00bb000000000000000000000000009a013e0a1001000000000000000000000000000000108080c0021a02cafe20d209280430023a01a13a01a23a01a33a01a43a01a53a01a640014a02dead50effd029a01170a100200000000000000000000000000000010071a01f0a00101aa0104778899abb001a8cf9aadcaf4a8d1a101"},
 		// EncryptionPosture mid-rotation (ADR-0032): field 3 current = 0x1111, field 4 rotating-to = 0x2222.
 		{"EncryptionPosture", marshalEncryptionPosture(EncryptionPosture{FormatVersion: 1, Algorithm: EncAES256GCM, CurrentKEKFingerprint: 0x1111, RotatingToKEKFingerprint: 0x2222}),
 			"0801100118912220a244"},
