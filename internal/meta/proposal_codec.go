@@ -151,6 +151,16 @@ func EncodeProposal(p any) []byte {
 		cmd = putUvarint(cmd, 6, uint64(c.Size))
 		cmd = putBytes(cmd, 7, c.ETag)
 		cmd = putBytes(cmd, 8, c.Checksum)
+		cmd = putUvarint(cmd, 9, c.Partition)
+		cmd = putUvarint(cmd, 10, uint64(c.ECDataShards))
+		cmd = putUvarint(cmd, 11, uint64(c.ECParityShards))
+		for _, sc := range c.ShardChecksums {
+			cmd = protowire.AppendTag(cmd, 12, protowire.BytesType)
+			cmd = protowire.AppendBytes(cmd, sc)
+		}
+		cmd = putUvarint(cmd, 13, uint64(c.EncAlgorithm))
+		cmd = putBytes(cmd, 14, c.WrappedDEK)
+		cmd = putUvarint(cmd, 15, c.KEKFingerprint)
 	case CompleteMultipartUpload:
 		atMS, num = c.ProposedAtUnixMS, propCompleteUpload
 		cmd = putString(cmd, 1, c.Bucket)
@@ -510,6 +520,20 @@ func decodeCommand(num protowire.Number, atMS int64, b []byte) (any, error) {
 				c.ETag = d.bytes()
 			case 8:
 				c.Checksum = d.bytes()
+			case 9:
+				c.Partition = d.uvarint()
+			case 10:
+				c.ECDataShards = d.uint32()
+			case 11:
+				c.ECParityShards = d.uint32()
+			case 12:
+				c.ShardChecksums = append(c.ShardChecksums, d.bytes())
+			case 13:
+				c.EncAlgorithm = EncAlgorithm(d.enum8())
+			case 14:
+				c.WrappedDEK = d.bytes()
+			case 15:
+				c.KEKFingerprint = d.uvarint()
 			default:
 				d.skipUnknown(nil)
 			}

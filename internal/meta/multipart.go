@@ -41,6 +41,18 @@ type UploadPart struct {
 	Size             int64
 	ETag             []byte
 	Checksum         []byte
+
+	// EC-path shard geometry and per-part encryption (ADR-0038): the part's
+	// bytes are durable as k+m shards under DataID before this proposal is
+	// made, exactly like a whole PutObject. Zero/empty on the single-node
+	// blob path, where the part is one blob at DataID.
+	Partition      uint64
+	ECDataShards   uint32
+	ECParityShards uint32
+	ShardChecksums [][]byte
+	EncAlgorithm   EncAlgorithm
+	WrappedDEK     []byte
+	KEKFingerprint uint64
 }
 
 // UploadPartResult reports the data address displaced when a part number
@@ -144,6 +156,13 @@ func (s *Store) ApplyUploadPart(p UploadPart) (res UploadPartResult, err error) 
 		ETag:           slices.Clone(p.ETag),
 		Checksum:       slices.Clone(p.Checksum),
 		UploadedUnixMS: p.ProposedAtUnixMS,
+		Partition:      p.Partition,
+		ECDataShards:   p.ECDataShards,
+		ECParityShards: p.ECParityShards,
+		ShardChecksums: cloneShardChecksums(p.ShardChecksums),
+		EncAlgorithm:   p.EncAlgorithm,
+		WrappedDEK:     slices.Clone(p.WrappedDEK),
+		KEKFingerprint: p.KEKFingerprint,
 	})
 	return res, nil
 }
@@ -206,7 +225,18 @@ func (s *Store) ApplyCompleteMultipartUpload(p CompleteMultipartUpload) (res Com
 			return CompleteResult{}, ErrPartTooSmall
 		}
 		size += pr.Size
-		parts[i] = PartRef{DataID: pr.DataID, Size: pr.Size, Checksum: pr.Checksum}
+		parts[i] = PartRef{
+			DataID:         pr.DataID,
+			Size:           pr.Size,
+			Checksum:       pr.Checksum,
+			Partition:      pr.Partition,
+			ECDataShards:   pr.ECDataShards,
+			ECParityShards: pr.ECParityShards,
+			ShardChecksums: pr.ShardChecksums,
+			EncAlgorithm:   pr.EncAlgorithm,
+			WrappedDEK:     pr.WrappedDEK,
+			KEKFingerprint: pr.KEKFingerprint,
+		}
 		used[cp.PartNumber] = true
 	}
 
