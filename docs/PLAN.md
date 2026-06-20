@@ -32,32 +32,29 @@ a node is a one-node cluster, the CLI is flat, and S3 serves on every node by de
 **This is one release** — dropping `serve` is only safe once the cluster path is a
 strict superset of it, so parity and forwarding land with the flatten, not after.
 
-ADRs 0036/0037/0038 are accepted and committed. **Landed so far:** Range-efficient +
-streaming GET; streaming PUT end to end (the fed-with-backpressure coordinator, a
-tunable window, and the in-flight/throughput/backpressure-stall load metrics).
-Remaining passes, in dependency order:
+ADRs 0036/0037/0038 are accepted and committed. **Data-path parity is done**
+([ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)): Range-efficient + streaming
+GET; streaming PUT end to end (the fed-with-backpressure coordinator, a tunable window,
+and the in-flight/throughput/backpressure-stall load metrics); server-side `CopyObject`
+and `UploadPartCopy`; and erasure-coded multipart — each part EC'd independently and
+durable on upload, `Complete` assembling the part list, GET stitching the parts with
+Range mapping to the covering parts (no whole-object re-encode). The cluster S3 path is
+now a strict superset of the single-node surface. Remaining passes, in dependency order:
 
-1. **Data-path parity, remaining** ([ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)):
-   - **Server-side `CopyObject` / `UploadPartCopy`** — read-and-re-encode through the
-     coordinator, streaming.
-   - **Erasure-coded multipart** — each part EC'd independently and durable on upload
-     (keyed by `uploadId`+part under the existing `u/` metadata prefix), `Complete`
-     assembling the part list into a version entry, GET stitching parts and Range
-     mapping to the covering parts. No whole-object re-encode.
-2. **Proposal forwarding** ([ADR-0037](adr/0037-proposal-forwarding.md)) — a non-leader
+1. **Proposal forwarding** ([ADR-0037](adr/0037-proposal-forwarding.md)) — a non-leader
    does the leadership-independent data work locally, then forwards only the small
    metadata commit to the leader and awaits it, replacing today's `503 SlowDown`. Only
    the commit crosses the leader hop; object bytes never do (invariant 1). Proven under
    simulated cluster schedules (leadership change mid-write, follower-coordinated PUT).
-3. **S3 on by default** — `hamster run` serves S3 on `127.0.0.1:9000` by default,
+2. **S3 on by default** — `hamster run` serves S3 on `127.0.0.1:9000` by default,
    credentials required (refuse to boot without them, as `serve` did); `-no-s3` for a
    headless storage node, `-s3 <addr>` to override the address.
-4. **Flatten the CLI + drop `serve`** — the fifteen `cluster <sub>` commands move to
+3. **Flatten the CLI + drop `serve`** — the fifteen `cluster <sub>` commands move to
    top-level verbs; the `cluster` namespace and `serve`/`internal/blob` retire (hard
    break, no aliases). README, CLAUDE.md, GLOSSARY, the demo Taskfile, and every
    e2e/compat invocation move to the flat commands and the one-path model in the same
    release.
-5. **One complete help + a drift guard** (the tail item) — a single top-level help that
+4. **One complete help + a drift guard** (the tail item) — a single top-level help that
    lists every command (folding in the good descriptions from today's `clusterUsage`),
    plus a test that iterates the dispatch table and asserts every verb appears in the
    usage string, so help can never again drift from the implemented surface.
