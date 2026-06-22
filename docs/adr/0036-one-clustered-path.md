@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed.
+Accepted.
 
 Depends on two technical-enabler ADRs written as their work begins:
 [ADR-0037](0037-proposal-forwarding.md) (proposal forwarding — any node accepts
@@ -44,15 +44,26 @@ sync. Hamster's identity is "an S3-compatible object store" — it should presen
 
 ## Decision
 
-1. **A node is a one-node cluster; retire `serve` and `internal/blob`.** The
-   minimum deployment is `hamster init` + `hamster run` — a one-node cluster that
-   erasure-codes (1+0) and serves S3. It scales to N by joining nodes. There is no
-   separate single-node code path and no in-place "promotion" (there never was —
-   the formats differ). The `internal/blob` path and the gateway's `Blobs`-vs-
-   `Objects` branch retire; the EC `Objects` backend is always present.
+1. **A node is a one-node cluster; retire `serve` as a deployment, `internal/blob`
+   as a production path.** The minimum deployment is `hamster init` + `hamster
+   serve` — a one-node cluster that erasure-codes (1+0) and serves S3. It scales to
+   N by joining nodes. There is no separate single-node code path and no in-place
+   "promotion" (there never was — the formats differ). The single-node `serve`
+   command and its blob-backed deployment retire; a node always runs the EC
+   `Objects` backend, so **no user can reach the blob path**. `internal/blob` itself
+   is retained as the gateway's simple, synchronous *test* backend (`Config.Blobs`),
+   and the gateway keeps its `Blobs`-vs-`Objects` branch: fully deleting the package
+   and collapsing the branch was weighed and **declined**. `blob` is the substrate
+   for the gateway's 41 S3-surface unit tests (SigV4, XML, ETag/composite rules,
+   multipart assembly, range math — all backend-agnostic); the production EC path
+   (`internal/coord`) carries its own 41 simulation tests proving durability by
+   decoding shards off disk; and the gateway↔coord seam is covered by the cluster
+   e2e. So the collapse is a large, test-quality-reducing change for no
+   production-coverage benefit. "One path" is achieved where it matters — in
+   production — not by deleting the test seam.
 
 2. **Flatten the CLI — hard break, no aliases.** The fifteen `cluster <sub>`
-   commands become top-level verbs: `hamster init`, `hamster run`, `hamster
+   commands become top-level verbs: `hamster init`, `hamster serve`, `hamster
    status`, `hamster join`, `hamster token`, `hamster drain`, `hamster remove`,
    `hamster optimize`, `hamster encrypt`, `hamster rotate-key`, `hamster
    rotate-ca`, `hamster recover`, `hamster can-stop`, `hamster metrics`, `hamster
@@ -62,7 +73,7 @@ sync. Hamster's identity is "an S3-compatible object store" — it should presen
    in the dispatch table appears in the usage string, so help can never again drift
    from the implemented surface.
 
-3. **S3 on by default.** `hamster run` serves the S3 API on a default address
+3. **S3 on by default.** `hamster serve` serves the S3 API on a default address
    (`127.0.0.1:9000`, the old `serve` default), and **requires credentials** —
    it refuses to boot without `HAMSTER_ACCESS_KEY_ID`/`HAMSTER_SECRET_ACCESS_KEY`,
    exactly as `serve` did, so the data API is never unauthenticated. `-s3 <addr>`
@@ -85,8 +96,8 @@ once the cluster path is a strict superset of it, which 4 and 5 deliver.
 
 ## Consequences
 
-- **One product, one path, one help.** A new user runs `hamster init && hamster
-  run` and has an authenticated S3 endpoint; the identical binary and commands
+- **One product, one path, one help.** A new user runs `hamster init && hamster serve`
+  and has an authenticated S3 endpoint; the identical binary and commands
   scale to a cluster by joining nodes. Nothing about the surface changes as they
   grow.
 - **A one-node deployment now runs Raft (single voter) and mints a CA.** This is
@@ -99,9 +110,14 @@ once the cluster path is a strict superset of it, which 4 and 5 deliver.
   one-node cluster — current object data only, the same caveat the README already
   documents. `serve` was a dev preview on a v0 store, so a one-time data migration
   is acceptable; it is documented, not silent.
-- **The build shrinks.** One data path to test instead of two; the gateway's
-  dual-backend branching collapses; the compat and e2e suites exercise a single
-  surface.
+- **One production data path.** Production runs only the EC path, so there is one
+  S3 surface for a user to learn and one to keep in sync, exercised end to end by
+  the cluster e2e. The gateway's `Blobs`-vs-`Objects` branch is *retained* for unit
+  testing (the `Blobs` side is test-only): the gateway's S3-surface tests stay fast
+  and isolated from the distributed data plane, while production correctness is
+  proven by `internal/coord`'s own simulation suite. The single-node deployment,
+  the second CLI namespace, and the divergent S3 surface are what retire — not the
+  test seam.
 - **Wide but mechanical doc/test churn.** README prose, CLAUDE.md, the GLOSSARY,
   the demo Taskfile, and every e2e/compat invocation move to flat commands and the
   one-path model in the same release. Accepted ADRs that describe the old
