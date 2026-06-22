@@ -337,7 +337,7 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 		// Raft membership by the leader (reconcileLayout); the auto-ladder
 		// profile follows the layout's member count inside the coordinator.
 		n.coord = coord.New(coord.Config{
-			Clock: clock, Rand: rng, Data: n.data, Raft: rn,
+			Clock: clock, Rand: rng, Data: n.data, Raft: forwardingProposer{n: n},
 			Layout: func() (place.Layout, bool) {
 				cl, ok := rn.Store().ClusterLayout()
 				if !ok {

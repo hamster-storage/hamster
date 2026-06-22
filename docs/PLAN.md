@@ -39,22 +39,30 @@ and the in-flight/throughput/backpressure-stall load metrics); server-side `Copy
 and `UploadPartCopy`; and erasure-coded multipart — each part EC'd independently and
 durable on upload, `Complete` assembling the part list, GET stitching the parts with
 Range mapping to the covering parts (no whole-object re-encode). The cluster S3 path is
-now a strict superset of the single-node surface. Remaining passes, in dependency order:
+now a strict superset of the single-node surface.
 
-1. **Proposal forwarding** ([ADR-0037](adr/0037-proposal-forwarding.md)) — a non-leader
-   does the leadership-independent data work locally, then forwards only the small
-   metadata commit to the leader and awaits it, replacing today's `503 SlowDown`. Only
-   the commit crosses the leader hop; object bytes never do (invariant 1). Proven under
-   simulated cluster schedules (leadership change mid-write, follower-coordinated PUT).
-2. **S3 on by default** — `hamster run` serves S3 on `127.0.0.1:9000` by default,
+**Proposal forwarding is done** ([ADR-0037](adr/0037-proposal-forwarding.md)): any node
+accepts writes. A non-leader runs the data plane locally and forwards only the small
+metadata commit to the leader over the control channel (`reqForward`) — object bytes
+never cross the leader hop or the Raft log (invariant 1), and apply errors keep their
+identity across the hop. The coordinator's PutObject/UploadPart commits go through a
+forwarding `coord.Proposer` (`forwardingProposer`, the hop off-loop with the callback
+posted back); the gateway's bucket/delete/multipart-metadata commits go through
+`Node.propose`→`forward`. A non-leader no longer answers `503` for being a non-leader
+(`503` stays for genuine backpressure and the below-floor durability refusal). Proven by
+a real-cluster e2e (PUT, multipart, and an apply error all driven through a follower).
+
+Remaining passes, in dependency order:
+
+1. **S3 on by default** — `hamster run` serves S3 on `127.0.0.1:9000` by default,
    credentials required (refuse to boot without them, as `serve` did); `-no-s3` for a
    headless storage node, `-s3 <addr>` to override the address.
-3. **Flatten the CLI + drop `serve`** — the fifteen `cluster <sub>` commands move to
+2. **Flatten the CLI + drop `serve`** — the fifteen `cluster <sub>` commands move to
    top-level verbs; the `cluster` namespace and `serve`/`internal/blob` retire (hard
    break, no aliases). README, CLAUDE.md, GLOSSARY, the demo Taskfile, and every
    e2e/compat invocation move to the flat commands and the one-path model in the same
    release.
-4. **One complete help + a drift guard** (the tail item) — a single top-level help that
+3. **One complete help + a drift guard** (the tail item) — a single top-level help that
    lists every command (folding in the good descriptions from today's `clusterUsage`),
    plus a test that iterates the dispatch table and asserts every verb appears in the
    usage string, so help can never again drift from the implemented surface.

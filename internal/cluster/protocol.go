@@ -114,6 +114,7 @@ const (
 	reqReissue      = 9
 	reqCanStop      = 10
 	reqMetrics      = 11
+	reqForward      = 12 // forward a metadata commit to the leader (ADR-0037)
 )
 
 // maxFrame caps a protocol frame: certificates and member lists are small.

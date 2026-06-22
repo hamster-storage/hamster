@@ -27,9 +27,20 @@ import (
 	"github.com/hamster-storage/hamster/internal/keys"
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/place"
-	"github.com/hamster-storage/hamster/internal/raftnode"
 	"github.com/hamster-storage/hamster/internal/seam"
 )
+
+// Proposer is the node's metadata plane as the coordinator drives it: commit a
+// proposal, read the store, check leadership. Propose is called on the loop and
+// its callback fires on the loop. *raftnode.Node satisfies it directly (the
+// simulator's path); the cluster wraps that with proposal forwarding (ADR-0037),
+// where a commit prepared on a non-leader is sent to the leader off-loop and the
+// callback posted back, so the loop never blocks on the hop.
+type Proposer interface {
+	Propose(p any, done func(any, error))
+	Store() *meta.Store
+	Leader() (uint64, bool)
+}
 
 // Config carries a Coordinator's world and cluster shape. Placement reads
 // from the stored, versioned cluster layout ([ADR-0028]): the member set
@@ -44,8 +55,14 @@ type Config struct {
 
 	// Data is the node's data-plane endpoint.
 	Data *datapath.Service
-	// Raft is the node's metadata plane: proposals in, store out.
-	Raft *raftnode.Node
+	// Raft is the node's metadata plane: proposals in, store out. An interface
+	// so the cluster can wrap the local raftnode with proposal forwarding
+	// (ADR-0037) — a PUT or UploadPart coordinated on a non-leader runs the data
+	// plane here and commits via the leader. Under the simulator it is the local
+	// *raftnode.Node directly. Propose is called on the loop and its callback
+	// fires on the loop; a forwarding implementation does the off-loop hop and
+	// posts the callback back, so the loop never blocks.
+	Raft Proposer
 
 	// Layout resolves the cluster's placement basis for one operation: the
 	// stored, versioned cluster layout ([ADR-0028]), read once per op so an

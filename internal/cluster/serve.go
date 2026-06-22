@@ -109,9 +109,25 @@ func (n *Node) on(fn func()) {
 	<-done
 }
 
-// propose submits one proposal through the local Raft node and waits for
-// its commit. ErrNotLeader maps to the gateway's retryable unavailability.
+// propose commits one metadata proposal. On the leader it proposes through the
+// local Raft and returns the committed result. On a non-leader it forwards only
+// the small commit to the leader (ADR-0037) — the data plane already ran on this
+// node, so the bytes stay here and just the commit crosses the hop. Either way
+// metadata is written solely by the leader through Raft.
 func (n *Node) propose(p any) (any, error) {
+	res, err := n.proposeLocal(p)
+	if !errors.Is(err, raftnode.ErrNotLeader) {
+		return res, err // committed here, or a real apply error (typed, identity intact)
+	}
+	return n.forward(p)
+}
+
+// proposeLocal submits a proposal through this node's local Raft and waits for
+// commit, returning raftnode.ErrNotLeader unwrapped when this node is not the
+// leader — propose forwards on that signal, and a forwarded commit landing on a
+// non-leader reports it so the forwarder retries. A commit timeout maps to the
+// gateway's retryable unavailability.
+func (n *Node) proposeLocal(p any) (any, error) {
 	type outcome struct {
 		res any
 		err error
@@ -124,9 +140,6 @@ func (n *Node) propose(p any) (any, error) {
 	})
 	select {
 	case out := <-ch:
-		if errors.Is(out.err, raftnode.ErrNotLeader) {
-			return nil, fmt.Errorf("%w: this node is not the metadata leader", gateway.ErrUnavailable)
-		}
 		return out.res, out.err
 	case <-time.After(30 * time.Second):
 		return nil, fmt.Errorf("%w: proposal timed out", gateway.ErrUnavailable)

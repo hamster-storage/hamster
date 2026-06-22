@@ -247,10 +247,11 @@ func (c *s3Client) do(addr, method, path string, body []byte) (*http.Response, [
 	return resp, respBody
 }
 
-// mutate drives one write to whichever node will take it. Only the Raft
-// leader commits in v0.3 (no proposal forwarding), so non-leaders answer
-// 503 and the client moves on — when want is 503 itself, every node must
-// refuse.
+// mutate drives one write to whichever node will take it. With proposal
+// forwarding (ADR-0037) any node commits — a non-leader runs the data plane and
+// forwards the commit — so the first reachable node normally answers; a 503 is
+// only transient (a node still finding the leader). When want is 503 itself,
+// every node must refuse.
 func (c *s3Client) mutate(addrs []string, method, path string, body []byte, want int) {
 	c.t.Helper()
 	deadline := time.Now().Add(2 * time.Minute)
