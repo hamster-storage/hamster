@@ -109,7 +109,7 @@ Cluster commands:
   cluster init       found a new cluster (mints the cluster CA)
   cluster token      mint a single-use join token (on the init node)
   cluster join       join an existing cluster with a token
-  cluster run        run this node (add -s3 <addr> to serve the S3 API)
+  cluster run        run this node, serving the S3 API (-no-s3 for a headless storage node)
   cluster status     show cluster membership
   cluster can-stop   check whether a node is safe to stop for upgrade (ADR-0034)
   cluster recover    rebuild a cluster from a survivor after quorum loss
