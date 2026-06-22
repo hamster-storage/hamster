@@ -97,6 +97,31 @@ func (c *cluster) leaderS3() string {
 	return c.s3Addrs[leaderOf(rows)]
 }
 
+// followerS3 returns the S3 endpoint of a current non-leader voter — the node a
+// forwarding test targets to prove a write that does not land on the leader is
+// still committed (ADR-0037), not bounced.
+func (c *cluster) followerS3() string {
+	rows := waitStatus(c.t, c.adminDir, "a follower", func(rows []statusRow) bool {
+		if leaderOf(rows) == "" {
+			return false
+		}
+		for _, r := range rows {
+			if !r.leader && !r.down {
+				return true
+			}
+		}
+		return false
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range rows {
+		if !r.leader && !r.down {
+			return c.s3Addrs[r.node]
+		}
+	}
+	return ""
+}
+
 // join brings up a new node and joins it with a fresh token, serving S3.
 // extraArgs carries flags like -replaces. It returns once the process is
 // started — not yet a settled member; the caller waits on status.

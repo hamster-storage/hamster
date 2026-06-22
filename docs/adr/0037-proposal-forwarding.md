@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. A technical enabler of [ADR-0036](0036-one-clustered-path.md) (one
+Accepted. A technical enabler of [ADR-0036](0036-one-clustered-path.md) (one
 clustered path); ships in the same release (v0.11).
 
 ## Context
