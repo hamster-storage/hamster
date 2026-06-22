@@ -172,10 +172,11 @@ func clusterRun(args []string) error {
 	zone := fs.String("zone", "", "failure-domain label when joining with -token — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight when joining with -token (ADR-0004); 0 means equal")
 	replaces := fs.String("replaces", "", "when joining with -token, replace an existing member with this node at the same cluster size (ADR-0004): the old node's shards migrate here and it is evicted, profile unchanged")
-	s3 := fs.String("s3", "", "serve the S3 API on this address (host:port); empty disables")
+	s3 := fs.String("s3", "127.0.0.1:9000", "address to serve the S3 API on (host:port)")
+	noS3 := fs.Bool("no-s3", false, "run as a headless storage node — do not serve the S3 API (the node still serves the cluster: peer transport, data plane, metadata replica)")
 	admin := fs.String("admin", "", "serve the admin endpoints on this address (host:port): Prometheus metrics at /metrics (ADR-0035); empty disables")
-	region := fs.String("region", "us-east-1", "S3 region name (with -s3)")
-	domain := fs.String("domain", "", "virtual-hosted base domain (with -s3); empty serves path-style only")
+	region := fs.String("region", "us-east-1", "S3 region name")
+	domain := fs.String("domain", "", "virtual-hosted base domain; empty serves path-style only")
 	masterKeyFile := fs.String("master-key-file", "", "path to the cluster master key (KEK) for encryption at rest (ADR-0021): 32 bytes raw, or hex/base64. The same key on every node; held in memory only, never persisted. Mount it off the data disk (e.g. a Kubernetes Secret volume)")
 	newMasterKeyFile := fs.String("new-master-key-file", "", "path to the incoming master key during a key rotation (ADR-0032): the node holds both this and -master-key-file so `cluster rotate-key` can rewrap onto it. Provision it on every node; held in memory only, never sent over the wire")
 	fs.Parse(args)
@@ -244,11 +245,17 @@ func clusterRun(args []string) error {
 		return err
 	}
 	log.Printf("hamster cluster node: %s — listen %s (peer transport + join/status)", fullVersion(), n.Addr())
-	if *s3 != "" {
+	if *noS3 {
+		if flagSet(fs, "s3") {
+			n.Stop()
+			return fmt.Errorf("-no-s3 and -s3 are mutually exclusive")
+		}
+		log.Printf("hamster cluster node: headless — not serving the S3 API (-no-s3)")
+	} else {
 		accessKey, secretKey := os.Getenv("HAMSTER_ACCESS_KEY_ID"), os.Getenv("HAMSTER_SECRET_ACCESS_KEY")
 		if accessKey == "" || secretKey == "" {
 			n.Stop()
-			return fmt.Errorf("-s3 requires HAMSTER_ACCESS_KEY_ID and HAMSTER_SECRET_ACCESS_KEY in the environment")
+			return fmt.Errorf("serving the S3 API requires HAMSTER_ACCESS_KEY_ID and HAMSTER_SECRET_ACCESS_KEY in the environment (or pass -no-s3 for a headless storage node)")
 		}
 		addr, err := n.ServeS3(cluster.S3Config{
 			Listen: *s3, Region: *region, Domain: *domain,
@@ -258,10 +265,7 @@ func clusterRun(args []string) error {
 			n.Stop()
 			return err
 		}
-		log.Printf("hamster cluster node: S3 API on http://%s (region %s) — erasure-coded across the cluster", addr, *region)
-		log.Printf("hamster cluster node: DEV PREVIEW — writes commit on the Raft leader only; multipart and copy are not yet on the cluster path")
-	} else {
-		log.Printf("hamster cluster node: DEV PREVIEW — pass -s3 to serve the S3 API over the cluster data path")
+		log.Printf("hamster cluster node: S3 API on http://%s (region %s) — erasure-coded across the cluster, any node accepts writes", addr, *region)
 	}
 	var adminSrv *http.Server
 	if *admin != "" {

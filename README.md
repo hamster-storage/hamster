@@ -72,7 +72,7 @@ aws --endpoint-url http://127.0.0.1:9000 s3 cp video.mp4 s3://stash/
 
 ## Running a cluster
 
-A cluster is Raft-replicated metadata (v0.2) plus an erasure-coded data path (v0.3): mutual TLS between nodes with zero TLS configuration, single-use join tokens, and — with `-s3` — the full S3 API on every node, objects spread `k+m` across the cluster and reconstructed from any `k`. (Writes commit on the Raft leader for now; a non-leader answers `503` and clients retry. Multipart and server-side copy join this path in a later release.)
+A cluster is Raft-replicated metadata (v0.2) plus an erasure-coded data path (v0.3): mutual TLS between nodes with zero TLS configuration, single-use join tokens, and the full S3 API on every node — streaming PUT, Range GET, server-side copy, and erasure-coded multipart — with objects spread `k+m` across the cluster and reconstructed from any `k`. Every node accepts writes: a non-leader runs the data plane locally and forwards only the small metadata commit to the leader, so object bytes never cross the leader hop.
 
 Three terminals, sharing the credentials each node's S3 endpoint accepts:
 

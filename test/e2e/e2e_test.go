@@ -236,7 +236,9 @@ func TestClusterLifecycle(t *testing.T) {
 	dirs["n1"] = filepath.Join(root, "n1")
 	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e", "-node", "n1",
 		"-listen", freeAddr(t))
-	procs["n1"] = start(t, nil, "cluster", "run", "-data-dir", dirs["n1"])
+	// This is a membership/failover journey, not an S3 one — the nodes run
+	// headless (-no-s3), so they need no credentials.
+	procs["n1"] = start(t, nil, "cluster", "run", "-data-dir", dirs["n1"], "-no-s3")
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
@@ -246,7 +248,7 @@ func TestClusterLifecycle(t *testing.T) {
 		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		procs[id] = start(t, nil, "cluster", "run", "-data-dir", dirs[id], "-node", id,
-			"-listen", freeAddr(t), "-token", token)
+			"-listen", freeAddr(t), "-token", token, "-no-s3")
 	}
 	waitStatus(t, dirs["n1"], "three voters", func(rows []statusRow) bool {
 		return len(rows) == 3 && voterCount(rows) == 3
@@ -276,7 +278,7 @@ func TestClusterLifecycle(t *testing.T) {
 	})
 
 	// The dead node restarts from its own disk and rejoins.
-	procs[lead] = start(t, nil, "cluster", "run", "-data-dir", dirs[lead])
+	procs[lead] = start(t, nil, "cluster", "run", "-data-dir", dirs[lead], "-no-s3")
 	waitStatus(t, dirs[lead], "the restarted node back among three voters", func(rows []statusRow) bool {
 		return len(rows) == 3 && voterCount(rows) == 3
 	})
