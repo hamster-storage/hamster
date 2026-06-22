@@ -22,8 +22,8 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 	adminAddr := freeAddr(t)
 	s3Addr := freeAddr(t)
 
-	run(t, "cluster", "init", "-data-dir", d1, "-cluster", "e2e-metrics", "-node", "n1", "-listen", freeAddr(t))
-	start(t, env, "cluster", "run", "-data-dir", d1, "-s3", s3Addr, "-admin", adminAddr)
+	run(t, "init", "-data-dir", d1, "-cluster", "e2e-metrics", "-node", "n1", "-listen", freeAddr(t))
+	start(t, env, "serve", "-data-dir", d1, "-s3", s3Addr, "-admin", adminAddr)
 	waitStatus(t, d1, "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
@@ -62,19 +62,19 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 	}
 
 	// The same registry, fetched as the typed snapshot over the control channel
-	// and rendered by `cluster metrics` (ADR-0035) — proves the snapshot path the
+	// and rendered by `metrics` (ADR-0035) — proves the snapshot path the
 	// web console will use.
-	cli := run(t, "cluster", "metrics", "-data-dir", d1)
+	cli := run(t, "metrics", "-data-dir", d1)
 	for _, want := range wantSignals {
 		if !strings.Contains(cli, want) {
-			t.Fatalf("`cluster metrics` output missing %q:\n%s", want, cli)
+			t.Fatalf("`metrics` output missing %q:\n%s", want, cli)
 		}
 	}
 
-	// The durability health summary on `cluster status` (ADR-0035).
-	status := run(t, "cluster", "status", "-data-dir", d1)
+	// The durability health summary on `status` (ADR-0035).
+	status := run(t, "status", "-data-dir", d1)
 	if !strings.Contains(status, "durability:") || !strings.Contains(status, "profile 1+0") {
-		t.Fatalf("`cluster status` missing the durability summary:\n%s", status)
+		t.Fatalf("`status` missing the durability summary:\n%s", status)
 	}
 }
 

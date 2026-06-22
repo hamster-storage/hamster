@@ -21,8 +21,8 @@ upgrade, a new Helm chart, a fresh binary on a VPS). What Hamster owns is the
 - **Version advertisement.** Each node advertises its binary version and a declared
   *protocol generation*. The cluster's *effective generation* is the minimum across
   live members and rolls forward automatically — etcd-style, no manual finalize —
-  once the last node has upgraded. `cluster status` shows both.
-- **The health interlock.** `cluster can-stop <node>` answers whether taking a node
+  once the last node has upgraded. `status` shows both.
+- **The health interlock.** `can-stop <node>` answers whether taking a node
   down right now is safe: Raft quorum survives without it, no *other* node is down,
   and no data migration is in flight. It exits `0` (safe) or `1` (not).
 
@@ -36,7 +36,7 @@ Upgrade (and downgrade) **one release at a time** — v0.9 → v0.10 → v0.11, 
 v0.9 → v0.11 in a single hop. Expand-then-contract format changes span exactly two
 adjacent generations, so skipping one can skip a step a later version assumes
 happened. This is the same constraint as a Kubernetes minor-version upgrade.
-`cluster status` flags a generation skew greater than one step.
+`status` flags a generation skew greater than one step.
 
 ## The procedure
 
@@ -44,20 +44,20 @@ For each node, one at a time:
 
 ```sh
 # 1. Is it safe to take this node down? (exits non-zero if not)
-hamster cluster can-stop -data-dir <dir> -node <nodeID>
+hamster can-stop -data-dir <dir> -node <nodeID>
 
 # 2. If safe, stop the node and replace its binary with your deployment mechanism
 #    (see below), then start it again from the SAME data directory.
 
 # 3. Confirm it rejoined and its version rolled, before moving to the next node:
-hamster cluster status -data-dir <dir>
+hamster status -data-dir <dir>
 #    - the node is back among the expected voters
 #    - its VERSION/GEN columns show the new build
 #    - no node shows STATE "down"
 ```
 
 Only move to the next node once the upgraded one is fully back. When the **last**
-node lands, the effective generation rolls forward on its own — `cluster status`
+node lands, the effective generation rolls forward on its own — `status`
 shows it advance and the "upgrade in progress" note clears.
 
 ### Swapping the binary, by deployment mode
@@ -73,7 +73,7 @@ a process:
   `docker run` the new tag against the same volume).
 - **Kubernetes.** Roll the node's pod to the new image — e.g. one `StatefulSet`
   pod at a time, or set the image and let the rollout replace pods. Gate each step
-  on `cluster can-stop` (a `preStop` hook or an external roller that checks it)
+  on `can-stop` (a `preStop` hook or an external roller that checks it)
   so the rollout proceeds only from full health.
 
 In every case the node keeps its **data directory** across the swap — its identity,

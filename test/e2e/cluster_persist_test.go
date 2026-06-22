@@ -34,9 +34,9 @@ func TestClusterMetadataPersistsToBadgerDB(t *testing.T) {
 
 	// A one-node cluster — the simplest deployment that runs the *cluster*
 	// metadata path (Raft + coordinator), as opposed to single-node `serve`.
-	run(t, "cluster", "init", "-data-dir", dir, "-cluster", "e2e-persist", "-node", "n1",
+	run(t, "init", "-data-dir", dir, "-cluster", "e2e-persist", "-node", "n1",
 		"-listen", freeAddr(t))
-	p := start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
+	p := start(t, env, "serve", "-data-dir", dir, "-s3", s3)
 	waitStatus(t, dir, "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
@@ -55,7 +55,7 @@ func TestClusterMetadataPersistsToBadgerDB(t *testing.T) {
 
 	// (2) Stop the node and start it again; the metadata must come back.
 	p.interrupt(t)
-	p = start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
+	p = start(t, env, "serve", "-data-dir", dir, "-s3", s3)
 	waitStatus(t, dir, "n1 leading after restart", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
@@ -93,9 +93,9 @@ func TestClusterMetadataRebuildsFromWALAfterStoreLoss(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "n1")
 	s3 := freeAddr(t)
 
-	run(t, "cluster", "init", "-data-dir", dir, "-cluster", "e2e-rebuild", "-node", "n1",
+	run(t, "init", "-data-dir", dir, "-cluster", "e2e-rebuild", "-node", "n1",
 		"-listen", freeAddr(t))
-	p := start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
+	p := start(t, env, "serve", "-data-dir", dir, "-s3", s3)
 	waitStatus(t, dir, "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
@@ -109,7 +109,7 @@ func TestClusterMetadataRebuildsFromWALAfterStoreLoss(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(dir, "meta")); err != nil {
 		t.Fatalf("removing metadata store: %v", err)
 	}
-	p = start(t, env, "cluster", "run", "-data-dir", dir, "-s3", s3)
+	p = start(t, env, "serve", "-data-dir", dir, "-s3", s3)
 	waitStatus(t, dir, "n1 leading after restart", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})

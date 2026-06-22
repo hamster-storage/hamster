@@ -18,92 +18,8 @@ import (
 	"github.com/hamster-storage/hamster/internal/metrics"
 )
 
-const clusterUsage = `usage: hamster cluster <command> [flags]
-
-commands:
-  init     create a new cluster: mint the CA and this node's identity
-  token    mint a single-use join token (on the init node)
-  join     join an existing cluster with a token (identity only; run starts it)
-  run      run this cluster node (v0.2 preview: the replicated metadata
-           plane; S3 serving joins it with the erasure-coded data path).
-           With -token, an uninitialized node joins first — one command,
-           restart-safe
-  status   show cluster membership from a running node
-  can-stop check whether taking a node down for maintenance/upgrade is safe now
-           (ADR-0034): quorum holds, no other node is down, no transition open.
-           Advisory — exits 0 (safe) or 1 (not); it never stops a node
-  metrics  print a node's metrics snapshot (ADR-0035) in Prometheus text form;
-           the same signals the admin port serves at /metrics for scrapers
-  drain    take a node out of service: new writes steer off it, repair migrates
-           its shards away. Reversible with undrain (e.g. for maintenance);
-           follow with remove to decommission. If it shrinks the cluster past a
-           storage-profile boundary it re-encodes the data down (prompts first;
-           -reencode skips the prompt)
-  undrain  return a drained node to service
-  remove   evict a drained, empty node from the cluster for good (its ID is
-           tombstoned — a return needs a fresh join)
-  optimize re-encode existing data up to the current cluster's storage profile,
-           spreading objects written when it was smaller across the nodes added
-           since (run after growing the cluster — never automatic)
-  encrypt  turn on encryption at rest (ADR-0021): new writes are encrypted,
-           existing objects stay readable. Permanent (no disable). Every node
-           must run with -master-key-file holding the same key
-  rotate-key  rotate the cluster master key (ADR-0032): rewrap every object's
-           key from the old to the new — metadata only, object bytes never move.
-           Every node must run with -new-master-key-file holding the next key;
-           on success the old key can be retired
-  rotate-ca  rotate the cluster CA (ADR-0033): mint a new CA, trust it alongside
-           the old, reissue every node's certificate onto it, then drop the old —
-           no downtime, no trust gap. The new CA key never leaves the leader
-  recover  rewrite a stopped survivor into a new single-voter cluster —
-           the last resort when a majority of voters is permanently lost
-`
-
-func clusterCmd(args []string) error {
-	if len(args) < 1 {
-		fmt.Fprint(os.Stderr, clusterUsage)
-		os.Exit(2)
-	}
-	switch args[0] {
-	case "init":
-		return clusterInit(args[1:])
-	case "token":
-		return clusterToken(args[1:])
-	case "join":
-		return clusterJoin(args[1:])
-	case "run":
-		return clusterRun(args[1:])
-	case "status":
-		return clusterStatus(args[1:])
-	case "can-stop":
-		return clusterCanStop(args[1:])
-	case "metrics":
-		return clusterMetrics(args[1:])
-	case "drain":
-		return clusterDrain(args[1:], true)
-	case "undrain":
-		return clusterDrain(args[1:], false)
-	case "remove":
-		return clusterRemove(args[1:])
-	case "optimize":
-		return clusterOptimize(args[1:])
-	case "encrypt":
-		return clusterEncrypt(args[1:])
-	case "rotate-key":
-		return clusterRotateKey(args[1:])
-	case "rotate-ca":
-		return clusterRotateCA(args[1:])
-	case "recover":
-		return clusterRecover(args[1:])
-	default:
-		fmt.Fprint(os.Stderr, clusterUsage)
-		os.Exit(2)
-		return nil
-	}
-}
-
 func clusterInit(args []string) error {
-	fs := flag.NewFlagSet("cluster init", flag.ExitOnError)
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "directory for this node's data (required)")
 	name := fs.String("cluster", "hamster", "cluster name")
 	node := fs.String("node", "n1", "this node's ID")
@@ -118,12 +34,12 @@ func clusterInit(args []string) error {
 		return err
 	}
 	log.Printf("cluster %q initialized: node %s, listen %s", *name, *node, *listen)
-	log.Printf("next: hamster cluster run -data-dir %s", *dataDir)
+	log.Printf("next: hamster serve -data-dir %s", *dataDir)
 	return nil
 }
 
 func clusterToken(args []string) error {
-	fs := flag.NewFlagSet("cluster token", flag.ExitOnError)
+	fs := flag.NewFlagSet("token", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	ttl := fs.Duration("ttl", 24*time.Hour, "token validity")
 	fs.Parse(args)
@@ -139,11 +55,11 @@ func clusterToken(args []string) error {
 }
 
 func clusterJoin(args []string) error {
-	fs := flag.NewFlagSet("cluster join", flag.ExitOnError)
+	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "directory for this node's data (required)")
 	node := fs.String("node", "", "this node's ID (required, unique in the cluster)")
 	listen := fs.String("listen", "127.0.0.1:7946", "cluster listen address (mTLS peer transport + join/status); peers dial it, so use a reachable one")
-	token := fs.String("token", "", "join token from `hamster cluster token` (required)")
+	token := fs.String("token", "", "join token from `hamster token` (required)")
 	zone := fs.String("zone", "", "failure-domain label for this node — a rack or AZ (ADR-0016); defaults to the auto-detected host")
 	capacity := fs.Uint("capacity", 0, "relative storage capacity weight (ADR-0004); 0 means equal — set it proportional to disk size on a heterogeneous cluster")
 	replaces := fs.String("replaces", "", "replace an existing member with this node at the same cluster size (ADR-0004): the cluster migrates the old node's shards across and evicts it, profile unchanged")
@@ -159,12 +75,16 @@ func clusterJoin(args []string) error {
 	} else {
 		log.Printf("joined as node %s", *node)
 	}
-	log.Printf("next: hamster cluster run -data-dir %s", *dataDir)
+	log.Printf("next: hamster serve -data-dir %s", *dataDir)
 	return nil
 }
 
-func clusterRun(args []string) error {
-	fs := flag.NewFlagSet("cluster run", flag.ExitOnError)
+// serve runs this node and, unless -no-s3, serves the S3 API over the
+// erasure-coded cluster data path. With -token, an uninitialized data directory
+// joins the cluster first — one command, restart-safe. A node is a one-node
+// cluster, so this is also how a single-node deployment runs (ADR-0036).
+func serve(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	node := fs.String("node", "", "this node's ID (first boot with -token only)")
 	listen := fs.String("listen", "127.0.0.1:7946", "cluster listen address — mTLS peer transport + join/status (first boot with -token only)")
@@ -178,14 +98,14 @@ func clusterRun(args []string) error {
 	region := fs.String("region", "us-east-1", "S3 region name")
 	domain := fs.String("domain", "", "virtual-hosted base domain; empty serves path-style only")
 	masterKeyFile := fs.String("master-key-file", "", "path to the cluster master key (KEK) for encryption at rest (ADR-0021): 32 bytes raw, or hex/base64. The same key on every node; held in memory only, never persisted. Mount it off the data disk (e.g. a Kubernetes Secret volume)")
-	newMasterKeyFile := fs.String("new-master-key-file", "", "path to the incoming master key during a key rotation (ADR-0032): the node holds both this and -master-key-file so `cluster rotate-key` can rewrap onto it. Provision it on every node; held in memory only, never sent over the wire")
+	newMasterKeyFile := fs.String("new-master-key-file", "", "path to the incoming master key during a key rotation (ADR-0032): the node holds both this and -master-key-file so `rotate-key` can rewrap onto it. Provision it on every node; held in memory only, never sent over the wire")
 	fs.Parse(args)
 	if *dataDir == "" {
 		return fmt.Errorf("-data-dir is required")
 	}
 	if !cluster.Initialized(*dataDir) {
 		if *token == "" {
-			return fmt.Errorf("%s is not part of a cluster: run `hamster cluster init` or `hamster cluster join`, or pass -token to join and run in one step", *dataDir)
+			return fmt.Errorf("%s is not part of a cluster: run `hamster init` or `hamster join`, or pass -token to join and run in one step", *dataDir)
 		}
 		if *node == "" {
 			return fmt.Errorf("-node is required when joining with -token")
@@ -226,7 +146,7 @@ func clusterRun(args []string) error {
 			return fmt.Errorf("loading master key: %w", err)
 		}
 		runOpts = append(runOpts, cluster.WithMasterKey(kek))
-		log.Printf("hamster cluster node: master key loaded — encryption at rest available")
+		log.Printf("hamster serve: master key loaded — encryption at rest available")
 	}
 	if *newMasterKeyFile != "" {
 		material, err := os.ReadFile(*newMasterKeyFile)
@@ -238,19 +158,19 @@ func clusterRun(args []string) error {
 			return fmt.Errorf("loading new master key: %w", err)
 		}
 		runOpts = append(runOpts, cluster.WithNewMasterKey(kek))
-		log.Printf("hamster cluster node: new master key loaded — `cluster rotate-key` can rewrap onto it")
+		log.Printf("hamster serve: new master key loaded — `rotate-key` can rewrap onto it")
 	}
 	n, err := cluster.Run(*dataDir, runOpts...)
 	if err != nil {
 		return err
 	}
-	log.Printf("hamster cluster node: %s — listen %s (peer transport + join/status)", fullVersion(), n.Addr())
+	log.Printf("hamster serve: %s — listen %s (peer transport + join/status)", fullVersion(), n.Addr())
 	if *noS3 {
 		if flagSet(fs, "s3") {
 			n.Stop()
 			return fmt.Errorf("-no-s3 and -s3 are mutually exclusive")
 		}
-		log.Printf("hamster cluster node: headless — not serving the S3 API (-no-s3)")
+		log.Printf("hamster serve: headless — not serving the S3 API (-no-s3)")
 	} else {
 		accessKey, secretKey := os.Getenv("HAMSTER_ACCESS_KEY_ID"), os.Getenv("HAMSTER_SECRET_ACCESS_KEY")
 		if accessKey == "" || secretKey == "" {
@@ -265,22 +185,22 @@ func clusterRun(args []string) error {
 			n.Stop()
 			return err
 		}
-		log.Printf("hamster cluster node: S3 API on http://%s (region %s) — erasure-coded across the cluster, any node accepts writes", addr, *region)
+		log.Printf("hamster serve: S3 API on http://%s (region %s) — erasure-coded across the cluster, any node accepts writes", addr, *region)
 	}
 	var adminSrv *http.Server
 	if *admin != "" {
 		adminSrv = startAdmin(*admin, n.Metrics())
-		log.Printf("hamster cluster node: admin endpoints on http://%s (metrics at /metrics)", *admin)
+		log.Printf("hamster serve: admin endpoints on http://%s (metrics at /metrics)", *admin)
 	}
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	select {
 	case <-stop:
-		log.Printf("hamster cluster node: shutting down")
+		log.Printf("hamster serve: shutting down")
 	case <-n.Done():
 		// The node removed itself from the cluster (ADR-0004): exit rather than
 		// linger as a stopped, tombstoned process.
-		log.Printf("hamster cluster node: removed from the cluster; exiting")
+		log.Printf("hamster serve: removed from the cluster; exiting")
 	}
 	shutdownAdmin(adminSrv)
 	n.Stop()
@@ -288,7 +208,7 @@ func clusterRun(args []string) error {
 }
 
 func clusterRecover(args []string) error {
-	fs := flag.NewFlagSet("cluster recover", flag.ExitOnError)
+	fs := flag.NewFlagSet("recover", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "the surviving node's data directory (required)")
 	force := fs.Bool("force", false, "confirm: the other members are gone forever and their data directories will never run again")
 	fs.Parse(args)
@@ -323,12 +243,12 @@ re-form on its own. To proceed, rerun with -force.`)
 		log.Printf("WARNING: this node does not hold the cluster CA key (ca.key lives on the init node);")
 		log.Printf("WARNING: it cannot mint join tokens, so this cluster cannot grow until the CA is restored")
 	}
-	log.Printf("next: hamster cluster run -data-dir %s", *dataDir)
+	log.Printf("next: hamster serve -data-dir %s", *dataDir)
 	return nil
 }
 
 func clusterStatus(args []string) error {
-	fs := flag.NewFlagSet("cluster status", flag.ExitOnError)
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	addr := fs.String("addr", "", "cluster listen address of the node to ask (default: this node's own)")
 	fs.Parse(args)
@@ -449,7 +369,7 @@ func clusterStatus(args []string) error {
 // shown here in the Prometheus text format. Use the admin port's /metrics for an
 // external scraper; this is the operator's at-a-glance view from the CLI.
 func clusterMetrics(args []string) error {
-	fs := flag.NewFlagSet("cluster metrics", flag.ExitOnError)
+	fs := flag.NewFlagSet("metrics", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	addr := fs.String("addr", "", "cluster listen address of the node to ask (default: this node's own)")
 	fs.Parse(args)
@@ -466,10 +386,10 @@ func clusterMetrics(args []string) error {
 // clusterCanStop runs the advisory health interlock (ADR-0034): it asks whether
 // taking a node down for maintenance or upgrade is safe right now. It prints the
 // verdict and reason and exits 0 when safe, 1 when not — so a roll script can
-// gate on `hamster cluster can-stop <node> && stop-and-upgrade <node>`. Advisory
+// gate on `hamster can-stop <node> && stop-and-upgrade <node>`. Advisory
 // only: it never stops a node.
 func clusterCanStop(args []string) error {
-	fs := flag.NewFlagSet("cluster can-stop", flag.ExitOnError)
+	fs := flag.NewFlagSet("can-stop", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	node := fs.String("node", "", "the node to check (required)")
 	addr := fs.String("addr", "", "cluster listen address of the node to ask (default: this node's own)")
@@ -525,7 +445,7 @@ func clusterDrain(args []string, draining bool) error {
 	if !draining {
 		cmd = "undrain"
 	}
-	fs := flag.NewFlagSet("cluster "+cmd, flag.ExitOnError)
+	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	node := fs.String("node", "", "the node ID to "+cmd+" (required)")
 	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
@@ -605,7 +525,7 @@ func confirm() bool {
 }
 
 func clusterRemove(args []string) error {
-	fs := flag.NewFlagSet("cluster remove", flag.ExitOnError)
+	fs := flag.NewFlagSet("remove", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	node := fs.String("node", "", "the node ID to remove (required)")
 	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
@@ -621,7 +541,7 @@ func clusterRemove(args []string) error {
 }
 
 func clusterOptimize(args []string) error {
-	fs := flag.NewFlagSet("cluster optimize", flag.ExitOnError)
+	fs := flag.NewFlagSet("optimize", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
 	fs.Parse(args)
@@ -642,7 +562,7 @@ func clusterOptimize(args []string) error {
 }
 
 func clusterEncrypt(args []string) error {
-	fs := flag.NewFlagSet("cluster encrypt", flag.ExitOnError)
+	fs := flag.NewFlagSet("encrypt", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
 	fs.Parse(args)
@@ -659,7 +579,7 @@ func clusterEncrypt(args []string) error {
 }
 
 func clusterRotateKey(args []string) error {
-	fs := flag.NewFlagSet("cluster rotate-key", flag.ExitOnError)
+	fs := flag.NewFlagSet("rotate-key", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
 	fs.Parse(args)
@@ -672,14 +592,14 @@ func clusterRotateKey(args []string) error {
 		return err
 	}
 	if !rep.Completed {
-		return fmt.Errorf("rotation did not converge: %d object(s) still on the old key — re-run `cluster rotate-key`", rep.Remaining)
+		return fmt.Errorf("rotation did not converge: %d object(s) still on the old key — re-run `rotate-key`", rep.Remaining)
 	}
 	log.Printf("key rotation complete: rewrapped %d object(s) onto the new key. The old key is no longer in use — retire it and run every node with the new key as -master-key-file.", rep.Rewrapped)
 	return nil
 }
 
 func clusterRotateCA(args []string) error {
-	fs := flag.NewFlagSet("cluster rotate-ca", flag.ExitOnError)
+	fs := flag.NewFlagSet("rotate-ca", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "", "this node's data directory (required)")
 	addr := fs.String("addr", "", "cluster address of a node to ask (default: this node's own; auto-redirects to the leader)")
 	fs.Parse(args)

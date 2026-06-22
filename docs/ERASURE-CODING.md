@@ -25,7 +25,7 @@ The library handles any `k+m` up to 256 total shards; the set is deliberately sm
 **The honest small-end rows:**
 
 - **One node (`1+0`)** stores objects whole. Durability is whatever the disk offers — Hamster adds checksums and crash-safety, not redundancy. This is a real supported mode (dev, homelab, "I have backups elsewhere"), not a degenerate case, but the docs and the CLI say plainly: a single node cannot lose hardware.
-- **Two nodes (`1+1`)** mirror every object — but metadata Raft with two members has a quorum of two, so with either node down **every API call fails**, reads included: strongly consistent reads need quorum just like writes, and a GET needs metadata before it can touch a shard. This is an availability loss, never a durability one — quorum-of-two means both nodes held every acknowledged write before the client saw a 200 — and recovery is automatic: when the node returns, Raft re-elects, catches it up from the log, and the API resumes with no operator action. (A node *destroyed* rather than offline needs `hamster cluster recover` — see [Replacing dead hardware](#replacing-dead-hardware).) Two nodes buy mirroring, not availability. The quick-start recommendation is one node or three, and the CLI warns at `1+1`.
+- **Two nodes (`1+1`)** mirror every object — but metadata Raft with two members has a quorum of two, so with either node down **every API call fails**, reads included: strongly consistent reads need quorum just like writes, and a GET needs metadata before it can touch a shard. This is an availability loss, never a durability one — quorum-of-two means both nodes held every acknowledged write before the client saw a 200 — and recovery is automatic: when the node returns, Raft re-elects, catches it up from the log, and the API resumes with no operator action. (A node *destroyed* rather than offline needs `hamster recover` — see [Replacing dead hardware](#replacing-dead-hardware).) Two nodes buy mirroring, not availability. The quick-start recommendation is one node or three, and the CLI warns at `1+1`.
 - **Three nodes (`2+1`)** is the smallest honest cluster: Raft tolerates one node down (quorum 2 of 3), reads tolerate one node down, and storage overhead drops below mirroring.
 
 ## The profile policy: auto by default
@@ -42,7 +42,7 @@ Under `auto`, the cluster follows the ladder, re-deriving the profile from the n
 | 5 | `3+2` |
 | 6+ | `4+2` |
 
-Re-derivation happens at exactly one kind of moment: **when an explicit membership command commits** — `hamster cluster join` or `hamster cluster remove-node`. Never on health changes: a node crashing, flapping, or being partitioned does not move the profile (the degraded-write floor absorbs transients). Only the operator deliberately reshaping the cluster does — and since joining and removing are themselves explicit operator commands, nothing about `auto` is silent. Every transition is announced in the command's output, in `cluster status`, and in logs:
+Re-derivation happens at exactly one kind of moment: **when an explicit membership command commits** — `hamster join` or `hamster remove-node`. Never on health changes: a node crashing, flapping, or being partitioned does not move the profile (the degraded-write floor absorbs transients). Only the operator deliberately reshaping the cluster does — and since joining and removing are themselves explicit operator commands, nothing about `auto` is silent. Every transition is announced in the command's output, in `status`, and in logs:
 
 ```
 cluster is now 3 nodes; profile 1+1 → 2+1; new writes tolerate one node loss
@@ -50,7 +50,7 @@ cluster is now 3 nodes; profile 1+1 → 2+1; new writes tolerate one node loss
 
 Downgrades are part of the ladder by necessity: removing a node from a 6-node `4+2` cluster leaves 5, and `4+2` cannot place on 5 nodes — without the step down to `3+2`, writes would block.
 
-**Pinning** is for operators who want durability parameters to never move without their say-so: `hamster cluster set-profile 4+2` pins; `hamster cluster set-profile auto` returns to the ladder. Under a pin, a `remove-node` that would make the pinned profile unplaceable is refused until the operator re-pins lower — the cluster never maneuvers itself into refusing all writes.
+**Pinning** is for operators who want durability parameters to never move without their say-so: `hamster set-profile 4+2` pins; `hamster set-profile auto` returns to the ladder. Under a pin, a `remove-node` that would make the pinned profile unplaceable is refused until the operator re-pins lower — the cluster never maneuvers itself into refusing all writes.
 
 Changing the profile (by ladder or by pin) is **a layout transition, not a rewrite**: new writes use the new profile immediately; existing objects keep their recorded parameters, and their shards map onto the new layout's assignments and move if needed — never re-encoded by rebalance. Bringing *existing* objects up to a better profile is repair's job:
 
@@ -61,7 +61,7 @@ Repair is a continuously running background system with one job statement: **mak
 - **Rebuild** — shards are missing; reconstruct them from any `k` survivors at the object's *existing* parameters and write them to healthy capacity. (A disk died; restore the spread.)
 - **Re-encode** — the object sits below the *active* profile; read it, encode at the new parameters, write the new shards, commit one metadata transaction updating that version's parameters/partition/checksums, then delete the old shards. (The cluster grew; old data should benefit too.)
 
-The operator sees one system: a progress line in `cluster status` ("repair: 312 GB queued, 14 MB/s"), and a `hamster cluster repair` verb for control — trigger a full sweep, pause, throttle. There is no separate command to remember; upgrading the profile automatically queues the re-encode work, throttled so foreground traffic wins.
+The operator sees one system: a progress line in `status` ("repair: 312 GB queued, 14 MB/s"), and a `hamster repair` verb for control — trigger a full sweep, pause, throttle. There is no separate command to remember; upgrading the profile automatically queues the re-encode work, throttled so foreground traffic wins.
 
 Re-encode carries constraints that rebuild does not, which is why it lands one release later (see [ROADMAP.md](ROADMAP.md)) with its own ADR:
 
@@ -69,7 +69,7 @@ Re-encode carries constraints that rebuild does not, which is why it lands one r
 - **Crash-safe ordering**: new shards durable → metadata flips → old shards deleted. A crash anywhere leaves the old or the new fully readable, never neither.
 - **It must work on COMPLIANCE-locked objects** — often exactly the data that most wants full durability — and the simulation harness must prove re-encode can never delete the last readable copy of anything.
 
-Until re-encode ships, a profile upgrade protects new writes only, and `cluster status` reports how much data sits below the active profile — the gap is visible, never silent.
+Until re-encode ships, a profile upgrade protects new writes only, and `status` reports how much data sits below the active profile — the gap is visible, never silent.
 
 ## What an acknowledgment promises
 
@@ -120,9 +120,9 @@ Many nodes per machine is also why Raft membership does not mean Raft *voting*: 
 With several nodes per machine, "never two shards on one node" is no longer enough — placement could stack an object's shards on one server's disks, and a server loss would exceed the budget. So nodes carry two labels ([ADR-0016](adr/0016-failure-domain-hierarchy.md)):
 
 - **`host`** — detected automatically (machine identity); the five processes on one OVH box share it with zero configuration.
-- **`zone`** — an operator label for the domain above the machine, defaulting to the host. Set it with `-zone` at `cluster init`/`join`, to whatever a correlated failure means in your world: an AWS availability zone (`-zone us-east-1a` — note AZs, like `us-east-1a`/`1b`/`1c`, not regions like `us-east-1`), a rack, a room.
+- **`zone`** — an operator label for the domain above the machine, defaulting to the host. Set it with `-zone` at `init`/`join`, to whatever a correlated failure means in your world: an AWS availability zone (`-zone us-east-1a` — note AZs, like `us-east-1a`/`1b`/`1c`, not regions like `us-east-1`), a rack, a room.
 
-The hard invariant stays node-level — never two shards of one object on the same node, always enforceable. Above it, placement *spreads*: shards distributed as evenly as possible across zones, then hosts, then nodes, and `cluster status` reports the achieved tolerance at each level. Three servers × five disks at `4+2` places two shards per server: any whole server can die (exactly `m=2` shards per object) with everything readable, and any two disks anywhere can die in a healthy cluster. A single-box deployment has one host and one zone — fine, and *stated* in status rather than hidden.
+The hard invariant stays node-level — never two shards of one object on the same node, always enforceable. Above it, placement *spreads*: shards distributed as evenly as possible across zones, then hosts, then nodes, and `status` reports the achieved tolerance at each level. Three servers × five disks at `4+2` places two shards per server: any whole server can die (exactly `m=2` shards per object) with everything readable, and any two disks anywhere can die in a healthy cluster. A single-box deployment has one host and one zone — fine, and *stated* in status rather than hidden.
 
 One cluster is one region. Raft quorum and shard writes are synchronous, so stretching a cluster across regions (us-east-1 to us-east-2) buys every write the inter-region round trip; spreading across AZs within a region is the intended wide case. Multi-region is a future replication feature between clusters, not a stretched cluster.
 
@@ -134,19 +134,19 @@ Two very different events hide inside "a node failed," and confusing them makes 
 
 **A destroyed disk permanently loses that node's shards, and the budget for that is `m`.** Each object tolerates losing up to `m` of its shards (per its own recorded parameters); repair rebuilds missing shards from any `k` survivors onto healthy capacity. The clock that matters is the repair window: while shards are missing, the remaining budget is smaller, and an object that loses more than `m` shards before repair catches up is gone — not damaged, not recoverable-with-effort: below `k` shards the information no longer exists. That boundary is not a Hamster limitation; it is the arithmetic every erasure-coded and every replicated system lives by. Redundancy is purchased capacity and `m` is the amount purchased — the only levers that move it are a wider profile, faster repair, and spreading shards across failure domains that don't fail together.
 
-When loss does exceed the budget, what Hamster owes the operator is an honest accounting: metadata replicates separately through Raft and routinely survives data losses it cannot repair (quorum intact, or [`cluster recover`](#replacing-dead-hardware) on a survivor), so the cluster can produce an authoritative inventory of exactly which objects are unrecoverable. For the audit-shaped user, "these objects were lost" is a categorically better answer than "we are not sure what we had."
+When loss does exceed the budget, what Hamster owes the operator is an honest accounting: metadata replicates separately through Raft and routinely survives data losses it cannot repair (quorum intact, or [`recover`](#replacing-dead-hardware) on a survivor), so the cluster can produce an authoritative inventory of exactly which objects are unrecoverable. For the audit-shaped user, "these objects were lost" is a categorically better answer than "we are not sure what we had."
 
 ### Replacing dead hardware
 
-- **Quorum intact** (any cluster of 3+ nodes — a dead disk among 15 doesn't blink): repair starts rebuilding the lost node's shards onto surviving capacity immediately, with no operator action. Replacement, whenever convenient: `hamster node init --data /mnt/newdisk`, `hamster cluster join`, `hamster cluster remove-node <dead-id>`. Rebalance flows partitions onto the fresh disk.
-- **Quorum lost** (the 2-node cluster with a destroyed member, or a majority gone): the survivor cannot even commit the membership change to eject the dead node — that commit needs the quorum that died. `hamster cluster recover`, run on a surviving node, handles exactly this: it refuses to run if it can still reach the missing peers (the split-brain guard), demands confirmation naming the dead members, then rewrites local Raft membership to the survivors (the established `--force-new-cluster` maneuver from etcd). Quorum resumes at the new size; the replacement then joins *normally* and repair re-mirrors. For `1+1` this is provably safe: quorum-of-two means the survivor holds every acknowledged write.
+- **Quorum intact** (any cluster of 3+ nodes — a dead disk among 15 doesn't blink): repair starts rebuilding the lost node's shards onto surviving capacity immediately, with no operator action. Replacement, whenever convenient: `hamster node init --data /mnt/newdisk`, `hamster join`, `hamster remove-node <dead-id>`. Rebalance flows partitions onto the fresh disk.
+- **Quorum lost** (the 2-node cluster with a destroyed member, or a majority gone): the survivor cannot even commit the membership change to eject the dead node — that commit needs the quorum that died. `hamster recover`, run on a surviving node, handles exactly this: it refuses to run if it can still reach the missing peers (the split-brain guard), demands confirmation naming the dead members, then rewrites local Raft membership to the survivors (the established `--force-new-cluster` maneuver from etcd). Quorum resumes at the new size; the replacement then joins *normally* and repair re-mirrors. For `1+1` this is provably safe: quorum-of-two means the survivor holds every acknowledged write.
 
 ## The growth story, end to end
 
 The path a real deployment takes, with no step requiring a migration or a remembered command:
 
 1. **One node.** `hamster node init --data ./data` — profile `1+0`, objects whole, S3 API fully functional. Nothing about this mode is a special case to outgrow.
-2. **Three nodes** (or three disks). Two `hamster cluster join`s; auto-profile announces `1+0 → 1+1 → 2+1` along the way. New writes spread across three nodes and survive a node loss; Raft now has real quorum. Repair re-encodes the old single-copy data up to `2+1` in the background (once re-encode ships; until then `cluster status` reports the gap).
+2. **Three nodes** (or three disks). Two `hamster join`s; auto-profile announces `1+0 → 1+1 → 2+1` along the way. New writes spread across three nodes and survive a node loss; Raft now has real quorum. Repair re-encodes the old single-copy data up to `2+1` in the background (once re-encode ships; until then `status` reports the gap).
 3. **Three servers × five disks.** Twelve more joins; auto-profile steps to `4+2`; zone spreading puts two shards per server. Any server can die outright; any two disks can die; voters stay at five, spread one-per-server first.
 
 Each step is operator-commanded, announced as it happens, and additive in every format it touches.

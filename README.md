@@ -42,7 +42,7 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | [v0.7](https://github.com/hamster-storage/hamster/releases/tag/v0.7.0) | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | ✅ |
 | [v0.8](https://github.com/hamster-storage/hamster/releases/tag/v0.8.0) | Key and CA rotation: master-key rewrap and CA custody/rotation — both no-downtime, metadata- or trust-only | ✅ |
 | [v0.9](https://github.com/hamster-storage/hamster/releases/tag/v0.9.0) | Zero-downtime rolling upgrades: cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the [supported per-node roll](docs/UPGRADES.md) | ✅ |
-| [v0.10](https://github.com/hamster-storage/hamster/releases/tag/v0.10.0) | Observability — one metrics registry rendered many ways: a Prometheus `/metrics` endpoint, a typed snapshot for the CLI and web console, and a durability summary on `cluster status` | ✅ |
+| [v0.10](https://github.com/hamster-storage/hamster/releases/tag/v0.10.0) | Observability — one metrics registry rendered many ways: a Prometheus `/metrics` endpoint, a typed snapshot for the CLI and web console, and a durability summary on `status` | ✅ |
 | v0.11 | One clustered path — retire the single-node `serve` store, flatten the CLI, S3 on every node by default, proposal forwarding so any node accepts writes, and erasure-coded multipart/copy/streaming for full single-node parity | 🚧 in progress |
 | v0.12 | Adaptive load shedding — latency-gradient concurrency limiting that sheds with 429 at the node's self-discovered capacity, request-latency histograms, and degradation (bad-drive) detection, with no OS primitives | planned |
 | v0.13 | Web console | planned |
@@ -51,15 +51,16 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 
 ## Quick start
 
-Grab a binary from the [releases page](https://github.com/hamster-storage/hamster/releases) (or `go build ./cmd/hamster` — no cgo, no build tricks), then start the server. The `HAMSTER_*` variables define the credentials it will accept:
+Grab a binary from the [releases page](https://github.com/hamster-storage/hamster/releases) (or `go build ./cmd/hamster` — no cgo, no build tricks), then found a node and serve it. The `HAMSTER_*` variables define the credentials it will accept:
 
 ```sh
 export HAMSTER_ACCESS_KEY_ID=hamster
 export HAMSTER_SECRET_ACCESS_KEY=keep-this-one-secret
-hamster serve -data-dir ./data
+hamster init -data-dir ./data    # found a one-node cluster
+hamster serve -data-dir ./data   # serve the S3 API
 ```
 
-That's a standard S3 endpoint on `127.0.0.1:9000` — any S3 client works as is. The client sends its own credentials (the standard `AWS_*` variables) set to the same values:
+That's a standard S3 endpoint on `127.0.0.1:9000` — any S3 client works as is. A single node is just a one-node cluster: add nodes later and the same objects spread across them, no reformat. The client sends its own credentials (the standard `AWS_*` variables) set to the same values:
 
 ```sh
 export AWS_ACCESS_KEY_ID=hamster
@@ -80,38 +81,34 @@ Three terminals, sharing the credentials each node's S3 endpoint accepts:
 export HAMSTER_ACCESS_KEY_ID=hamster HAMSTER_SECRET_ACCESS_KEY=keep-this-one-secret
 
 # terminal 1 — found the cluster, serve S3 on :9000
-hamster cluster init -data-dir ./n1 -node n1 -listen 127.0.0.1:7946
-hamster cluster run -data-dir ./n1 -s3 127.0.0.1:9000
+hamster init -data-dir ./n1 -node n1 -listen 127.0.0.1:7946
+hamster serve -data-dir ./n1 -s3 127.0.0.1:9000
 
 # terminal 2 — mint a single-use token and join in one command, serve S3 on :9001
-TOKEN=$(hamster cluster token -data-dir ./n1)
-hamster cluster run -data-dir ./n2 -node n2 -listen 127.0.0.1:7956 -token "$TOKEN" -s3 127.0.0.1:9001
+TOKEN=$(hamster token -data-dir ./n1)
+hamster serve -data-dir ./n2 -node n2 -listen 127.0.0.1:7956 -token "$TOKEN" -s3 127.0.0.1:9001
 
 # terminal 3 — same again, serve S3 on :9002
-TOKEN=$(hamster cluster token -data-dir ./n1)
-hamster cluster run -data-dir ./n3 -node n3 -listen 127.0.0.1:7966 -token "$TOKEN" -s3 127.0.0.1:9002
+TOKEN=$(hamster token -data-dir ./n1)
+hamster serve -data-dir ./n3 -node n3 -listen 127.0.0.1:7966 -token "$TOKEN" -s3 127.0.0.1:9002
 ```
 
-`hamster cluster status -data-dir ./n1` shows every member and who leads. Point any S3 client at a node and the data is erasure-coded across all three; kill a node and the object still reads, reconstructed from the survivors.
+`hamster status -data-dir ./n1` shows every member and who leads. Point any S3 client at any node — writes land wherever they arrive (a non-leader forwards the commit) — and the data is erasure-coded across all three; kill a node and the object still reads, reconstructed from the survivors.
 
 ## Operations
 
-Two ways to run Hamster, and they don't convert in place.
-
-**Single node.** `hamster serve` is a standalone S3 endpoint on one disk — no Raft, no inter-node TLS, no CA, nothing to configure. Right for a laptop, a homelab, or any workload that fits on one machine. Its durability is one disk's, and it **cannot become a cluster in place**: a `serve` node stores single-node blobs while a cluster stores erasure-coded shards, so there's nothing to promote. To grow, stand up a cluster and migrate the data over S3 (`rclone move`, which copies then deletes each object as it lands). That migration carries **current object data only** — version history and object-lock/WORM state (v0.6) do not transfer, and a COMPLIANCE-locked object can't be moved at all. **If you keep versioned or locked data, start clustered.**
-
-**Cluster.** `hamster cluster init` founds a cluster — the CA is minted for you — and objects are erasure-coded `k+m` across the nodes, spread across failure domains and weighted by each node's capacity. The lifecycle below is online: no downtime, durability preserved throughout. A continuous background scrubber heals bitrot and lost shards on its own, before any read trips over them. (Grow, drain, replace, remove, and downsize are the v0.4 placement work.)
+One way to run Hamster. A node is a one-node cluster: `hamster init` founds it — the CA is minted for you — and `hamster serve` runs it and serves S3. There is no separate single-node mode and no reformat to grow: a single node stores objects with no redundancy (its durability is one disk's), and the moment you add nodes the same objects spread across them, erasure-coded `k+m`, weighted by each node's capacity and spread across failure domains. The lifecycle below is online: no downtime, durability preserved throughout. A continuous background scrubber heals bitrot and lost shards on its own, before any read trips over them.
 
 | Operation | How | What happens |
 |---|---|---|
-| **Add a node** | `cluster run -token …` | joins as a learner, auto-promoted to voter (five-voter cap); existing data migrates onto it at its current width — no reshape |
-| **Grow into the new size** | `cluster optimize` | re-encodes existing data *up* to the larger cluster's profile, spreading objects written when it was smaller across the new nodes (run after adding nodes — never automatic) |
+| **Add a node** | `serve -token …` | joins as a learner, auto-promoted to voter (five-voter cap); existing data migrates onto it at its current width — no reshape |
+| **Grow into the new size** | `optimize` | re-encodes existing data *up* to the larger cluster's profile, spreading objects written when it was smaller across the new nodes (run after adding nodes — never automatic) |
 | **Reboot for maintenance** | just reboot it | erasure coding tolerates a node briefly down (a 4+2 object survives two); repair rebuilds whatever was written during the outage when it returns — no drain needed |
-| **Take a node out of service** | `cluster drain <node>` | new writes steer off it and its shards migrate away; **reversible** with `cluster undrain` |
-| **Replace a node** | `cluster run -token … -replaces <old>` | swaps a fresh node in for an existing one at the **same cluster size** — same profile, no re-encode |
-| **Remove a node** | `cluster remove <node>` | evicts a drained, empty node for good (its ID is tombstoned — a return needs a fresh join) |
-| **Shrink the cluster** | `cluster drain <node>` past a profile boundary | re-encodes every object down to the smaller profile (with a `[y/N]` showing the durability/efficiency trade), then `cluster remove` |
-| **Recover from quorum loss** | `cluster recover` | rebuilds a cluster from one surviving node — the last resort |
+| **Take a node out of service** | `drain <node>` | new writes steer off it and its shards migrate away; **reversible** with `undrain` |
+| **Replace a node** | `serve -token … -replaces <old>` | swaps a fresh node in for an existing one at the **same cluster size** — same profile, no re-encode |
+| **Remove a node** | `remove <node>` | evicts a drained, empty node for good (its ID is tombstoned — a return needs a fresh join) |
+| **Shrink the cluster** | `drain <node>` past a profile boundary | re-encodes every object down to the smaller profile (with a `[y/N]` showing the durability/efficiency trade), then `remove` |
+| **Recover from quorum loss** | `recover` | rebuilds a cluster from one surviving node — the last resort |
 
 Drain is reversible (undrain) and pairs with remove to decommission — the same split as `kubectl drain`/`uncordon` and `delete node`. A quick reboot needs neither: the erasure coding already covers a node being briefly down. (Two voters is a valid but failure-intolerant cluster; three is the first size that survives losing one.)
 

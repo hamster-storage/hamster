@@ -48,16 +48,16 @@ func TestClusterDrainUnderLoad(t *testing.T) {
 
 	dirs["n1"] = filepath.Join(root, "n1")
 	s3Addrs["n1"] = freeAddr(t)
-	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e-load", "-node", "n1", "-listen", freeAddr(t))
-	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
+	run(t, "init", "-data-dir", dirs["n1"], "-cluster", "e2e-load", "-node", "n1", "-listen", freeAddr(t))
+	procs["n1"] = start(t, env, "serve", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 	for _, id := range nodes[1:] {
-		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		token := strings.TrimSpace(run(t, "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		s3Addrs[id] = freeAddr(t)
-		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		procs[id] = start(t, env, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", token, "-s3", s3Addrs[id])
 	}
 	waitStatus(t, dirs["n1"], "four voters", func(rows []statusRow) bool {
@@ -184,14 +184,14 @@ func TestClusterDrainUnderLoad(t *testing.T) {
 
 	// The operation under load: drain n4 (4→3 active, still 2+1, so no re-encode),
 	// then decommission it once its shards have migrated to the other three.
-	run(t, "cluster", "drain", "-data-dir", dirs["n1"], "-node", "n4")
+	run(t, "drain", "-data-dir", dirs["n1"], "-node", "n4")
 
 	// Removal is refused until the migration converges (the transition is open).
 	// Poll until it lands — the convergence signal under live traffic.
 	removed := false
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
-		if _, err := tryRun(t, "cluster", "remove", "-data-dir", dirs["n1"], "-node", "n4"); err == nil {
+		if _, err := tryRun(t, "remove", "-data-dir", dirs["n1"], "-node", "n4"); err == nil {
 			removed = true
 			break
 		}
