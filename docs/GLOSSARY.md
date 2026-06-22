@@ -145,7 +145,7 @@ Where shards live, and the rules that spread them. The design is
 [ADR-0016](adr/0016-failure-domain-hierarchy.md).
 
 - **Cluster** — the set of nodes that together store data and replicate metadata,
-  founded by `cluster init` and grown by token-authenticated joins. A one-node
+  founded by `init` and grown by token-authenticated joins. A one-node
   cluster is valid (it elects itself leader) and the path that can scale out.
 
 - **Node** — one running Hamster process with its own data directory and identity;
@@ -194,7 +194,7 @@ Where shards live, and the rules that spread them. The design is
 
 - **Draining** — an operator-set flag marking a node for removal: placement
   demotes it below every active node so new writes steer away, while existing
-  shards stay readable until repair migrates them off. Set with `cluster drain`.
+  shards stay readable until repair migrates them off. Set with `drain`.
 
 - **Transition** — a layout caught mid-change (a drain, a join, a weight shift):
   it carries both the new member set and the *previous* one. Because shard
@@ -243,7 +243,7 @@ across nodes. The design is [METADATA.md](METADATA.md);
 
 - **Quorum** — the majority of voters required to commit a Raft entry or elect a
   leader (e.g. three of five). Losing quorum stalls the metadata plane until it
-  re-forms; permanent loss is the `cluster recover` exit.
+  re-forms; permanent loss is the `recover` exit.
 
 - **WAL** — the write-ahead log on disk that Raft appends entries to before they
   are applied, with periodic snapshots for compaction. The rebuild source of
@@ -292,7 +292,7 @@ The surface an operator runs and the trust model around it. Cluster security is
   placement + erasure coding + shard transfer + a metadata proposal. It paces a
   PUT through the write path and enforces the write-acknowledgment rule.
 
-- **Recover** — the disaster exit (`cluster recover`) for a cluster whose voter
+- **Recover** — the disaster exit (`recover`) for a cluster whose voter
   quorum is permanently lost: offline, local-log-wins, rewrites a surviving node
   into a new single-voter cluster. Irreversible. See
   [ADR-0025](adr/0025-force-new-cluster-recovery.md).

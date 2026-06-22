@@ -87,12 +87,12 @@ func TestClusterOneLayoutOpAtATime(t *testing.T) {
 
 	// First op: drain n4 (4→3 active, still 2+1, so no prompt). Sets n4 draining
 	// and opens the transition.
-	run(t, "cluster", "drain", "-data-dir", cl.adminDir, "-node", "n4")
+	run(t, "drain", "-data-dir", cl.adminDir, "-node", "n4")
 
 	// Second op while the first is in flight: drain n3 is refused. (-reencode only
 	// skips the interactive downsize prompt; the layout guard refuses before any
 	// re-encode is attempted, because n4 is already draining.)
-	out, err := tryRun(t, "cluster", "drain", "-data-dir", cl.adminDir, "-node", "n3", "-reencode")
+	out, err := tryRun(t, "drain", "-data-dir", cl.adminDir, "-node", "n3", "-reencode")
 	if err == nil {
 		t.Fatalf("second drain was accepted while the first was in flight:\n%s", out)
 	}
@@ -117,7 +117,7 @@ func TestClusterOneLayoutOpAtATime(t *testing.T) {
 	removed := false
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
-		if _, err := tryRun(t, "cluster", "remove", "-data-dir", cl.adminDir, "-node", "n4"); err == nil {
+		if _, err := tryRun(t, "remove", "-data-dir", cl.adminDir, "-node", "n4"); err == nil {
 			removed = true
 			break
 		}

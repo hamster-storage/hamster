@@ -41,18 +41,18 @@ func TestClusterS3(t *testing.T) {
 
 	dirs["n1"] = filepath.Join(root, "n1")
 	s3Addrs["n1"] = freeAddr(t)
-	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e-s3", "-node", "n1",
+	run(t, "init", "-data-dir", dirs["n1"], "-cluster", "e2e-s3", "-node", "n1",
 		"-listen", freeAddr(t))
-	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
+	procs["n1"] = start(t, env, "serve", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 
 	for _, id := range nodes[1:] {
-		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		token := strings.TrimSpace(run(t, "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		s3Addrs[id] = freeAddr(t)
-		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		procs[id] = start(t, env, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", token,
 			"-s3", s3Addrs[id])
 	}
@@ -116,7 +116,7 @@ func TestClusterS3(t *testing.T) {
 
 	// The write went to the leader (leader-only in v0.3), whose PUT paid the
 	// dead holder's timeout and recorded it down — so the leader's own
-	// `cluster status` now surfaces the victim as down (ADR-0027 liveness).
+	// `status` now surfaces the victim as down (ADR-0027 liveness).
 	leadDir := dirs[leaderOf(rows)]
 	waitStatus(t, leadDir, "the leader's status to show "+victim+" down", func(rows []statusRow) bool {
 		for _, r := range rows {
@@ -329,16 +329,16 @@ func TestClusterDownsize(t *testing.T) {
 
 	dirs["n1"] = filepath.Join(root, "n1")
 	s3Addrs["n1"] = freeAddr(t)
-	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e-down", "-node", "n1", "-listen", freeAddr(t))
-	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
+	run(t, "init", "-data-dir", dirs["n1"], "-cluster", "e2e-down", "-node", "n1", "-listen", freeAddr(t))
+	procs["n1"] = start(t, env, "serve", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 	for _, id := range nodes[1:] {
-		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		token := strings.TrimSpace(run(t, "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		s3Addrs[id] = freeAddr(t)
-		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		procs[id] = start(t, env, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", token, "-s3", s3Addrs[id])
 	}
 	waitStatus(t, dirs["n1"], "six members, five voters", func(rows []statusRow) bool {
@@ -372,14 +372,14 @@ func TestClusterDownsize(t *testing.T) {
 
 	// Drain the learner (n6): 6→5 crosses 4+2→3+2, so the cluster re-encodes the
 	// data down. -reencode takes the place of the interactive [y/N].
-	run(t, "cluster", "drain", "-data-dir", dirs["n1"], "-node", "n6", "-reencode")
+	run(t, "drain", "-data-dir", dirs["n1"], "-node", "n6", "-reencode")
 
 	// Removal is refused until the re-encode converges (the transition is open and
 	// the data still does not fit five nodes). Poll until it lands.
 	removed := false
 	deadline := time.Now().Add(2 * time.Minute)
 	for time.Now().Before(deadline) {
-		if _, err := tryRun(t, "cluster", "remove", "-data-dir", dirs["n1"], "-node", "n6"); err == nil {
+		if _, err := tryRun(t, "remove", "-data-dir", dirs["n1"], "-node", "n6"); err == nil {
 			removed = true
 			break
 		}

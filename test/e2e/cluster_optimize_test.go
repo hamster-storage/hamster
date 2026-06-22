@@ -12,7 +12,7 @@ import (
 
 // TestClusterOptimizeAfterGrowth is the upsize re-encode (ADR-0004, ADR-0031):
 // data written to a small cluster is widened to the grown cluster's profile by
-// an explicit `cluster optimize`, never automatically. A 4-node cluster (2+1)
+// an explicit `optimize`, never automatically. A 4-node cluster (2+1)
 // grows to five (3+2 territory); after optimize, every object tolerates two
 // failures where 2+1 tolerated one — proven by killing two nodes and still
 // reading. Objects are all above the 128 KiB small-object threshold, so they are
@@ -51,14 +51,14 @@ func TestClusterOptimizeAfterGrowth(t *testing.T) {
 	// leader reports "still reconciling" as a retryable refusal and the command
 	// waits it out, then re-encodes 2+1 → 3+2. The "re-encoded" line proves it
 	// widened rather than no-op'ing against a stale layout.
-	out := run(t, "cluster", "optimize", "-data-dir", cl.adminDir)
+	out := run(t, "optimize", "-data-dir", cl.adminDir)
 	if !strings.Contains(out, "re-encoded") {
 		t.Fatalf("optimize did not widen the data (stale-layout no-op?):\n%s", out)
 	}
 	t.Logf("optimize widened the data: %s", strings.TrimSpace(out))
 
 	// A second optimize is a clean no-op: everything already fits the profile.
-	if out := run(t, "cluster", "optimize", "-data-dir", cl.adminDir); strings.Contains(out, "re-encoded") {
+	if out := run(t, "optimize", "-data-dir", cl.adminDir); strings.Contains(out, "re-encoded") {
 		t.Fatalf("second optimize re-encoded again; should have been a no-op:\n%s", out)
 	}
 

@@ -34,17 +34,17 @@ func TestClusterGrowthKeepsDataReadable(t *testing.T) {
 
 	dirs["n1"] = filepath.Join(root, "n1")
 	s3Addrs["n1"] = freeAddr(t)
-	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e-grow", "-node", "n1", "-listen", freeAddr(t))
-	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
+	run(t, "init", "-data-dir", dirs["n1"], "-cluster", "e2e-grow", "-node", "n1", "-listen", freeAddr(t))
+	procs["n1"] = start(t, env, "serve", "-data-dir", dirs["n1"], "-s3", s3Addrs["n1"])
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 
 	join := func(id string) {
-		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		token := strings.TrimSpace(run(t, "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		s3Addrs[id] = freeAddr(t)
-		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		procs[id] = start(t, env, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", token, "-s3", s3Addrs[id])
 	}
 	join("n2")

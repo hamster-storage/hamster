@@ -26,7 +26,7 @@ import (
 // roll machinery honestly; the suite gains a real format-N binary the day a
 // generation boundary actually lands. A three-node cluster starts on N, stores
 // versioned and COMPLIANCE-locked data, then each node is taken down (honoring
-// `cluster can-stop`) and restarted on N+1. Throughout, the stored data stays
+// `can-stop`) and restarted on N+1. Throughout, the stored data stays
 // readable and intact; the locked version stays WORM; and the effective
 // generation holds at 1 until the final node lands, then rolls to 2.
 func TestClusterRollingUpgrade(t *testing.T) {
@@ -54,14 +54,14 @@ func TestClusterRollingUpgrade(t *testing.T) {
 	}
 
 	// Form a three-node cluster on binary N, every node serving S3.
-	runBin(t, binN, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e-up", "-node", "n1", "-listen", freeAddr(t))
-	procs["n1"] = startBin(t, binN, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3["n1"])
+	runBin(t, binN, "init", "-data-dir", dirs["n1"], "-cluster", "e2e-up", "-node", "n1", "-listen", freeAddr(t))
+	procs["n1"] = startBin(t, binN, env, "serve", "-data-dir", dirs["n1"], "-s3", s3["n1"])
 	waitStatusBin(t, binN, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 	for _, id := range nodes[1:] {
-		token := strings.TrimSpace(runBin(t, binN, "cluster", "token", "-data-dir", dirs["n1"]))
-		procs[id] = startBin(t, binN, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		token := strings.TrimSpace(runBin(t, binN, "token", "-data-dir", dirs["n1"]))
+		procs[id] = startBin(t, binN, env, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", token, "-s3", s3[id])
 	}
 	waitStatusBin(t, binN, dirs["n1"], "three voters", func(rows []statusRow) bool {
@@ -124,7 +124,7 @@ func TestClusterRollingUpgrade(t *testing.T) {
 		procs[id].interrupt(t)
 		procs[id] = nil
 		readsIntact("with " + id + " down")
-		procs[id] = startBin(t, binNext, env, "cluster", "run", "-data-dir", dirs[id], "-s3", s3[id])
+		procs[id] = startBin(t, binNext, env, "serve", "-data-dir", dirs[id], "-s3", s3[id])
 		waitStatusBin(t, binNext, dirs[probe], id+" back among three voters", func(rows []statusRow) bool {
 			return len(rows) == 3 && voterCount(rows) == 3 && !anyDown(rows)
 		})
@@ -251,7 +251,7 @@ func waitCanStop(t *testing.T, binPath, dir, node string) {
 	deadline := time.Now().Add(60 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := exec.Command(binPath, "cluster", "can-stop", "-data-dir", dir, "-node", node).CombinedOutput()
+		out, err := exec.Command(binPath, "can-stop", "-data-dir", dir, "-node", node).CombinedOutput()
 		last = string(out)
 		if err == nil && strings.Contains(last, "YES") {
 			return
@@ -261,7 +261,7 @@ func waitCanStop(t *testing.T, binPath, dir, node string) {
 	t.Fatalf("interlock never cleared %s for stop; last: %s", node, last)
 }
 
-// waitGen polls `cluster status` for the effective protocol generation and
+// waitGen polls `status` for the effective protocol generation and
 // whether a roll is in progress (ADR-0034), until pred holds.
 func waitGen(t *testing.T, binPath, dir, what string, pred func(effective int, rolling bool) bool) {
 	t.Helper()
@@ -269,7 +269,7 @@ func waitGen(t *testing.T, binPath, dir, what string, pred func(effective int, r
 	var lastEff int
 	var lastRolling bool
 	for time.Now().Before(deadline) {
-		out, err := exec.Command(binPath, "cluster", "status", "-data-dir", dir).CombinedOutput()
+		out, err := exec.Command(binPath, "status", "-data-dir", dir).CombinedOutput()
 		if err == nil {
 			lastEff, lastRolling = parseGen(string(out))
 			if pred(lastEff, lastRolling) {
@@ -282,7 +282,7 @@ func waitGen(t *testing.T, binPath, dir, what string, pred func(effective int, r
 }
 
 // parseGen extracts the effective generation and the roll-in-progress flag from
-// `cluster status` output (ADR-0034). The effective value is the number directly
+// `status` output (ADR-0034). The effective value is the number directly
 // after the word "effective" (the "...: effective N" line) — matched precisely so
 // the roll-in-progress line, which also says "effective generation", is not read
 // as the value. "span generation" appears only on the roll-in-progress line.

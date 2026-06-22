@@ -26,14 +26,14 @@ Each v0 minor release carries one headline feature, in roughly this order. The o
 | Release | Headline feature |
 |---|---|
 | v0.1 | Single node store: the core S3 surface (PUT/GET, listings, multipart, SigV4 auth), write buffer, version-list metadata model, simulation harness skeleton |
-| v0.2 | Clustering: Raft-replicated metadata, multi-node membership, voter cap with learners, `cluster recover`, inter-node mTLS ([ADR-0022](adr/0022-cluster-mtls.md)) |
+| v0.2 | Clustering: Raft-replicated metadata, multi-node membership, voter cap with learners, `recover`, inter-node mTLS ([ADR-0022](adr/0022-cluster-mtls.md)) |
 | v0.3 | Erasure coding with self healing repair (shard rebuild), over the framed object stream ([DATA-STREAM.md](DATA-STREAM.md) — designed before this release freezes the shard layout) |
 | v0.4 | Partitioned placement: versioned layout, zone-aware spread, capacity weighting, manual rebalance, repair re-encode (existing data climbs to the active profile) |
 | v0.5 | Full versioning API: delete markers, ListObjectVersions |
 | v0.6 | Object lock: GOVERNANCE, COMPLIANCE, legal holds |
 | v0.7 | Encryption at rest (SSE-S3): envelope encryption over the framed stream, a pluggable key source, the SSE-S3 surface ([ADR-0021](adr/0021-envelope-encryption-at-rest.md)) |
 | v0.8 | Key and CA rotation: KEK rewrap under a new master key (object bytes untouched), and CA custody and rotation ([ADR-0022](adr/0022-cluster-mtls.md), [ADR-0029](adr/0029-ca-custody-and-issuance.md)) |
-| v0.9 | Zero-downtime rolling upgrades: etcd-style cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the supported operator-driven roll ([ADR-0034](adr/0034-rolling-upgrade-machinery.md), [UPGRADES.md](UPGRADES.md)). The binary swap is the deployment system's job, per node; Hamster owns the safety machinery and the proof |
+| v0.9 | Zero-downtime rolling upgrades: etcd-style cluster version advertisement, the health interlock (`can-stop`), the end-to-end upgrade test suite, and the supported operator-driven roll ([ADR-0034](adr/0034-rolling-upgrade-machinery.md), [UPGRADES.md](UPGRADES.md)). The binary swap is the deployment system's job, per node; Hamster owns the safety machinery and the proof |
 | v0.10 | Observability and telemetry |
 | v0.11 | Hamster is one clustered path ([ADR-0036](adr/0036-one-clustered-path.md)): retire the single-node `serve` store, flatten the CLI (every command top-level), S3 on every node by default, proposal forwarding so any node accepts writes ([ADR-0037](adr/0037-proposal-forwarding.md)), and erasure-coded multipart/copy/streaming so the cluster path reaches single-node parity ([ADR-0038](adr/0038-ec-multipart-and-data-path-parity.md)) |
 | v0.12 | Adaptive load shedding ([ADR-0039](adr/0039-adaptive-load-shedding.md)): latency-gradient concurrency limiting that sheds with 429 at the node's self-discovered capacity, request-latency histograms, and degradation detection — all from in-flight depth and per-op latency, no OS primitives |

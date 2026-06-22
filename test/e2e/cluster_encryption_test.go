@@ -14,8 +14,8 @@ import (
 
 // TestClusterEncryptionAtRest is v0.7's payoff over the real binary: a
 // three-node cluster, each given the same master key with -master-key-file,
-// turns on encryption with `cluster encrypt`. New writes are encrypted, the
-// SSE header is reported on reads, `cluster status` shows the posture, and a
+// turns on encryption with `encrypt`. New writes are encrypted, the
+// SSE header is reported on reads, `status` shows the posture, and a
 // node that restarts reloads its key from its source and still decrypts.
 func TestClusterEncryptionAtRest(t *testing.T) {
 	const (
@@ -40,27 +40,27 @@ func TestClusterEncryptionAtRest(t *testing.T) {
 
 	dirs["n1"] = filepath.Join(root, "n1")
 	s3["n1"] = freeAddr(t)
-	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "enc-e2e", "-node", "n1", "-listen", freeAddr(t))
-	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3["n1"], "-master-key-file", keyFile)
+	run(t, "init", "-data-dir", dirs["n1"], "-cluster", "enc-e2e", "-node", "n1", "-listen", freeAddr(t))
+	procs["n1"] = start(t, env, "serve", "-data-dir", dirs["n1"], "-s3", s3["n1"], "-master-key-file", keyFile)
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 	for _, id := range nodes[1:] {
-		tok := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		tok := strings.TrimSpace(run(t, "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		s3[id] = freeAddr(t)
-		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		procs[id] = start(t, env, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", tok, "-s3", s3[id], "-master-key-file", keyFile)
 	}
 	waitStatus(t, dirs["n1"], "three members", func(rows []statusRow) bool { return len(rows) == 3 })
 
 	// Off until enabled.
-	if out := run(t, "cluster", "status", "-data-dir", dirs["n1"]); !strings.Contains(out, "encryption at rest: off") {
+	if out := run(t, "status", "-data-dir", dirs["n1"]); !strings.Contains(out, "encryption at rest: off") {
 		t.Fatalf("status should show encryption off before enabling:\n%s", out)
 	}
 	// Enable, and confirm status reports it.
-	run(t, "cluster", "encrypt", "-data-dir", dirs["n1"])
-	if out := run(t, "cluster", "status", "-data-dir", dirs["n1"]); !strings.Contains(out, "encryption at rest: AES256GCM") {
+	run(t, "encrypt", "-data-dir", dirs["n1"])
+	if out := run(t, "status", "-data-dir", dirs["n1"]); !strings.Contains(out, "encryption at rest: AES256GCM") {
 		t.Fatalf("status missing encryption posture after enabling:\n%s", out)
 	}
 
@@ -93,7 +93,7 @@ func TestClusterEncryptionAtRest(t *testing.T) {
 		}
 	}
 	procs[follower].interrupt(t)
-	procs[follower] = start(t, env, "cluster", "run", "-data-dir", dirs[follower], "-s3", s3[follower], "-master-key-file", keyFile)
+	procs[follower] = start(t, env, "serve", "-data-dir", dirs[follower], "-s3", s3[follower], "-master-key-file", keyFile)
 	waitStatus(t, dirs["n1"], "follower rejoined", func(rows []statusRow) bool { return len(rows) == 3 })
 
 	deadline := time.Now().Add(60 * time.Second)

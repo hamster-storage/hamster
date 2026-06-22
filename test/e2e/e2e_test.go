@@ -92,7 +92,7 @@ type proc struct {
 	out *safeBuf
 }
 
-// start launches a long-running hamster command (cluster run, serve).
+// start launches a long-running hamster command (serve).
 func start(t *testing.T, env []string, args ...string) *proc {
 	t.Helper()
 	return startBin(t, bin(t), env, args...)
@@ -147,7 +147,7 @@ func freeAddr(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// statusRow is one parsed line of `cluster status` output.
+// statusRow is one parsed line of `status` output.
 type statusRow struct {
 	node   string
 	role   string // "voter", "learner"
@@ -178,7 +178,7 @@ func parseStatus(out string) []statusRow {
 	return rows
 }
 
-// waitStatus polls `cluster status` against dataDir's node until pred
+// waitStatus polls `status` against dataDir's node until pred
 // holds on the parsed rows.
 func waitStatus(t *testing.T, dataDir, what string, pred func([]statusRow) bool) []statusRow {
 	t.Helper()
@@ -191,7 +191,7 @@ func waitStatusBin(t *testing.T, binPath, dataDir, what string, pred func([]stat
 	deadline := time.Now().Add(60 * time.Second)
 	var last string
 	for time.Now().Before(deadline) {
-		out, err := exec.Command(binPath, "cluster", "status", "-data-dir", dataDir).CombinedOutput()
+		out, err := exec.Command(binPath, "status", "-data-dir", dataDir).CombinedOutput()
 		last = string(out)
 		if err == nil {
 			if rows := parseStatus(last); pred(rows) {
@@ -234,20 +234,20 @@ func TestClusterLifecycle(t *testing.T) {
 
 	// n1: init and run.
 	dirs["n1"] = filepath.Join(root, "n1")
-	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "e2e", "-node", "n1",
+	run(t, "init", "-data-dir", dirs["n1"], "-cluster", "e2e", "-node", "n1",
 		"-listen", freeAddr(t))
 	// This is a membership/failover journey, not an S3 one — the nodes run
 	// headless (-no-s3), so they need no credentials.
-	procs["n1"] = start(t, nil, "cluster", "run", "-data-dir", dirs["n1"], "-no-s3")
+	procs["n1"] = start(t, nil, "serve", "-data-dir", dirs["n1"], "-no-s3")
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 
 	// n2 and n3: token + the one-command join-and-run form.
 	for _, id := range []string{"n2", "n3"} {
-		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		token := strings.TrimSpace(run(t, "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
-		procs[id] = start(t, nil, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		procs[id] = start(t, nil, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", token, "-no-s3")
 	}
 	waitStatus(t, dirs["n1"], "three voters", func(rows []statusRow) bool {
@@ -278,7 +278,7 @@ func TestClusterLifecycle(t *testing.T) {
 	})
 
 	// The dead node restarts from its own disk and rejoins.
-	procs[lead] = start(t, nil, "cluster", "run", "-data-dir", dirs[lead], "-no-s3")
+	procs[lead] = start(t, nil, "serve", "-data-dir", dirs[lead], "-no-s3")
 	waitStatus(t, dirs[lead], "the restarted node back among three voters", func(rows []statusRow) bool {
 		return len(rows) == 3 && voterCount(rows) == 3
 	})
@@ -295,21 +295,24 @@ func TestClusterLifecycle(t *testing.T) {
 	}
 }
 
-// TestServeSmoke: the S3 endpoint as a real process — serves the S3 error
-// envelope to an unsigned request, names its version, exits on Ctrl-C.
+// TestServeSmoke: a one-node cluster as a real process — `init` then `serve`
+// brings up the S3 endpoint, which serves the S3 error envelope to an unsigned
+// request; `version` names the build; the node exits cleanly on Ctrl-C.
 func TestServeSmoke(t *testing.T) {
 	if v := run(t, "version"); !strings.HasPrefix(v, "hamster ") {
 		t.Fatalf("version output %q", v)
 	}
 
-	addr := freeAddr(t)
+	dir := t.TempDir()
+	run(t, "init", "-data-dir", dir, "-node", "n1", "-listen", freeAddr(t))
+	s3 := freeAddr(t)
 	p := start(t,
 		[]string{"HAMSTER_ACCESS_KEY_ID=e2e", "HAMSTER_SECRET_ACCESS_KEY=e2e-secret"},
-		"serve", "-data-dir", t.TempDir(), "-listen", addr)
+		"serve", "-data-dir", dir, "-s3", s3)
 
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		resp, err := http.Get("http://" + addr + "/")
+		resp, err := http.Get("http://" + s3 + "/")
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()

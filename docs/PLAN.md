@@ -16,9 +16,9 @@ line here is done, delete it.
 **Observability shipped at v0.10.0** ([ADR-0035](adr/0035-observability-metrics.md)):
 one internal metrics registry rendered many ways — `internal/metrics` with a
 golden-pinned Prometheus `/metrics` exposition on the `-admin` listener, a
-hand-written-protobuf typed snapshot over `reqMetrics` that `cluster metrics` and the
+hand-written-protobuf typed snapshot over `reqMetrics` that `metrics` and the
 coming web console render, the durability posture each node derives from its replica,
-the `hamster_s3_requests_total{method,code}` counter, and the `cluster status`
+the `hamster_s3_requests_total{method,code}` counter, and the `status`
 durability line (`TestClusterMetricsEndpoint`). Request-latency histograms remain the
 open additive increment (a Histogram type + `ServeS3` duration observation through the
 gateway clock); they can ride v0.11 or a later release.
@@ -52,20 +52,27 @@ posted back); the gateway's bucket/delete/multipart-metadata commits go through
 (`503` stays for genuine backpressure and the below-floor durability refusal). Proven by
 a real-cluster e2e (PUT, multipart, and an apply error all driven through a follower).
 
-Remaining passes, in dependency order:
+**S3 on by default is done**: `hamster serve` serves S3 on `127.0.0.1:9000` without
+being asked, credentials required; `-no-s3` runs a headless storage node, `-s3 <addr>`
+overrides the address.
 
-1. **S3 on by default** — `hamster run` serves S3 on `127.0.0.1:9000` by default,
-   credentials required (refuse to boot without them, as `serve` did); `-no-s3` for a
-   headless storage node, `-s3 <addr>` to override the address.
-2. **Flatten the CLI + drop `serve`** — the fifteen `cluster <sub>` commands move to
-   top-level verbs; the `cluster` namespace and `serve`/`internal/blob` retire (hard
-   break, no aliases). README, CLAUDE.md, GLOSSARY, the demo Taskfile, and every
-   e2e/compat invocation move to the flat commands and the one-path model in the same
-   release.
-3. **One complete help + a drift guard** (the tail item) — a single top-level help that
-   lists every command (folding in the good descriptions from today's `clusterUsage`),
-   plus a test that iterates the dispatch table and asserts every verb appears in the
-   usage string, so help can never again drift from the implemented surface.
+**The CLI is flat**: the fifteen `cluster <sub>` commands are top-level verbs and the
+node command is `hamster serve` (renamed from `cluster run`); the old single-node `serve`
+command is gone. Dispatch and the generated `-h` help are one table (`commandGroups`), so
+help cannot drift from what is dispatched. README, CLAUDE.md, the demo Taskfile, the docs,
+and every e2e invocation moved to the flat commands and the one-path model.
+
+Remaining, in dependency order:
+
+1. **Retire `internal/blob` + collapse the gateway to one path** — the CLI no longer
+   reaches the single-node blob path, but the gateway still carries its `Objects == nil`
+   branches and the compat suite still builds an in-process gateway on `blob`. Delete the
+   package, make the gateway single-path (always the erasure-coded `Objects` backend), and
+   move the compat harness onto a node (in-process one-node cluster, or the real binary).
+2. **The drift-guard test** (the tail item) — `TestCommandHelpInSync` iterating
+   `commandGroups`: every dispatched verb appears in the rendered help, no command lacks a
+   description, no duplicate names. Help is generated from the table, so this pins the
+   property structurally.
 
 ## Later versions
 

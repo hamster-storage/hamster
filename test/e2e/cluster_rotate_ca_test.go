@@ -13,7 +13,7 @@ import (
 )
 
 // TestClusterCARotation is v0.8 Track B's payoff over the real binary: a
-// three-node cluster rotates its CA with `cluster rotate-ca` — a dual-trust
+// three-node cluster rotates its CA with `rotate-ca` — a dual-trust
 // rollover (ADR-0033). Every node is reissued onto the new CA and the old CA is
 // dropped, with no downtime. The proof it truly took: after the rotation a node
 // is restarted, and since its on-disk material is now the new CA alone, it
@@ -39,20 +39,20 @@ func TestClusterCARotation(t *testing.T) {
 
 	dirs["n1"] = filepath.Join(root, "n1")
 	s3["n1"] = freeAddr(t)
-	run(t, "cluster", "init", "-data-dir", dirs["n1"], "-cluster", "ca-e2e", "-node", "n1", "-listen", freeAddr(t))
-	procs["n1"] = start(t, env, "cluster", "run", "-data-dir", dirs["n1"], "-s3", s3["n1"], "-master-key-file", keyFile)
+	run(t, "init", "-data-dir", dirs["n1"], "-cluster", "ca-e2e", "-node", "n1", "-listen", freeAddr(t))
+	procs["n1"] = start(t, env, "serve", "-data-dir", dirs["n1"], "-s3", s3["n1"], "-master-key-file", keyFile)
 	waitStatus(t, dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 	for _, id := range nodes[1:] {
-		tok := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", dirs["n1"]))
+		tok := strings.TrimSpace(run(t, "token", "-data-dir", dirs["n1"]))
 		dirs[id] = filepath.Join(root, id)
 		s3[id] = freeAddr(t)
-		procs[id] = start(t, env, "cluster", "run", "-data-dir", dirs[id], "-node", id,
+		procs[id] = start(t, env, "serve", "-data-dir", dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", tok, "-s3", s3[id], "-master-key-file", keyFile)
 	}
 	waitStatus(t, dirs["n1"], "three members", func(rows []statusRow) bool { return len(rows) == 3 })
-	run(t, "cluster", "encrypt", "-data-dir", dirs["n1"])
+	run(t, "encrypt", "-data-dir", dirs["n1"])
 
 	c := &s3Client{t: t, akid: akid, secret: secret, region: region}
 	leaderAddr := func() string {
@@ -65,12 +65,12 @@ func TestClusterCARotation(t *testing.T) {
 	c.mutate([]string{lead}, "PUT", "/vault/obj", body, http.StatusOK)
 
 	// Rotate the CA.
-	out := run(t, "cluster", "rotate-ca", "-data-dir", dirs["n1"])
+	out := run(t, "rotate-ca", "-data-dir", dirs["n1"])
 	if !strings.Contains(out, "rotation complete") {
 		t.Fatalf("rotate-ca did not report completion:\n%s", out)
 	}
 	// The rotation closed: status no longer reports one in progress.
-	if st := run(t, "cluster", "status", "-data-dir", dirs["n1"]); strings.Contains(st, "rotation in progress") {
+	if st := run(t, "status", "-data-dir", dirs["n1"]); strings.Contains(st, "rotation in progress") {
 		t.Fatalf("status still shows a CA rotation in progress:\n%s", st)
 	}
 
@@ -99,7 +99,7 @@ func TestClusterCARotation(t *testing.T) {
 		}
 	}
 	procs[follower].interrupt(t)
-	procs[follower] = start(t, env, "cluster", "run", "-data-dir", dirs[follower], "-s3", s3[follower], "-master-key-file", keyFile)
+	procs[follower] = start(t, env, "serve", "-data-dir", dirs[follower], "-s3", s3[follower], "-master-key-file", keyFile)
 	waitStatus(t, dirs["n1"], "follower rejoined on the new CA", func(rows []statusRow) bool { return len(rows) == 3 })
 
 	deadline = time.Now().Add(60 * time.Second)

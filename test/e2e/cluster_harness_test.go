@@ -52,17 +52,17 @@ func startCluster(t *testing.T, name string, n int, env []string) *cluster {
 	c.adminDir = filepath.Join(root, "n1")
 	c.dirs["n1"] = c.adminDir
 	c.s3Addrs["n1"] = freeAddr(t)
-	run(t, "cluster", "init", "-data-dir", c.dirs["n1"], "-cluster", name, "-node", "n1", "-listen", freeAddr(t))
-	c.procs["n1"] = start(t, env, "cluster", "run", "-data-dir", c.dirs["n1"], "-s3", c.s3Addrs["n1"])
+	run(t, "init", "-data-dir", c.dirs["n1"], "-cluster", name, "-node", "n1", "-listen", freeAddr(t))
+	c.procs["n1"] = start(t, env, "serve", "-data-dir", c.dirs["n1"], "-s3", c.s3Addrs["n1"])
 	waitStatus(t, c.dirs["n1"], "n1 leading alone", func(rows []statusRow) bool {
 		return len(rows) == 1 && rows[0].leader
 	})
 
 	for _, id := range c.nodes[1:] {
-		token := strings.TrimSpace(run(t, "cluster", "token", "-data-dir", c.dirs["n1"]))
+		token := strings.TrimSpace(run(t, "token", "-data-dir", c.dirs["n1"]))
 		c.dirs[id] = filepath.Join(root, id)
 		c.s3Addrs[id] = freeAddr(t)
-		c.procs[id] = start(t, env, "cluster", "run", "-data-dir", c.dirs[id], "-node", id,
+		c.procs[id] = start(t, env, "serve", "-data-dir", c.dirs[id], "-node", id,
 			"-listen", freeAddr(t), "-token", token, "-s3", c.s3Addrs[id])
 	}
 	voters := min(n, 5) // the five-voter cap; the rest stay learners
@@ -127,10 +127,10 @@ func (c *cluster) followerS3() string {
 // started — not yet a settled member; the caller waits on status.
 func (c *cluster) join(id string, extraArgs ...string) {
 	c.t.Helper()
-	token := strings.TrimSpace(run(c.t, "cluster", "token", "-data-dir", c.adminDir))
+	token := strings.TrimSpace(run(c.t, "token", "-data-dir", c.adminDir))
 	dir := filepath.Join(c.root, id)
 	s3 := freeAddr(c.t)
-	args := append([]string{"cluster", "run", "-data-dir", dir, "-node", id,
+	args := append([]string{"serve", "-data-dir", dir, "-node", id,
 		"-listen", freeAddr(c.t), "-token", token, "-s3", s3}, extraArgs...)
 	c.mu.Lock()
 	defer c.mu.Unlock()
