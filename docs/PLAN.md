@@ -59,20 +59,23 @@ overrides the address.
 **The CLI is flat**: the fifteen `cluster <sub>` commands are top-level verbs and the
 node command is `hamster serve` (renamed from `cluster run`); the old single-node `serve`
 command is gone. Dispatch and the generated `-h` help are one table (`commandGroups`), so
-help cannot drift from what is dispatched. README, CLAUDE.md, the demo Taskfile, the docs,
-and every e2e invocation moved to the flat commands and the one-path model.
+help cannot drift from what is dispatched (`TestCommandHelpInSync`). README, CLAUDE.md, the
+demo Taskfile, the docs, and every e2e invocation moved to the flat commands and the
+one-path model.
 
-Remaining, in dependency order:
+**`internal/blob` stays as the gateway's test backend** — a deliberate narrowing of
+ADR-0036's "retire `internal/blob`" to "retire it as a *production* path." The single-node
+`serve` command is gone, so no user can reach the blob path; but `blob` is the simple,
+synchronous backend the 41 gateway unit tests use to exercise the backend-agnostic S3
+surface without standing up the whole data plane. The production object path
+(`internal/coord`) has its own 41 simulation tests proving durability by decoding shards
+off disk, and the gateway↔coord seam is covered by the cluster e2e — so keeping `blob` as a
+test seam leaves no production-path coverage gap. Collapsing the gateway's `Objects == nil`
+branches and migrating all 41 tests + compat onto an in-process EC backend was weighed and
+declined: large, risky, and it makes those tests heavier for no production benefit.
 
-1. **Retire `internal/blob` + collapse the gateway to one path** — the CLI no longer
-   reaches the single-node blob path, but the gateway still carries its `Objects == nil`
-   branches and the compat suite still builds an in-process gateway on `blob`. Delete the
-   package, make the gateway single-path (always the erasure-coded `Objects` backend), and
-   move the compat harness onto a node (in-process one-node cluster, or the real binary).
-2. **The drift-guard test** (the tail item) — `TestCommandHelpInSync` iterating
-   `commandGroups`: every dispatched verb appears in the rendered help, no command lacks a
-   description, no duplicate names. Help is generated from the table, so this pins the
-   property structurally.
+That completes v0.11. The web console (v0.13) and adaptive load shedding (v0.12) are the
+next front lines.
 
 ## Later versions
 
