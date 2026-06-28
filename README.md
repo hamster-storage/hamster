@@ -1,5 +1,7 @@
 # Hamster
 
+[![CI](https://github.com/hamster-storage/hamster/actions/workflows/ci.yml/badge.svg)](https://github.com/hamster-storage/hamster/actions/workflows/ci.yml)
+
 **S3 compatible object storage in a single binary. Stuff it in, pull it out later.**
 
 <img width="1280" height="640" alt="hammy" src="https://github.com/user-attachments/assets/aafa0809-a736-4c9f-9dc6-1f6411e02d5b" />
