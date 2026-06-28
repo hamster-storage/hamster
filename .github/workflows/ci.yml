@@ -1,0 +1,201 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # merge_group runs the required checks against the queued PR merged onto main, so
+  # the merge queue tests the actual merge result (not just the PR branch in
+  # isolation). Without this trigger an enabled queue stalls — its required checks
+  # never run.
+  merge_group:
+
+# Cancel superseded runs on a PR branch to save runner time; never cancel a push to
+# main or a queued merge_group — each of those must complete to keep main and the
+# queue honest.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # changes detects whether anything other than documentation changed, so the heavy
+  # jobs can be skipped on docs-only PRs. A skipped required check still counts as
+  # passing for branch protection and the merge queue, so auto-merge keeps working
+  # on a docs-only change.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+
+  # The light gate — the same vet / gofmt / build / unit + simulation tests a
+  # developer runs pre-commit (task check, build, test). Fast and hermetic: no
+  # external service, because the simulation harness runs in-process.
+  check:
+    name: vet, fmt, build, test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task check
+      - run: task build
+      # The deterministic tree, excluding internal/cluster. That package is the
+      # real-process loopback-mTLS suite (CLAUDE.md: best-effort plumbing,
+      # timing-sensitive); run concurrently with the whole tree on a constrained
+      # runner, it manufactures load flakes — the same reason `task test-race`
+      # excludes it. It gets its own isolated job below (full cores, no concurrent
+      # simulation load), and the e2e job covers real clusters comprehensively.
+      - name: test (deterministic tree)
+        run: go test $(go list ./... | grep -v '/internal/cluster$')
+
+  # The real-process cluster suite, run ALONE so it gets the runner's full cores
+  # with no concurrent simulation load — the same isolation `task test-race-cluster`
+  # gives it, for the same timing reason (CLAUDE.md). Comprehensive real-cluster
+  # behavior is additionally covered by the e2e job (which is NOT retried).
+  cluster:
+    name: cluster suite (real processes)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Bounded retry for the residual timing-sensitivity of this best-effort suite
+      # (CLAUDE.md: real loopback-mTLS processes, "load artifacts, not data races" —
+      # e.g. a version-advertisement poll or a replace-node transition that doesn't
+      # settle within its window on a momentarily-starved runner). This is NOT
+      # masking a determinable failure: the one deterministic bug CI found here —
+      # leader-only commands racing leadership after formation — is fixed in product
+      # code (internal/cluster/lifecycle.go), not papered over. Three consecutive
+      # failures still fails the gate, and the e2e job is the non-retried backstop.
+      - name: cluster suite (bounded retry for residual timing flakes)
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::cluster suite attempt $attempt"
+            if go test -count=1 ./internal/cluster/; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "attempt $attempt failed"
+          done
+          echo "::error::cluster suite failed 3 consecutive attempts — investigate, not a flake"
+          exit 1
+
+  # The race detector over the simulated core and data plane. `task test-race`
+  # deliberately excludes the real-process cluster suite, whose loopback-mTLS timing
+  # flakes under the detector's ~10x slowdown without a real data race (CLAUDE.md).
+  # Needs cgo for the race runtime — the one place Hamster builds with CGO on.
+  race:
+    name: race detector
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task test-race
+
+  # The heavy end-to-end suite: real hamster processes over loopback mTLS,
+  # multi-node clusters killed mid-workload. CPU-heavy and timing-sensitive — it
+  # belongs on a dedicated runner, not a developer's laptop. (A GitHub runner is a
+  # dedicated VM, so the CPU-contention flakes seen sharing a local machine with
+  # other apps do not apply here.)
+  e2e:
+    name: end-to-end (real cluster)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task e2e
+
+  # The third-party client compatibility suite (aws CLI, rclone, restic, s3cmd)
+  # against an in-process gateway. The clients are installed on the runner so the
+  # suite actually runs here instead of skipping (it skips a client that is absent)
+  # — this is the "runs in CI, not on a developer's machine" guarantee.
+  compat:
+    name: client compatibility
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: install S3 clients (aws CLI is preinstalled on the runner)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone restic s3cmd
+      - name: client versions
+        run: |
+          aws --version
+          rclone version
+          restic version
+          s3cmd --version
+      - run: task compat
+
+  # A single aggregating gate so branch protection / the merge queue need just one
+  # required check ("all checks") instead of listing every job. It runs even when
+  # upstream jobs are skipped or failed (if: always()) and passes only when every
+  # needed job either succeeded or was skipped — so a docs-only PR (heavy jobs
+  # skipped) passes, while any real failure or cancellation fails the gate.
+  all-checks:
+    name: all checks
+    if: always()
+    needs: [changes, check, cluster, race, e2e, compat]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every upstream job passed or was skipped
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "upstream results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
+              echo "::error::an upstream job concluded '$r'"
+              exit 1
+            fi
+          done
+          echo "all upstream jobs passed or were skipped"
