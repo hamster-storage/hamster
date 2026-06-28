@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # merge_group runs the required checks against the queued PR merged onto main, so
+  # the merge queue tests the actual merge result (not just the PR branch in
+  # isolation). Without this trigger an enabled queue stalls — its required checks
+  # never run.
+  merge_group:
+
+# Cancel superseded runs on a PR branch to save runner time; never cancel a push to
+# main or a queued merge_group — each of those must complete to keep main and the
+# queue honest.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # changes detects whether anything other than documentation changed, so the heavy
+  # jobs can be skipped on docs-only PRs. A skipped required check still counts as
+  # passing for branch protection and the merge queue, so auto-merge keeps working
+  # on a docs-only change.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+
+  # The light gate — the same vet / gofmt / build / unit + simulation tests a
+  # developer runs pre-commit (task check, build, test). Fast and hermetic: no
+  # external service, because the simulation harness runs in-process.
+  check:
+    name: vet, fmt, build, test
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task check
+      - run: task build
+      - run: task test
+
+  # The race detector over the simulated core and data plane. `task test-race`
+  # deliberately excludes the real-process cluster suite, whose loopback-mTLS timing
+  # flakes under the detector's ~10x slowdown without a real data race (CLAUDE.md).
+  # Needs cgo for the race runtime — the one place Hamster builds with CGO on.
+  race:
+    name: race detector
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task test-race
+
+  # The heavy end-to-end suite: real hamster processes over loopback mTLS,
+  # multi-node clusters killed mid-workload. CPU-heavy and timing-sensitive — it
+  # belongs on a dedicated runner, not a developer's laptop. (A GitHub runner is a
+  # dedicated VM, so the CPU-contention flakes seen sharing a local machine with
+  # other apps do not apply here.)
+  e2e:
+    name: end-to-end (real cluster)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - run: task e2e
+
+  # The third-party client compatibility suite (aws CLI, rclone, restic, s3cmd)
+  # against an in-process gateway. The clients are installed on the runner so the
+  # suite actually runs here instead of skipping (it skips a client that is absent)
+  # — this is the "runs in CI, not on a developer's machine" guarantee.
+  compat:
+    name: client compatibility
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: install S3 clients (aws CLI is preinstalled on the runner)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rclone restic s3cmd
+      - name: client versions
+        run: |
+          aws --version
+          rclone version
+          restic version
+          s3cmd --version
+      - run: task compat

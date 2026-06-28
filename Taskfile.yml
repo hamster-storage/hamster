@@ -146,13 +146,20 @@ tasks:
         cat SHA256SUMS
 
   release:
-    desc: Cut a release — run the full gate, cross-compile, tag, and publish to GitHub (VERSION=vX.Y.Z TITLE="vX.Y.Z — …" NOTES=path/to/notes.md)
+    desc: Cut a release — preflight, then tag and push; CI gates, cross-compiles, and publishes (VERSION=vX.Y.Z [TITLE="vX.Y.Z — …"])
     requires:
-      vars: [VERSION, TITLE, NOTES]
+      vars: [VERSION]
     cmds:
-      # Preflight: a clean tree on main, the tag still free, the notes present.
+      # The heavy gate, the cross-compile, and the GitHub publish now live in CI
+      # (.github/workflows/release.yml fires on the pushed v* tag). This target is
+      # the safe local trigger: it preflights and pushes the tag, and the workflow
+      # does the rest. The binaries are built from the tag (the only version source),
+      # so nothing here is hand-stamped.
       - |
         set -e
+        # Preflight: a clean tree on main, the tag still free, and — per the
+        # CLAUDE.md release policy — the README version row already flipped to ✅ and
+        # linked to this tag (the workflow re-checks this, but fail fast locally).
         if [ -n "$(git status --porcelain)" ]; then
           echo "release: working tree is not clean — commit or stash first" >&2; exit 1
         fi
@@ -163,22 +170,11 @@ tasks:
         if git rev-parse -q --verify "refs/tags/{{.VERSION}}" >/dev/null; then
           echo "release: tag {{.VERSION}} already exists" >&2; exit 1
         fi
-        if [ ! -f "{{.NOTES}}" ]; then
-          echo "release: notes file '{{.NOTES}}' not found" >&2; exit 1
+        url="https://github.com/hamster-storage/hamster/releases/tag/{{.VERSION}}"
+        if ! grep -qF "$url" README.md; then
+          echo "release: README has no row linking to $url — flip the version-status table to ✅ and link it first (CLAUDE.md release policy)" >&2; exit 1
         fi
-      # The full pre-release gate — the same targets the pre-commit gate uses,
-      # plus the slower e2e and compat suites a release must not skip.
-      - task: build
-      - task: check
-      - task: test
-      - task: e2e
-      - task: compat
-      # Artifacts, then tag (annotated, matching v0.1/v0.2), push, and publish.
-      - task: dist
-        vars: { VERSION: '{{.VERSION}}' }
-      - |
-        set -e
-        git tag -a "{{.VERSION}}" -m "{{.TITLE}}"
+        title="{{.TITLE}}"; [ -n "$title" ] || title="{{.VERSION}}"
+        git tag -a "{{.VERSION}}" -m "$title"
         git push origin "{{.VERSION}}"
-        gh release create "{{.VERSION}}" dist/hamster-{{.VERSION}}-* dist/SHA256SUMS \
-          --title "{{.TITLE}}" --notes-file "{{.NOTES}}"
+        echo "Pushed tag {{.VERSION}} — the Release workflow will gate, cross-compile, and publish the GitHub release."

@@ -1,0 +1,93 @@
+name: Release
+
+# A release is a single git push of a v* tag. This workflow cross-compiles the
+# static, version-stamped binaries (the tag is the only source of truth, stamped via
+# the -X main.version ldflag in `task dist`) and creates the GitHub release with
+# auto-generated notes and the binaries + SHA256SUMS attached. No release PR, no
+# hand-edited version constant.
+#
+#   Cutting a release:  git tag -a vX.Y.Z -m "…" && git push origin vX.Y.Z
+#                       (or `task release VERSION=vX.Y.Z`, which runs the preflight)
+#
+# workflow_dispatch builds the artifacts for a tag and uploads them as a workflow
+# artifact only (no GitHub release published) — a dry run to inspect a tag's binaries
+# before cutting it.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build artifacts for (dry run — no release is published)"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub release and upload the binary assets
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # --generate-notes and --verify-tag want full history + tags
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: arduino/setup-task@v2
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # CLAUDE.md release policy: the README version-status table is flipped to ✅ and
+      # linked to the release tag in the commit set that precedes the tag — by hand,
+      # because the row carries a written one-line summary of what shipped that a
+      # script must not author. This step only *verifies* that flip happened (it never
+      # writes the prose), and only on a real tag push, failing the release loudly if
+      # the row is missing or unlinked.
+      - name: verify README version row is flipped and linked
+        if: github.event_name == 'push'
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          url="https://github.com/${{ github.repository }}/releases/tag/${tag}"
+          if ! grep -qF "$url" README.md; then
+            echo "::error::README has no row linking to ${url}. Flip the version-status table to ✅ and link it to the tag in the commit before tagging (CLAUDE.md release policy)."
+            exit 1
+          fi
+
+      - name: cross-compile static binaries + SHA256SUMS
+        run: task dist VERSION="${{ steps.meta.outputs.tag }}"
+
+      - name: create GitHub release
+        if: github.event_name == 'push'
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            dist/hamster-${{ steps.meta.outputs.tag }}-* dist/SHA256SUMS \
+            --generate-notes --latest --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: upload artifacts (dry run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hamster-${{ steps.meta.outputs.tag }}
+          path: |
+            dist/hamster-*
+            dist/SHA256SUMS
+
+      - name: summary
+        if: github.event_name == 'push'
+        run: |
+          echo "Published release ${{ steps.meta.outputs.tag }} with the static binaries + SHA256SUMS." >> "$GITHUB_STEP_SUMMARY"
+          echo "Notes were auto-generated from the merged PRs since the previous tag." >> "$GITHUB_STEP_SUMMARY"
