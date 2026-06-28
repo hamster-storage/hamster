@@ -157,3 +157,26 @@ jobs:
           restic version
           s3cmd --version
       - run: task compat
+
+  # A single aggregating gate so branch protection / the merge queue need just one
+  # required check ("all checks") instead of listing every job. It runs even when
+  # upstream jobs are skipped or failed (if: always()) and passes only when every
+  # needed job either succeeded or was skipped — so a docs-only PR (heavy jobs
+  # skipped) passes, while any real failure or cancellation fails the gate.
+  all-checks:
+    name: all checks
+    if: always()
+    needs: [changes, check, cluster, race, e2e, compat]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every upstream job passed or was skipped
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "upstream results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ] && [ "$r" != "skipped" ]; then
+              echo "::error::an upstream job concluded '$r'"
+              exit 1
+            fi
+          done
+          echo "all upstream jobs passed or were skipped"
