@@ -60,7 +60,32 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - run: task check
       - run: task build
-      - run: task test
+      # The deterministic tree, excluding internal/cluster. That package is the
+      # real-process loopback-mTLS suite (CLAUDE.md: best-effort plumbing,
+      # timing-sensitive); run concurrently with the whole tree on a constrained
+      # runner, it manufactures load flakes — the same reason `task test-race`
+      # excludes it. It gets its own isolated job below (full cores, no concurrent
+      # simulation load), and the e2e job covers real clusters comprehensively.
+      - name: test (deterministic tree)
+        run: go test $(go list ./... | grep -v '/internal/cluster$')
+
+  # The real-process cluster suite, run ALONE so it gets the runner's full cores
+  # with no concurrent simulation load — the same isolation `task test-race-cluster`
+  # gives it, for the same timing reason (CLAUDE.md). It passes reliably in isolation;
+  # it only flakes when starved competing with the whole tree. Comprehensive
+  # real-cluster behavior is additionally covered by the e2e job.
+  cluster:
+    name: cluster suite (real processes)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test -count=1 ./internal/cluster/
 
   # The race detector over the simulated core and data plane. `task test-race`
   # deliberately excludes the real-process cluster suite, whose loopback-mTLS timing
