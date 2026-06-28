@@ -399,7 +399,7 @@ func Drain(dataDir, addr, nodeID string, draining bool) error {
 	if target == "" {
 		target = cfg.ClusterAddr
 	}
-	return leaderRedirect("drain", target, 0, func(addr string) (controlOutcome, error) {
+	return leaderRedirect("drain", target, leaderSettleWait, func(addr string) (controlOutcome, error) {
 		resp, err := requestDrain(addr, cert, pool, drainRequest{NodeID: nodeID, Draining: draining})
 		if err != nil {
 			return controlOutcome{}, err
@@ -429,7 +429,7 @@ func Remove(dataDir, addr, nodeID string) error {
 	if target == "" {
 		target = cfg.ClusterAddr
 	}
-	return leaderRedirect("remove", target, 0, func(addr string) (controlOutcome, error) {
+	return leaderRedirect("remove", target, leaderSettleWait, func(addr string) (controlOutcome, error) {
 		resp, err := requestRemove(addr, cert, pool, removeRequest{NodeID: nodeID})
 		if err != nil {
 			return controlOutcome{}, err
@@ -506,7 +506,7 @@ func Encrypt(dataDir, addr string) (string, error) {
 		target = cfg.ClusterAddr
 	}
 	var label string
-	err = leaderRedirect("encrypt", target, 0, func(addr string) (controlOutcome, error) {
+	err = leaderRedirect("encrypt", target, leaderSettleWait, func(addr string) (controlOutcome, error) {
 		resp, err := requestEncrypt(addr, cert, pool)
 		if err != nil {
 			return controlOutcome{}, err
@@ -548,7 +548,7 @@ func RotateKey(dataDir, addr string) (RotateKeyReport, error) {
 		target = cfg.ClusterAddr
 	}
 	var report RotateKeyReport
-	err = leaderRedirect("rotate-key", target, 0, func(addr string) (controlOutcome, error) {
+	err = leaderRedirect("rotate-key", target, leaderSettleWait, func(addr string) (controlOutcome, error) {
 		resp, err := requestRotateKey(addr, cert, pool)
 		if err != nil {
 			return controlOutcome{}, err
@@ -589,7 +589,7 @@ func RotateCA(dataDir, addr string) (RotateCAReport, error) {
 		target = cfg.ClusterAddr
 	}
 	var report RotateCAReport
-	err = leaderRedirect("rotate-ca", target, 0, func(addr string) (controlOutcome, error) {
+	err = leaderRedirect("rotate-ca", target, leaderSettleWait, func(addr string) (controlOutcome, error) {
 		buf, err := controlRoundTrip(addr, cert, pool, encodeRequest(reqRotateCA, nil))
 		if err != nil {
 			return controlOutcome{}, err
@@ -672,6 +672,14 @@ func controlRoundTrip(addr string, cert tls.Certificate, pool *x509.CertPool, re
 // cluster converges a membership change (the server answered "retry").
 const controlSettlePoll = 2 * time.Second
 
+// leaderSettleWait bounds how long a leader-only control command (drain, remove,
+// encrypt, rotate-key, rotate-ca) waits for leadership to settle when the node it
+// asked is not the leader and does not yet know who is — the brief window just
+// after formation, before leadership has propagated. A healthy cluster settles in
+// well under a second, so this ceiling is never reached in practice; it only
+// bounds a genuinely leaderless cluster, which then errors rather than hanging.
+const leaderSettleWait = 30 * time.Second
+
 // controlOutcome carries the redirect/refusal fields every leader-only control
 // response shares, extracted so leaderRedirect drives the retry loop uniformly.
 type controlOutcome struct {
@@ -681,12 +689,18 @@ type controlOutcome struct {
 }
 
 // leaderRedirect runs a leader-only control request against target, following a
-// single redirect to the named leader and, when the server reports the cluster is
-// still converging, waiting out the change (up to settleWait) before re-asking.
-// op names the operation for the refusal message; do performs one round trip
-// against an address. Drain, remove, and optimize all share this loop — they
-// differ only in the request do makes and whether the server ever sets retry
-// (settleWait==0 disables the wait).
+// single redirect to the named leader and, while the cluster is still converging,
+// waiting it out (up to settleWait) before re-asking. op names the operation for
+// the refusal message; do performs one round trip against an address. Every
+// leader-only control command shares this loop — they differ only in the request
+// do makes (settleWait==0 disables the wait).
+//
+// "Converging" is two cases: the server flagged a membership change in flight
+// (out.retry), or the contacted node is not the leader and does not yet know who
+// is — a not-leader refusal with no redirect address, the brief window just after
+// formation before leadership has propagated, where the node can neither answer
+// nor hand back a redirect. A real refusal from the leader carries a different
+// message and falls straight through to the error.
 func leaderRedirect(op, target string, settleWait time.Duration, do func(addr string) (controlOutcome, error)) error {
 	deadline := time.Now().Add(settleWait)
 	redirected := false
@@ -703,8 +717,9 @@ func leaderRedirect(op, target string, settleWait time.Duration, do func(addr st
 			target, redirected = out.leader, true
 			continue
 		}
-		// The cluster is still absorbing a membership change — wait and re-ask.
-		if out.retry && time.Now().Before(deadline) {
+		// Still converging — wait and re-ask.
+		converging := out.retry || (out.errStr == notLeaderMsg && out.leader == "")
+		if converging && time.Now().Before(deadline) {
 			time.Sleep(controlSettlePoll)
 			continue
 		}
