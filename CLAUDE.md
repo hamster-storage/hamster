@@ -98,3 +98,9 @@ task release    # preflight, then tag and push vX.Y.Z; CI gates, cross-compiles,
 ## Naming
 
 Use standard distributed systems vocabulary in code, docs, CLI, and logs: node, cluster, shard, partition, write buffer, data directory. Hamster is the brand, not an operational vocabulary — do not introduce themed names for system components.
+
+## Web console design (v0.13, [ADR-0020](docs/adr/0020-embedded-htmx-web-console.md))
+
+The web console is embedded in the binary, server-rendered with htmx, and served on the admin port. Its look is governed by a **design system** — the single source of truth for the console's design tokens (color, typography, spacing, radius, elevation) and its components (page shell/nav, cards, tables, status pills, metric tiles, gauges/sparklines, badges, buttons). The system is self-contained: no CDN, no external fonts or scripts — the binary is static and the console must render fully offline.
+
+**Design decisions flow through Claude design.** Any new visual element — a new component, a new layout, or a restyle — is authored by the Claude design process, which owns the design system and emits the CSS/HTML/JS. A page may be built **without** a design pass only when it composes entirely from existing design-system components. The moment a page needs something the system doesn't already have, it goes through Claude design first. Do not hand-author ad-hoc inline styles or one-off components; keep the system small and consistent over expedient. Engineering wires the server-rendered HTML + htmx to real data; visual design is not invented at the call site.
