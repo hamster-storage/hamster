@@ -266,6 +266,7 @@ func clusterStatus(args []string) error {
 	fmt.Fprintln(w, "RAFT-ID\tNODE\tADDRESS\tROLE\tHOST\tZONE\tCAPACITY\tVERSION\tGEN\tSTATE")
 	hosts, zones := map[string]bool{}, map[string]bool{}
 	anyDown := false
+	anyDegraded := false
 	for _, m := range members {
 		role := "voter"
 		if m.Learner {
@@ -278,9 +279,17 @@ func clusterStatus(args []string) error {
 		if m.Capacity != 0 {
 			capacity = fmt.Sprintf("%d", m.Capacity)
 		}
-		// down (local liveness) takes precedence over draining (a committed
-		// fact) — an unreachable node is the more urgent thing to surface.
+		// STATE precedence: down > draining > degraded > up. down (local
+		// liveness) and draining (a committed fact) are the more definitive
+		// states; degraded refines "up" — the node is still serving, but its own
+		// service floor has risen (ADR-0039 part 5). degraded is a candidate
+		// signal for the operator and NEVER implies an automatic action (no
+		// eviction, drain, or shedding change).
 		state := "up"
+		if m.Degraded {
+			state = "degraded"
+			anyDegraded = true
+		}
 		if m.Draining {
 			state = "draining"
 		}
@@ -311,6 +320,12 @@ func clusterStatus(args []string) error {
 		// STATE is the answering node's local, best-effort view (ADR-0027):
 		// a peer it currently treats as down, not a committed cluster fact.
 		fmt.Println("  note: STATE is this node's local liveness view; another node may differ")
+	}
+	if anyDegraded {
+		// degraded is the answering node's self-assessment of its OWN floor
+		// (ADR-0039 part 5), so it shows only on that node's row; ask each node to
+		// see its own. It is advisory — no node is evicted or drained on it.
+		fmt.Println("  note: degraded is the answering node's self-assessment of its own service floor; it is advisory, not an automatic action")
 	}
 	// Cluster protocol generation (ADR-0034): the effective generation is the min
 	// across live members and rolls forward as the last node upgrades. Surface a

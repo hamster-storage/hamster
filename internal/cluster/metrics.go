@@ -170,6 +170,32 @@ func (n *Node) initMetrics() {
 		})
 	})
 
+	// Node degradation (ADR-0039 part 5): a node-level health gauge, 1 while this
+	// node's own data-plane service floor (minRTT) has stayed a factor above its
+	// established baseline — a failing drive, a throttled volume — distinct from
+	// load (which moves only curRTT, never the floor). DETECTION ONLY: it is a
+	// signal for an operator, never an input to any automatic action (no
+	// auto-eviction, drain, or shedding change — ADR-0039). Node-level rather than
+	// per-op because a degraded local volume degrades every operation, and the
+	// status surface and Degraded() accessor are node-level; per-op detail is
+	// available via Coordinator.DegradedOp if a later pass wants it. Read on the
+	// loop by a scrape collector, the gradient/limit gauges' pattern.
+	degraded := r.NewGauge("hamster_node_degraded",
+		"1 if this node's data-plane service floor (minRTT) is degraded vs its baseline (ADR-0039 part 5); detection only, triggers no action.")
+	degraded.Set(0)
+	r.AddCollector(func() {
+		if n.coord == nil {
+			return
+		}
+		n.on(func() {
+			if n.coord.Degraded() {
+				degraded.Set(1)
+			} else {
+				degraded.Set(0)
+			}
+		})
+	})
+
 	// Streaming-PUT load signals (ADR-0038): the headline questions for the
 	// data path under load — how many writes are in flight, how much they move,
 	// and how often the feeder is throttled by the shard streams (the

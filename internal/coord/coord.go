@@ -133,6 +133,11 @@ type Coordinator struct {
 	// count (ADR-0039 parts 3/4), one per op type for the same reason. Loop-owned;
 	// tryAcquire gates admission and release adapts the limit on every terminal.
 	limiters map[string]*limiter
+	// detectors holds the per-operation node-degradation detectors (ADR-0039 part
+	// 5), one per op type: each watches minRTT (the floor) climb above its
+	// established baseline. Loop-owned, fed from observeLatency alongside the
+	// gradient tracker. Detection only — never an input to any automatic action.
+	detectors map[string]*degradedDetector
 	// sweeping is the single-flight guard shared by every repair sweep — the
 	// operator optimize, the transition migration, and the background scrubber —
 	// so at most one runs at a time. Loop-owned, so no lock.
@@ -147,6 +152,7 @@ func New(cfg Config) *Coordinator {
 		liveness:  newLiveness(),
 		gradients: map[string]*tracker{opPut: newTracker(), opGet: newTracker()},
 		limiters:  map[string]*limiter{opPut: newLimiter(), opGet: newLimiter()},
+		detectors: map[string]*degradedDetector{opPut: newDegradedDetector(), opGet: newDegradedDetector()},
 	}
 }
 
@@ -166,6 +172,11 @@ func (c *Coordinator) observeLatency(op string, started time.Time) {
 	seconds := c.cfg.Clock.Now().Sub(started).Seconds()
 	if t := c.gradients[op]; t != nil {
 		t.update(seconds)
+		// Degradation detection (ADR-0039 part 5) consumes the floor the gradient
+		// tracker just computed from this same sample — no second timing source.
+		if d := c.detectors[op]; d != nil {
+			d.update(t.minRTT())
+		}
 	}
 	if c.cfg.ObserveLatency != nil {
 		c.cfg.ObserveLatency(op, seconds)
