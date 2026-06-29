@@ -125,6 +125,10 @@ type Config struct {
 type Coordinator struct {
 	cfg      Config
 	liveness *liveness
+	// gradients tracks per-operation RTT gradients (ADR-0039 part 2), one
+	// tracker per op type since a PUT (k+m shards) and a GET (k shards) have
+	// different cost profiles. Loop-owned, fed from observeLatency.
+	gradients map[string]*tracker
 	// sweeping is the single-flight guard shared by every repair sweep — the
 	// operator optimize, the transition migration, and the background scrubber —
 	// so at most one runs at a time. Loop-owned, so no lock.
@@ -134,7 +138,11 @@ type Coordinator struct {
 
 // New returns a Coordinator over cfg.
 func New(cfg Config) *Coordinator {
-	return &Coordinator{cfg: cfg, liveness: newLiveness()}
+	return &Coordinator{
+		cfg:       cfg,
+		liveness:  newLiveness(),
+		gradients: map[string]*tracker{opPut: newTracker(), opGet: newTracker()},
+	}
 }
 
 // Operation names for the latency recorder (ADR-0039), matching the method
@@ -144,15 +152,19 @@ const (
 	opGet = "GET"
 )
 
-// observeLatency reports a completed operation's service time to the configured
-// recorder (ADR-0039 part 1): the seam-clock duration from started to now, so
-// the measurement is deterministic and simulator-driven. A nil recorder (the
-// default in tests) is a no-op. Call on the loop, on the success terminal only.
+// observeLatency reports a completed operation's service time (ADR-0039): the
+// seam-clock duration from started to now, measured once and fed to both the
+// gradient tracker (part 2) and the configured histogram recorder (part 1), so
+// the two never see different samples. The measurement is deterministic and
+// simulator-driven. Call on the loop, on the success terminal only.
 func (c *Coordinator) observeLatency(op string, started time.Time) {
-	if c.cfg.ObserveLatency == nil {
-		return
+	seconds := c.cfg.Clock.Now().Sub(started).Seconds()
+	if t := c.gradients[op]; t != nil {
+		t.update(seconds)
 	}
-	c.cfg.ObserveLatency(op, c.cfg.Clock.Now().Sub(started).Seconds())
+	if c.cfg.ObserveLatency != nil {
+		c.cfg.ObserveLatency(op, seconds)
+	}
 }
 
 // beginSweep claims the single-flight guard, returning false if a sweep is

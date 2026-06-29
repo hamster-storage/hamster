@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"strconv"
 
+	"github.com/hamster-storage/hamster/internal/coord"
 	"github.com/hamster-storage/hamster/internal/ec"
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/metrics"
@@ -101,6 +102,42 @@ func (n *Node) initMetrics() {
 	n.s3ReqDuration = r.NewHistogram("hamster_s3_request_duration_seconds",
 		"Data-plane S3 operation latency in seconds, by method (ADR-0039), from admission to completion.",
 		metrics.DefaultLatencyBuckets, "method")
+
+	// RTT gradient (ADR-0039 part 2): the coordinator maintains, per operation, a
+	// no-load baseline (minRTT, a re-probing long-window minimum that can rise as
+	// the floor degrades) and a short-window recent estimate (curRTT). Their ratio
+	// — the gradient, ≈1 healthy and →0 as queuing grows — is the signal the load
+	// shedder (part 3/4) and degradation detection (part 5) build on. Exposed the
+	// same way the durability gauges are: coordinator accessors read on the loop by
+	// a scrape collector, so the coordinator never imports internal/metrics.
+	gradient := r.NewGauge("hamster_s3_request_gradient",
+		"Latency gradient clamp(minRTT/curRTT,0..1) per operation (ADR-0039): ~1 healthy, ->0 as queuing grows.",
+		"method")
+	minRTT := r.NewGauge("hamster_s3_request_min_rtt_seconds",
+		"Best-case service time per operation in seconds: the re-probing long-window minimum (ADR-0039).",
+		"method")
+	curRTT := r.NewGauge("hamster_s3_request_cur_rtt_seconds",
+		"Recent service-time estimate per operation in seconds: the short-window EWMA (ADR-0039).",
+		"method")
+	// Materialize each op's series at the healthy default so the lines exist from
+	// the first scrape, before any operation has run.
+	for _, op := range coord.GradientOps() {
+		gradient.Set(1, op)
+		minRTT.Set(0, op)
+		curRTT.Set(0, op)
+	}
+	r.AddCollector(func() {
+		if n.coord == nil {
+			return
+		}
+		n.on(func() {
+			for _, op := range coord.GradientOps() {
+				gradient.Set(n.coord.Gradient(op), op)
+				minRTT.Set(n.coord.MinRTT(op), op)
+				curRTT.Set(n.coord.CurRTT(op), op)
+			}
+		})
+	})
 
 	// Streaming-PUT load signals (ADR-0038): the headline questions for the
 	// data path under load — how many writes are in flight, how much they move,
