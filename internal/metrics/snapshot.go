@@ -17,7 +17,16 @@ import (
 //	  string name = 1; string help = 2; string type = 3;
 //	  repeated string label_names = 4; repeated Sample samples = 5;
 //	}
-//	message Sample { repeated string labels = 1; double value = 2; }
+//	message Sample {
+//	  repeated string labels = 1; double value = 2; HistogramValue histogram = 3;
+//	}
+//	message HistogramValue {
+//	  repeated double bounds = 1; repeated uint64 counts = 2;
+//	  double sum = 3; uint64 count = 4;
+//	}
+//
+// The histogram field (Sample.histogram = 3, added v0.12) is additive: an older
+// snapshot without it decodes with a nil Histogram, and an older decoder skips it.
 
 // MarshalSnapshot encodes families to the wire snapshot.
 func MarshalSnapshot(families []Family) []byte {
@@ -56,6 +65,27 @@ func marshalSample(s Sample) []byte {
 	}
 	b = protowire.AppendTag(b, 2, protowire.Fixed64Type)
 	b = protowire.AppendFixed64(b, math.Float64bits(s.Value))
+	if s.Histogram != nil {
+		b = protowire.AppendTag(b, 3, protowire.BytesType)
+		b = protowire.AppendBytes(b, marshalHistogram(*s.Histogram))
+	}
+	return b
+}
+
+func marshalHistogram(h HistogramValue) []byte {
+	var b []byte
+	for _, bound := range h.Bounds {
+		b = protowire.AppendTag(b, 1, protowire.Fixed64Type)
+		b = protowire.AppendFixed64(b, math.Float64bits(bound))
+	}
+	for _, c := range h.Counts {
+		b = protowire.AppendTag(b, 2, protowire.VarintType)
+		b = protowire.AppendVarint(b, c)
+	}
+	b = protowire.AppendTag(b, 3, protowire.Fixed64Type)
+	b = protowire.AppendFixed64(b, math.Float64bits(h.Sum))
+	b = protowire.AppendTag(b, 4, protowire.VarintType)
+	b = protowire.AppendVarint(b, h.Count)
 	return b
 }
 
@@ -167,6 +197,17 @@ func unmarshalSample(b []byte) (Sample, error) {
 				return s, fmt.Errorf("metrics: sample value: %w", protowire.ParseError(n))
 			}
 			s.Value, b = math.Float64frombits(v), b[n:]
+		case num == 3 && typ == protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return s, fmt.Errorf("metrics: sample histogram: %w", protowire.ParseError(n))
+			}
+			b = b[n:]
+			h, err := unmarshalHistogram(v)
+			if err != nil {
+				return s, err
+			}
+			s.Histogram = &h
 		default:
 			n = protowire.ConsumeFieldValue(num, typ, b)
 			if n < 0 {
@@ -176,4 +217,48 @@ func unmarshalSample(b []byte) (Sample, error) {
 		}
 	}
 	return s, nil
+}
+
+func unmarshalHistogram(b []byte) (HistogramValue, error) {
+	var h HistogramValue
+	for len(b) > 0 {
+		num, typ, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return h, fmt.Errorf("metrics: histogram tag: %w", protowire.ParseError(n))
+		}
+		b = b[n:]
+		switch {
+		case num == 1 && typ == protowire.Fixed64Type:
+			v, n := protowire.ConsumeFixed64(b)
+			if n < 0 {
+				return h, fmt.Errorf("metrics: histogram bound: %w", protowire.ParseError(n))
+			}
+			h.Bounds, b = append(h.Bounds, math.Float64frombits(v)), b[n:]
+		case num == 2 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return h, fmt.Errorf("metrics: histogram count: %w", protowire.ParseError(n))
+			}
+			h.Counts, b = append(h.Counts, v), b[n:]
+		case num == 3 && typ == protowire.Fixed64Type:
+			v, n := protowire.ConsumeFixed64(b)
+			if n < 0 {
+				return h, fmt.Errorf("metrics: histogram sum: %w", protowire.ParseError(n))
+			}
+			h.Sum, b = math.Float64frombits(v), b[n:]
+		case num == 4 && typ == protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return h, fmt.Errorf("metrics: histogram total: %w", protowire.ParseError(n))
+			}
+			h.Count, b = v, b[n:]
+		default:
+			n = protowire.ConsumeFieldValue(num, typ, b)
+			if n < 0 {
+				return h, fmt.Errorf("metrics: histogram skip: %w", protowire.ParseError(n))
+			}
+			b = b[n:]
+		}
+	}
+	return h, nil
 }
