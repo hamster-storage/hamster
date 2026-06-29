@@ -46,8 +46,8 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 | v0.9 | Zero-downtime rolling upgrades: cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the [supported per-node roll](docs/UPGRADES.md) | ✅ |
 | v0.10 | Observability — one metrics registry rendered many ways: a Prometheus `/metrics` endpoint, a typed snapshot for the CLI and web console, and a durability summary on `status` | ✅ |
 | v0.11 | One clustered path — one flat CLI (a node is a one-node cluster), S3 on every node by default, proposal forwarding so any node accepts writes, and streaming PUT / Range GET / server-side copy / erasure-coded multipart so the cluster surface is a strict superset of single-node | ✅ |
-| v0.12 | Adaptive load shedding — latency-gradient concurrency limiting that sheds with 429 at the node's self-discovered capacity, request-latency histograms, and degradation (bad-drive) detection, with no OS primitives | 🚧 in progress |
-| v0.13 | Web console | planned |
+| v0.12 | Adaptive load shedding — latency-gradient concurrency limiting that sheds with 429 at the node's self-discovered capacity, request-latency histograms, and degradation (bad-drive) detection, with no OS primitives | ✅ |
+| v0.13 | Web console | 🚧 in progress |
 | TBD | TBD prior to v1 | planning |
 | v1.0 | Software updates and migrations supported from v1 | planned |
 
