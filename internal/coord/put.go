@@ -137,6 +137,18 @@ func (c *Coordinator) PutStream(bucket, key string, size int64, opts PutOptions,
 // (object checksum) are accumulated as it is fed and finalized at close.
 func (c *Coordinator) beginPut(bucket, key string, size int64, opts PutOptions, want func(), done func(PutResult, error)) *putOp {
 	now := c.cfg.Clock.Now()
+	// Time the write from admission to completion through the seam clock
+	// (ADR-0039 part 1): observe the service time only on the success terminal —
+	// a refused or failed PUT is not a latency sample. Wrapping done here covers
+	// every terminal path (commit success, abort, fail) and both commit
+	// strategies (a whole PutObject and a multipart UploadPart, both writes).
+	userDone := done
+	done = func(r PutResult, err error) {
+		if err == nil {
+			c.observeLatency(opPut, now)
+		}
+		userDone(r, err)
+	}
 	vid := meta.NewVersionID(now, c.cfg.Rand)
 
 	layout, ok := c.cfg.Layout()

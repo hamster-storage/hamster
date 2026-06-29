@@ -96,6 +96,11 @@ type cluster struct {
 	// keys this node holds (ADR-0032): the old key plus, during a rotation, the
 	// new one. Populated by encryptCluster and rotateKeyBegin.
 	keyring map[uint64]keys.KEK
+
+	// onLatency, when set, receives each coordinator's per-operation latency
+	// observation (ADR-0039 part 1) — the same hook internal/cluster wires to a
+	// request-latency histogram. nil (the default) leaves the recorder a no-op.
+	onLatency func(id seam.NodeID, op string, seconds float64)
 }
 
 // encReader is a deterministic per-node entropy source for DEK generation
@@ -205,6 +210,11 @@ func (c *cluster) boot(id seam.NodeID, raftID uint64) sim.BootFunc {
 				Entropy:    entropy,
 				Encryption: func() (keys.KEK, bool) { return c.kek, c.encrypt },
 				Keyring:    func(fp uint64) (keys.KEK, bool) { k, ok := c.keyring[fp]; return k, ok },
+				ObserveLatency: func(op string, seconds float64) {
+					if c.onLatency != nil {
+						c.onLatency(id, op, seconds)
+					}
+				},
 				Layout: func() (place.Layout, bool) {
 					// Distinct host/zone per node: spread collapses to the
 					// bare rendezvous ranking readObject verifies against. The

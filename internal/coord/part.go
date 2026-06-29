@@ -150,7 +150,7 @@ func (c *Coordinator) getMultipart(entry meta.VersionEntry, off, end int64, done
 			return
 		}
 		s := segs[j]
-		c.GetEntry(partEntry(entry.Parts[s.idx]), s.off, s.length, func(b []byte, err error) {
+		c.getEntry(partEntry(entry.Parts[s.idx]), s.off, s.length, func(b []byte, err error) {
 			if err != nil {
 				done(nil, err)
 				return

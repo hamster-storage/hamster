@@ -98,8 +98,9 @@ type Node struct {
 	// Observability (ADR-0035): the node's metrics registry, and the start time
 	// uptime is measured from (via the seam clock). Collectors registered on the
 	// registry read live cluster state at scrape time.
-	metrics    *metrics.Registry
-	s3Requests *metrics.Counter // incremented by the ServeS3 middleware
+	metrics       *metrics.Registry
+	s3Requests    *metrics.Counter   // incremented by the ServeS3 middleware
+	s3ReqDuration *metrics.Histogram // per-operation latency, observed by the coordinator (ADR-0039)
 
 	putInflight          *metrics.Gauge   // streaming PUTs currently in flight
 	putBytes             *metrics.Counter // object bytes accepted by completed PUTs
@@ -377,6 +378,17 @@ func Run(dataDir string, opts ...Option) (*Node, error) {
 			// the old key to unwrap and the new to rewrap.
 			Keyring: n.keyByFingerprint,
 			Entropy: rand.Reader,
+			// Per-operation latency (ADR-0039 part 1): the coordinator times each
+			// PUT and GET through the seam clock and reports the service time here,
+			// which feeds the request-latency histogram. The histogram is created
+			// later by initMetrics, so this reads the field at call time and
+			// tolerates the not-yet-built window (like the scrape collectors) —
+			// real S3 operations only run well after startup.
+			ObserveLatency: func(op string, seconds float64) {
+				if n.s3ReqDuration != nil {
+					n.s3ReqDuration.Observe(seconds, op)
+				}
+			},
 		})
 		// The continuous background scrubber (ADR-0009): every node starts it, but
 		// only the leader actually scrubs (it gates on leadership), so this simply
