@@ -57,11 +57,21 @@ func (c *Coordinator) Get(bucket, key string, off, length int64, done func([]byt
 // part, so observing here — not in getEntry — yields one sample per client GET,
 // never one per part.
 func (c *Coordinator) GetEntry(entry meta.VersionEntry, off, length int64, done func([]byte, error)) {
+	// Admission control (ADR-0039 part 4): shed at the per-GET boundary, before
+	// any shard fetch or decode. A multipart read recurses through getEntry per
+	// covering part — never GetEntry — so a client GET acquires exactly one slot
+	// regardless of part count, and the release below fires on the single
+	// per-GET terminal, so in-flight never leaks.
+	if !c.tryAcquire(opGet) {
+		done(nil, ErrShed)
+		return
+	}
 	started := c.cfg.Clock.Now()
 	c.getEntry(entry, off, length, func(b []byte, err error) {
 		if err == nil {
 			c.observeLatency(opGet, started)
 		}
+		c.release(opGet)
 		done(b, err)
 	})
 }

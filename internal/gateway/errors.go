@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/hamster-storage/hamster/internal/meta"
 	"github.com/hamster-storage/hamster/internal/sigv4"
@@ -71,8 +72,20 @@ var ErrNoSuchKey error = errNoSuchKey
 // ErrUnavailable is the backend saying "not now, try again": the cluster
 // is below its durability floor, or this node cannot commit (it is not
 // the Raft leader and v0.3 does not forward proposals). Mapped to the S3
-// SlowDown family — clients retry it.
+// SlowDown family (503) — clients retry it.
 var ErrUnavailable = errors.New("gateway: service temporarily unavailable")
+
+// ErrTooManyRequests is the backend saying "at capacity, retry": the node's
+// adaptive load shedder refused a new request at admission (ADR-0039 part 4).
+// Mapped to HTTP 429 Too Many Requests with Retry-After — kept distinct from
+// ErrUnavailable's 503 SlowDown, which means "cannot write safely right now"
+// (the durability floor or a non-leader), a different condition from "at
+// capacity." A 429 is always safe and fully retryable.
+var ErrTooManyRequests = errors.New("gateway: too many requests; retry")
+
+// shedRetryAfterSeconds is the Retry-After a 429 advertises: a short backoff,
+// since a shed clears as in-flight operations drain (often within a second).
+const shedRetryAfterSeconds = 1
 
 // mapError translates a metadata-layer error into its S3 wire form.
 func mapError(err error) *s3Error {
@@ -81,6 +94,8 @@ func mapError(err error) *s3Error {
 		return s3e
 	}
 	switch {
+	case errors.Is(err, ErrTooManyRequests):
+		return &s3Error{"TooManyRequests", http.StatusTooManyRequests, "The node is at capacity; retry."}
 	case errors.Is(err, ErrUnavailable):
 		return &s3Error{"SlowDown", http.StatusServiceUnavailable, "The service is temporarily unable to commit writes; retry."}
 	case errors.Is(err, meta.ErrNoSuchBucket):
@@ -159,6 +174,11 @@ type errorResponse struct {
 
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	s3e := mapError(err)
+	// A 429 carries Retry-After, the throttling backoff hint (ADR-0039 part 4) —
+	// kept distinct from the 503 SlowDown, which carries none.
+	if s3e.Status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", strconv.Itoa(shedRetryAfterSeconds))
+	}
 	// HEAD responses carry no body, per HTTP and S3 alike.
 	if r.Method == http.MethodHead {
 		w.WriteHeader(s3e.Status)

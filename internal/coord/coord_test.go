@@ -1772,3 +1772,92 @@ func TestCoordinatorMultipart(t *testing.T) {
 		t.Fatalf("degraded multipart GET of part 1: equal=%v err=%v", bytes.Equal(got, p1), err)
 	}
 }
+
+// TestPutShedsAtAdmissionAndDrains: adaptive load shedding (ADR-0039 parts 3/4).
+// Driving more concurrent PUTs than the current limit allows, the surplus is
+// refused at admission with ErrShed while every admitted PUT runs to completion
+// (invariant 1: shedding only refuses NEW work, never a started or committed
+// object). Once in-flight drains, shedding stops — a fresh PUT is admitted again.
+func TestPutShedsAtAdmissionAndDrains(t *testing.T) {
+	c := newCluster(t, 73, sim.NetConfig{MinLatency: 5 * time.Millisecond, MaxLatency: 10 * time.Millisecond}, 6, profile(t, "4+2"))
+	c.propose(meta.CreateBucket{ProposedAtUnixMS: 1, Bucket: bucket})
+	id := c.leader()
+	co := c.nodes[id].co
+
+	// The modest start limit, read on the loop before any PUT completes (so it has
+	// not yet adapted). A deterministic value the test reasons against.
+	limitCh := make(chan int, 1)
+	c.worlds[id].Loop.Post(func() { limitCh <- co.Limit("PUT") })
+	c.s.Run(tick)
+	limit := <-limitCh
+	if limit <= 0 {
+		t.Fatalf("PUT limit %d, want a positive start", limit)
+	}
+
+	// Queue limit+extra PUTs before advancing the sim, so every admission decision
+	// is made (synchronously, on the loop) before any PUT's network ack returns:
+	// exactly `limit` admit and the rest shed, regardless of completion order.
+	extra := 5
+	total := limit + extra
+	errsByIdx := make([]error, total)
+	done := 0
+	for i := 0; i < total; i++ {
+		i := i
+		key := fmt.Sprintf("shed-%d", i)
+		body := randomBody(uint64(1000+i), 256<<10)
+		c.worlds[id].Loop.Post(func() {
+			co.Put(bucket, key, body, coord.PutOptions{}, func(_ coord.PutResult, e error) {
+				errsByIdx[i] = e
+				done++
+			})
+		})
+	}
+	for range 8000 {
+		c.s.Run(tick)
+		if done == total {
+			break
+		}
+	}
+	if done != total {
+		t.Fatalf("only %d/%d PUTs finished", done, total)
+	}
+
+	admitted, shed := 0, 0
+	for i, e := range errsByIdx {
+		switch {
+		case e == nil:
+			admitted++
+			// An admitted PUT really committed: invariant 1 — it ran to completion.
+			if _, ok := c.entry(fmt.Sprintf("shed-%d", i)); !ok {
+				t.Fatalf("admitted PUT shed-%d did not commit metadata", i)
+			}
+		case errors.Is(e, coord.ErrShed):
+			shed++
+			// A shed PUT touched nothing: no object exists for it.
+			if _, ok := c.entry(fmt.Sprintf("shed-%d", i)); ok {
+				t.Fatalf("a shed PUT shed-%d committed metadata; shedding must touch nothing", i)
+			}
+		default:
+			t.Fatalf("PUT shed-%d unexpected error: %v", i, e)
+		}
+	}
+	if admitted != limit {
+		t.Fatalf("admitted %d, want the limit %d", admitted, limit)
+	}
+	if shed != extra {
+		t.Fatalf("shed %d, want %d (limit %d, total %d)", shed, extra, limit, total)
+	}
+
+	// In-flight drained back to zero on every terminal — no leak.
+	inflCh := make(chan int, 1)
+	c.worlds[id].Loop.Post(func() { inflCh <- co.Inflight("PUT") })
+	c.s.Run(tick)
+	if infl := <-inflCh; infl != 0 {
+		t.Fatalf("PUT inflight %d after drain, want 0", infl)
+	}
+
+	// Shedding has stopped: a fresh PUT is admitted and succeeds.
+	if _, err := c.put("after-drain", randomBody(9, 256<<10)); err != nil {
+		t.Fatalf("PUT after the surge drained: %v", err)
+	}
+}

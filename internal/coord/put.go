@@ -136,17 +136,31 @@ func (c *Coordinator) PutStream(bucket, key string, size int64, opts PutOptions,
 // it in chunks under backpressure. The body's plaintext MD5 (ETag) and SHA-256
 // (object checksum) are accumulated as it is fed and finalized at close.
 func (c *Coordinator) beginPut(bucket, key string, size int64, opts PutOptions, want func(), done func(PutResult, error)) *putOp {
+	// Admission control (ADR-0039 part 4): the very first thing, before any
+	// placement, encryption, or shard work. If the node is at its current PUT
+	// limit, shed immediately with ErrShed (HTTP 429) — a cheap, fully retryable
+	// refusal that never touches durability. A multipart UploadPart shares this
+	// path, so it is admitted under the same PUT limit.
+	if !c.tryAcquire(opPut) {
+		done(PutResult{}, ErrShed)
+		return nil
+	}
 	now := c.cfg.Clock.Now()
 	// Time the write from admission to completion through the seam clock
 	// (ADR-0039 part 1): observe the service time only on the success terminal —
 	// a refused or failed PUT is not a latency sample. Wrapping done here covers
 	// every terminal path (commit success, abort, fail) and both commit
-	// strategies (a whole PutObject and a multipart UploadPart, both writes).
+	// strategies (a whole PutObject and a multipart UploadPart, both writes) — so
+	// the limiter release below also runs on every terminal, exactly once (done
+	// fires once), and in-flight never leaks.
 	userDone := done
 	done = func(r PutResult, err error) {
 		if err == nil {
 			c.observeLatency(opPut, now)
 		}
+		// Release after observing, so the just-folded latency sample is already in
+		// the gradient when the limiter recomputes the limit from it.
+		c.release(opPut)
 		userDone(r, err)
 	}
 	vid := meta.NewVersionID(now, c.cfg.Rand)

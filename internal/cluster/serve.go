@@ -337,6 +337,9 @@ func (c *clusterObjects) Put(bucket, key string, body io.Reader, size int64, opt
 		return nil, meta.VersionID{}, feedErr // raw, so the gateway classifies auth vs other
 	}
 	if out.err != nil {
+		if errors.Is(out.err, coord.ErrShed) {
+			c.n.s3RequestShed.Inc("PUT")
+		}
 		return nil, meta.VersionID{}, mapCoordErr(out.err)
 	}
 	c.n.putBytes.Add(float64(size))
@@ -427,6 +430,9 @@ func (c *clusterObjects) PutPart(bucket, key string, uploadID meta.VersionID, pa
 		return nil, feedErr // raw, so the gateway classifies auth vs other
 	}
 	if out.err != nil {
+		if errors.Is(out.err, coord.ErrShed) {
+			c.n.s3RequestShed.Inc("PUT")
+		}
 		return nil, mapCoordErr(out.err)
 	}
 	c.n.putBytes.Add(float64(size))
@@ -444,6 +450,9 @@ func (c *clusterObjects) GetRange(entry meta.VersionEntry, off, length int64) ([
 	})
 	out := <-ch
 	if out.err != nil {
+		if errors.Is(out.err, coord.ErrShed) {
+			c.n.s3RequestShed.Inc("GET")
+		}
 		return nil, mapCoordErr(out.err)
 	}
 	return out.data, nil
@@ -453,10 +462,16 @@ func (c *clusterObjects) DeleteShards(e meta.VersionEntry) {
 	c.n.loop.Post(func() { c.n.coord.DeleteShards(e) })
 }
 
-// mapCoordErr turns coordinator refusals into the gateway's retryable
-// unavailability; everything else passes through for the 500 it is.
+// mapCoordErr turns coordinator refusals into the gateway's retryable errors;
+// everything else passes through for the 500 it is. The two retryable cases stay
+// distinct (ADR-0039 part 4): a shed at admission is "at capacity" → 429, while
+// the durability-floor refusal and the unreadable read are "cannot serve safely
+// right now" → 503 SlowDown.
 func mapCoordErr(err error) error {
-	if errors.Is(err, coord.ErrRefused) || errors.Is(err, coord.ErrUnreadable) {
+	switch {
+	case errors.Is(err, coord.ErrShed):
+		return fmt.Errorf("%w: %v", gateway.ErrTooManyRequests, err)
+	case errors.Is(err, coord.ErrRefused) || errors.Is(err, coord.ErrUnreadable):
 		return fmt.Errorf("%w: %v", gateway.ErrUnavailable, err)
 	}
 	return err
