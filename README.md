@@ -35,17 +35,17 @@ High level and honest: a check mark means shipped and tested, not promised. Vers
 
 | Version | Features | Status |
 |---|---|---|
-| [v0.1](https://github.com/hamster-storage/hamster/releases/tag/v0.1.0) | <ul><li>Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with <code>aws</code>, <code>rclone</code>, <code>restic</code>, <code>s3cmd</code>)</li><li>Durable single-node store with streaming uploads</li></ul> | ✅ |
-| [v0.2](https://github.com/hamster-storage/hamster/releases/tag/v0.2.0) | Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | ✅ |
-| [v0.3](https://github.com/hamster-storage/hamster/releases/tag/v0.3.0) | Erasure-coded durability with self-healing repair, the S3 endpoint served from the cluster | ✅ |
-| [v0.4](https://github.com/hamster-storage/hamster/releases/tag/v0.4.0) | Partitioned placement (failure-domain spread, capacity weighting) and online rebalancing — drain, replace, remove, grow, downsize — plus a continuous background scrubber that self-heals bitrot and lost shards | ✅ |
-| [v0.5](https://github.com/hamster-storage/hamster/releases/tag/v0.5.0) | Object versioning — per-bucket versioning config, version IDs, delete markers, `ListObjectVersions`, by-version GET/DELETE — on the single node and the cluster | ✅ |
-| [v0.6](https://github.com/hamster-storage/hamster/releases/tag/v0.6.0) | Object lock and WORM retention — GOVERNANCE and COMPLIANCE modes, legal holds, bucket default retention — on the single node and the cluster | ✅ |
-| [v0.7](https://github.com/hamster-storage/hamster/releases/tag/v0.7.0) | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | ✅ |
-| [v0.8](https://github.com/hamster-storage/hamster/releases/tag/v0.8.0) | Key and CA rotation: master-key rewrap and CA custody/rotation — both no-downtime, metadata- or trust-only | ✅ |
-| [v0.9](https://github.com/hamster-storage/hamster/releases/tag/v0.9.0) | Zero-downtime rolling upgrades: cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the [supported per-node roll](docs/UPGRADES.md) | ✅ |
-| [v0.10](https://github.com/hamster-storage/hamster/releases/tag/v0.10.0) | Observability — one metrics registry rendered many ways: a Prometheus `/metrics` endpoint, a typed snapshot for the CLI and web console, and a durability summary on `status` | ✅ |
-| [v0.11](https://github.com/hamster-storage/hamster/releases/tag/v0.11.0) | One clustered path — one flat CLI (a node is a one-node cluster), S3 on every node by default, proposal forwarding so any node accepts writes, and streaming PUT / Range GET / server-side copy / erasure-coded multipart so the cluster surface is a strict superset of single-node | ✅ |
+| v0.1 | <ul><li>Core S3 API — buckets, objects, listings, multipart, presigned URLs, SigV4 auth (verified with <code>aws</code>, <code>rclone</code>, <code>restic</code>, <code>s3cmd</code>)</li><li>Durable single-node store with streaming uploads</li></ul> | ✅ |
+| v0.2 | Clustering — Raft-replicated metadata, mTLS between nodes, token-based join | ✅ |
+| v0.3 | Erasure-coded durability with self-healing repair, the S3 endpoint served from the cluster | ✅ |
+| v0.4 | Partitioned placement (failure-domain spread, capacity weighting) and online rebalancing — drain, replace, remove, grow, downsize — plus a continuous background scrubber that self-heals bitrot and lost shards | ✅ |
+| v0.5 | Object versioning — per-bucket versioning config, version IDs, delete markers, `ListObjectVersions`, by-version GET/DELETE — on the single node and the cluster | ✅ |
+| v0.6 | Object lock and WORM retention — GOVERNANCE and COMPLIANCE modes, legal holds, bucket default retention — on the single node and the cluster | ✅ |
+| v0.7 | Encryption at rest (SSE-S3) — envelope encryption, per-object keys wrapped by a cluster master key from a pluggable source | ✅ |
+| v0.8 | Key and CA rotation: master-key rewrap and CA custody/rotation — both no-downtime, metadata- or trust-only | ✅ |
+| v0.9 | Zero-downtime rolling upgrades: cluster version advertisement, the health interlock (`cluster can-stop`), the end-to-end upgrade test suite, and the [supported per-node roll](docs/UPGRADES.md) | ✅ |
+| v0.10 | Observability — one metrics registry rendered many ways: a Prometheus `/metrics` endpoint, a typed snapshot for the CLI and web console, and a durability summary on `status` | ✅ |
+| v0.11 | One clustered path — one flat CLI (a node is a one-node cluster), S3 on every node by default, proposal forwarding so any node accepts writes, and streaming PUT / Range GET / server-side copy / erasure-coded multipart so the cluster surface is a strict superset of single-node | ✅ |
 | v0.12 | Adaptive load shedding — latency-gradient concurrency limiting that sheds with 429 at the node's self-discovered capacity, request-latency histograms, and degradation (bad-drive) detection, with no OS primitives | 🚧 in progress |
 | v0.13 | Web console | planned |
 | TBD | TBD prior to v1 | planning |

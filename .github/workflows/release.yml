@@ -49,19 +49,19 @@ jobs:
             echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # CLAUDE.md release policy: the README version-status table is flipped to ✅ and
-      # linked to the release tag in the commit set that precedes the tag — by hand,
-      # because the row carries a written one-line summary of what shipped that a
-      # script must not author. This step only *verifies* that flip happened (it never
-      # writes the prose), and only on a real tag push, failing the release loudly if
-      # the row is missing or unlinked.
-      - name: verify README version row is flipped and linked
+      # CLAUDE.md release policy: the README version-status table is flipped to ✅ in
+      # the commit set that precedes the tag — by hand, because the row carries a
+      # written one-line summary of what shipped that a script must not author. This
+      # step only *verifies* that flip happened (it never writes the prose), and only
+      # on a real tag push, failing the release loudly if the row is not ✅. (Rows are
+      # plain text, not links — release pages are reached from the Releases tab.)
+      - name: verify README version row is flipped to ✅
         if: github.event_name == 'push'
         run: |
           tag="${{ steps.meta.outputs.tag }}"
-          url="https://github.com/${{ github.repository }}/releases/tag/${tag}"
-          if ! grep -qF "$url" README.md; then
-            echo "::error::README has no row linking to ${url}. Flip the version-status table to ✅ and link it to the tag in the commit before tagging (CLAUDE.md release policy)."
+          ver="${tag%.*}"   # v0.11.0 -> v0.11
+          if ! grep -F "$ver" README.md | grep -qF "✅"; then
+            echo "::error::README has no ✅ row for ${ver}. Flip the version-status table to ✅ in the commit before tagging (CLAUDE.md release policy)."
             exit 1
           fi
 

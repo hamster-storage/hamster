@@ -170,9 +170,9 @@ tasks:
         if git rev-parse -q --verify "refs/tags/{{.VERSION}}" >/dev/null; then
           echo "release: tag {{.VERSION}} already exists" >&2; exit 1
         fi
-        url="https://github.com/hamster-storage/hamster/releases/tag/{{.VERSION}}"
-        if ! grep -qF "$url" README.md; then
-          echo "release: README has no row linking to $url — flip the version-status table to ✅ and link it first (CLAUDE.md release policy)" >&2; exit 1
+        ver=$(echo "{{.VERSION}}" | sed -E 's/\.[0-9]+$//')
+        if ! grep -F "$ver" README.md | grep -qF "✅"; then
+          echo "release: README has no ✅ row for $ver — flip the version-status table to ✅ first (CLAUDE.md release policy)" >&2; exit 1
         fi
         title="{{.TITLE}}"; [ -n "$title" ] || title="{{.VERSION}}"
         git tag -a "{{.VERSION}}" -m "$title"
