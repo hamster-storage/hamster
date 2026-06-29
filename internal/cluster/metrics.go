@@ -139,6 +139,37 @@ func (n *Node) initMetrics() {
 		})
 	})
 
+	// Adaptive load shedding (ADR-0039 parts 3/4): the dynamic concurrency limit
+	// and live in-flight count per operation, read on the loop by a scrape
+	// collector (the gradient gauges' pattern), plus the count of requests shed at
+	// admission. The shed counter is incremented by the ServeS3 path when a
+	// request comes back ErrShed (→ HTTP 429); the limit and in-flight gauges are
+	// live coordinator state.
+	n.s3RequestShed = r.NewCounter("hamster_s3_request_shed_total",
+		"S3 requests shed at admission by the adaptive load shedder, by method (ADR-0039).", "method")
+	limit := r.NewGauge("hamster_s3_request_limit",
+		"Adaptive concurrency limit per operation (ADR-0039): the dynamic ceiling admission control holds.",
+		"method")
+	inflight := r.NewGauge("hamster_s3_request_inflight",
+		"Admitted-but-not-yet-completed data-plane operations per method (ADR-0039).",
+		"method")
+	for _, op := range coord.GradientOps() {
+		n.s3RequestShed.Add(0, op)
+		limit.Set(0, op)
+		inflight.Set(0, op)
+	}
+	r.AddCollector(func() {
+		if n.coord == nil {
+			return
+		}
+		n.on(func() {
+			for _, op := range coord.GradientOps() {
+				limit.Set(float64(n.coord.Limit(op)), op)
+				inflight.Set(float64(n.coord.Inflight(op)), op)
+			}
+		})
+	})
+
 	// Streaming-PUT load signals (ADR-0038): the headline questions for the
 	// data path under load — how many writes are in flight, how much they move,
 	// and how often the feeder is throttled by the shard streams (the

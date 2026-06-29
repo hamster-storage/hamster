@@ -101,6 +101,7 @@ type Node struct {
 	metrics       *metrics.Registry
 	s3Requests    *metrics.Counter   // incremented by the ServeS3 middleware
 	s3ReqDuration *metrics.Histogram // per-operation latency, observed by the coordinator (ADR-0039)
+	s3RequestShed *metrics.Counter   // requests shed at admission by the load shedder, by method (ADR-0039)
 
 	putInflight          *metrics.Gauge   // streaming PUTs currently in flight
 	putBytes             *metrics.Counter // object bytes accepted by completed PUTs

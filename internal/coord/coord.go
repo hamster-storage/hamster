@@ -129,6 +129,10 @@ type Coordinator struct {
 	// tracker per op type since a PUT (k+m shards) and a GET (k shards) have
 	// different cost profiles. Loop-owned, fed from observeLatency.
 	gradients map[string]*tracker
+	// limiters holds the per-operation adaptive concurrency limit and in-flight
+	// count (ADR-0039 parts 3/4), one per op type for the same reason. Loop-owned;
+	// tryAcquire gates admission and release adapts the limit on every terminal.
+	limiters map[string]*limiter
 	// sweeping is the single-flight guard shared by every repair sweep — the
 	// operator optimize, the transition migration, and the background scrubber —
 	// so at most one runs at a time. Loop-owned, so no lock.
@@ -142,6 +146,7 @@ func New(cfg Config) *Coordinator {
 		cfg:       cfg,
 		liveness:  newLiveness(),
 		gradients: map[string]*tracker{opPut: newTracker(), opGet: newTracker()},
+		limiters:  map[string]*limiter{opPut: newLimiter(), opGet: newLimiter()},
 	}
 }
 
