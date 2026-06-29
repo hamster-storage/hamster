@@ -35,6 +35,12 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # 'every' makes the negations act as exclusions: a file is `code` only
+          # when it matches ALL patterns. Without it the patterns are OR'd, so a
+          # docs-only change still matches `**` (and `!docs/**` for a root file)
+          # and runs the whole heavy suite — which then flakes the gate on the
+          # real-process cluster e2e for a pure README edit.
+          predicate-quantifier: 'every'
           filters: |
             code:
               - '**'
