@@ -50,7 +50,27 @@ func (c *Coordinator) Get(bucket, key string, off, length int64, done func([]byt
 // current version and delegates here; a versioned GET resolves the chosen
 // version and calls this directly. The entry must be a stored object (a delete
 // marker holds no shards). done fires exactly once on the loop.
+//
+// This is the timed boundary of a GET (ADR-0039 part 1): the read is clocked
+// from admission to completion through the seam clock, observing the service
+// time on success only. A multipart read recurses through getEntry per covering
+// part, so observing here — not in getEntry — yields one sample per client GET,
+// never one per part.
 func (c *Coordinator) GetEntry(entry meta.VersionEntry, off, length int64, done func([]byte, error)) {
+	started := c.cfg.Clock.Now()
+	c.getEntry(entry, off, length, func(b []byte, err error) {
+		if err == nil {
+			c.observeLatency(opGet, started)
+		}
+		done(b, err)
+	})
+}
+
+// getEntry is the untimed read worker behind GetEntry: it resolves placement and
+// geometry, fetches shards, and decodes. getMultipart recurses through it per
+// part, so it carries no latency observation — that lives on GetEntry, the
+// per-GET boundary.
+func (c *Coordinator) getEntry(entry meta.VersionEntry, off, length int64, done func([]byte, error)) {
 	if off < 0 {
 		off = 0
 	}

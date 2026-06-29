@@ -90,6 +90,18 @@ func (n *Node) initMetrics() {
 	n.s3Requests = r.NewCounter("hamster_s3_requests_total",
 		"S3 requests served by this node, by method and HTTP status code.", "method", "code")
 
+	// Per-operation data-plane latency (ADR-0039 part 1, the ADR-0035 follow-on):
+	// the coordinator times each PUT and GET on the loop through the seam clock,
+	// from admission to completion, and reports the service time via the
+	// ObserveLatency hook wired in node.go — the same coord→cluster decoupling the
+	// streaming load gauges use (the coordinator never imports internal/metrics).
+	// Only a successful operation is observed, so the distribution is service time,
+	// the baseline the load shedder's minRTT/curRTT will build on. The method label
+	// matches the s3_requests_total counter's PUT/GET.
+	n.s3ReqDuration = r.NewHistogram("hamster_s3_request_duration_seconds",
+		"Data-plane S3 operation latency in seconds, by method (ADR-0039), from admission to completion.",
+		metrics.DefaultLatencyBuckets, "method")
+
 	// Streaming-PUT load signals (ADR-0038): the headline questions for the
 	// data path under load — how many writes are in flight, how much they move,
 	// and how often the feeder is throttled by the shard streams (the

@@ -22,6 +22,7 @@ package coord
 import (
 	"io"
 	"math/rand/v2"
+	"time"
 
 	"github.com/hamster-storage/hamster/internal/datapath"
 	"github.com/hamster-storage/hamster/internal/keys"
@@ -97,6 +98,19 @@ type Config struct {
 	// Loop-safe — called on the loop.
 	Keyring func(fingerprint uint64) (keys.KEK, bool)
 
+	// ObserveLatency, if set, receives the service time of each completed
+	// data-plane operation — a PUT or a GET — measured through Clock from
+	// admission to completion (ADR-0039 part 1, the open ADR-0035 follow-on).
+	// op is one of "PUT"/"GET" and seconds is the duration; only a successful
+	// completion is reported, since a refused or failed operation is not a
+	// service-time sample — this latency is the baseline the load shedder's
+	// minRTT/curRTT will build on. The coordinator never imports
+	// internal/metrics; internal/cluster supplies this hook wired to a
+	// request-latency histogram, the same way the streaming load gauges stay in
+	// the cluster layer. nil disables it (the default in tests). Called on the
+	// loop, so recording stays deterministic under the simulator.
+	ObserveLatency func(op string, seconds float64)
+
 	// PutChunkBytes and PutMaxOutstanding tune the streaming-PUT backpressure
 	// window: the feeder reads PutChunkBytes-sized chunks, and the coordinator
 	// keeps at most PutMaxOutstanding of them requested-but-not-yet-encoded, so
@@ -121,6 +135,24 @@ type Coordinator struct {
 // New returns a Coordinator over cfg.
 func New(cfg Config) *Coordinator {
 	return &Coordinator{cfg: cfg, liveness: newLiveness()}
+}
+
+// Operation names for the latency recorder (ADR-0039), matching the method
+// labels on the existing hamster_s3_requests_total counter.
+const (
+	opPut = "PUT"
+	opGet = "GET"
+)
+
+// observeLatency reports a completed operation's service time to the configured
+// recorder (ADR-0039 part 1): the seam-clock duration from started to now, so
+// the measurement is deterministic and simulator-driven. A nil recorder (the
+// default in tests) is a no-op. Call on the loop, on the success terminal only.
+func (c *Coordinator) observeLatency(op string, started time.Time) {
+	if c.cfg.ObserveLatency == nil {
+		return
+	}
+	c.cfg.ObserveLatency(op, c.cfg.Clock.Now().Sub(started).Seconds())
 }
 
 // beginSweep claims the single-flight guard, returning false if a sweep is
