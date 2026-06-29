@@ -147,6 +147,16 @@ type Member struct {
 	// records them.
 	BinaryVersion string
 	Generation    uint32
+	// Degraded is the answering node's self-assessment of its OWN data-plane
+	// service floor (ADR-0039 part 5): true while minRTT has stayed a factor above
+	// its baseline — a failing drive, a throttled volume. Unlike Down (this node's
+	// view of a *peer*), Degraded is a node judging *itself*, so it is set only on
+	// the answering node's own row in the member list; every other row reads false
+	// because no node can assess another's floor without new replication
+	// (advertising it into NodeRecord like the version — a deliberate follow-on).
+	// A degraded node is still up and serving: it is a candidate health signal for
+	// the operator, never an automatic action.
+	Degraded bool
 }
 
 type joinRequest struct {
@@ -441,7 +451,8 @@ func encodeMemberMsg(m Member) []byte {
 	b = putBool(b, 9, m.Down)
 	b = putBool(b, 10, m.Draining)
 	b = putString(b, 11, m.BinaryVersion)
-	return putUint(b, 12, uint64(m.Generation))
+	b = putUint(b, 12, uint64(m.Generation))
+	return putBool(b, 13, m.Degraded)
 }
 
 func decodeMemberMsg(buf []byte) (Member, error) {
@@ -472,6 +483,8 @@ func decodeMemberMsg(buf []byte) (Member, error) {
 			m.BinaryVersion = string(f.b)
 		case 12:
 			m.Generation = uint32(f.u)
+		case 13:
+			m.Degraded = f.u != 0
 		}
 		return nil
 	})

@@ -548,6 +548,14 @@ func (n *Node) members() []Member {
 			if rec, ok := recs[string(m.Addr)]; ok {
 				mem.BinaryVersion, mem.Generation = rec.BinaryVersion, rec.Generation
 			}
+			// Node degradation (ADR-0039 part 5) is a self-assessment of a node's
+			// own service floor, so only the answering node can fill it in — set it
+			// on this node's own row from its coordinator. Other rows stay false:
+			// cross-node degraded reporting (advertising it into NodeRecord like the
+			// version) is a deliberate follow-on, not built for a candidate signal.
+			if n.coord != nil && mem.NodeID == n.cfg.NodeID {
+				mem.Degraded = n.coord.Degraded()
+			}
 			ms = append(ms, mem)
 		}
 		return ms // a wedged or stopping loop yields nil — callers see an empty cluster

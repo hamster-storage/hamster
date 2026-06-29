@@ -743,6 +743,33 @@ func TestMemberDownRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMemberDegradedRoundTrip pins the additive STATE field (Member.Degraded,
+// ADR-0039 part 5) through the status-protocol member codec: a degraded member
+// encodes and decodes back degraded, and a member without field 13 decodes to
+// not-degraded — back-compat with any peer that predates the field. The field is
+// the answering node's self-assessment of its own service floor; it is detection
+// only and never implies an automatic action.
+func TestMemberDegradedRoundTrip(t *testing.T) {
+	m := Member{RaftID: 7, NodeID: "n7", Dial: "127.0.0.1:9", Host: "h1", Zone: "za", Capacity: 3, Degraded: true}
+	got, err := decodeMemberMsg(encodeMemberMsg(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != m {
+		t.Fatalf("member round trip diverged: %+v vs %+v", got, m)
+	}
+	// A healthy member omits field 13 entirely (zero values are not encoded); it
+	// must still decode as not-degraded.
+	healthy := Member{RaftID: 7, NodeID: "n7"}
+	gotHealthy, err := decodeMemberMsg(encodeMemberMsg(healthy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotHealthy.Degraded {
+		t.Fatalf("a healthy member decoded as degraded: %+v", gotHealthy)
+	}
+}
+
 // TestClusterZoneLabels proves failure-domain labels (ADR-0016) flow end to
 // end: -zone at join travels the join protocol, the issuer records it, the
 // leader's reconcile composes a labeled layout, and it surfaces in status —

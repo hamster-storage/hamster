@@ -51,6 +51,9 @@ func TestClusterMetricsEndpoint(t *testing.T) {
 		"hamster_put_backpressure_waits_total 0",
 		// The S3 request counter, after the probe above.
 		`hamster_s3_requests_total{method="GET",code="403"} 1`,
+		// Node degradation (ADR-0039 part 5): a healthy node reads 0. Detection
+		// only — present from the first scrape, never an automatic action.
+		"hamster_node_degraded 0",
 	}
 
 	// The Prometheus scrape surface on the admin port.
